@@ -22,7 +22,7 @@ leaf-server = { path = "crates/leaf-server" }
 
 anyhow = "1"
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "fs", "time", "sync", "net"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "fs", "time", "sync", "net", "process"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde = { version = "1", features = ["derive"] }
@@ -31,11 +31,14 @@ toml = "0.9"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "macros", "migrate", "chrono"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 axum = "0.8"
+poise = "0.6"
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 object_store = { version = "0.12", features = ["aws"] }
 bytes = "1"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
+kamadak-exif = "0.6"
 rand = "0.9"
 tempfile = "3"
 

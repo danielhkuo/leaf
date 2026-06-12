@@ -6,6 +6,26 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
+ignore = [
+    # serenity 0.12 proc-macros depend on the unmaintained `derivative`.
+    # No serenity-0.12-compatible fix; resolved upstream in serenity-next.
+    # Revisit on serenity major bump.
+    "RUSTSEC-2024-0388",
+    # rustls-webpki 0.102.x CRL distribution-point matching bug. leaf does
+    # not configure CRLs, and the default UnknownStatusPolicy::Deny fails
+    # safe. Fixed only in 0.103, which serenity 0.12's tokio-tungstenite
+    # pin cannot take. Revisit on serenity major bump.
+    "RUSTSEC-2026-0049",
+    # rustls-webpki URI name-constraint acceptance; leaf asserts no URI
+    # names. Same 0.103-only fix as above.
+    "RUSTSEC-2026-0098",
+    # rustls-webpki wildcard name-constraint acceptance; same family and
+    # same 0.103-only fix as above.
+    "RUSTSEC-2026-0099",
+    # rustls-webpki reachable panic in CRL *parsing*; leaf never supplies
+    # CRLs, so the parse path is unreachable. Same 0.103-only fix.
+    "RUSTSEC-2026-0104",
+]
 
 [licenses]
 version = 2

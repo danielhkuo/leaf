@@ -19,6 +19,12 @@ RUN apt-get update \
 
 RUN groupadd --system leaf && useradd --system --gid leaf --create-home leaf
 
+# /data must exist owned by the runtime user BEFORE the VOLUME declaration:
+# named volumes copy ownership from the image path at first mount. Without
+# this, the mountpoint is root-owned and the non-root process cannot write
+# leaf.conf or the database (the classic walpurgisbot-v2 EACCES).
+RUN mkdir -p /data && chown leaf:leaf /data
+
 COPY --from=build /src/target/release/leaf /usr/local/bin/leaf
 COPY --from=build /src/target/release/leaf-migrate /usr/local/bin/leaf-migrate
 

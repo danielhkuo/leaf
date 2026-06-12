@@ -6,6 +6,7 @@
 pub mod config;
 pub mod db;
 pub mod domain;
+pub mod media;
 pub mod stats;
 
 #[cfg(test)]

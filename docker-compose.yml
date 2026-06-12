@@ -14,7 +14,10 @@ services:
     volumes:
       - leaf-data:/data
     environment:
-      LOG_LEVEL: info
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Dev only: set in .env to register slash commands guild-scoped
+      # (instant) instead of globally (up to ~1h propagation).
+      DEV_GUILD_ID: ${DEV_GUILD_ID:-}
     stop_grace_period: 30s
 
   # Cloudflare Tunnel: publishes leaf at your domain without port forwarding.

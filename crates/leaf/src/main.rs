@@ -88,7 +88,9 @@ async fn run_setup_mode(config_path: PathBuf, bind: SocketAddr) -> anyhow::Resul
     Ok(())
 }
 
-/// Normal operation: database, HTTP server, and (from Phase 4) the bot.
+/// Normal operation: database, HTTP server, and the gateway bot. A gateway
+/// failure (e.g. token revoked after setup) is logged loudly but does not
+/// take the HTTP server down; a server failure ends the process.
 async fn run_mode(
     data_dir: &std::path::Path,
     bind: SocketAddr,
@@ -100,18 +102,53 @@ async fn run_mode(
         .with_context(|| format!("opening database {}", db_path.display()))?;
     info!(db = %db_path.display(), "database ready");
 
-    // Gateway connection lands in Phase 4; config is validated and held.
-    info!(client_id = %config.client_id, "run mode (gateway connection arrives in Phase 4)");
+    // One shutdown signal fans out to the server and the gateway.
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    tokio::spawn(async move {
+        shutdown_signal().await;
+        let _send = shutdown_tx.send(true);
+    });
+
+    let bot_cfg = leaf_bot::BotConfig {
+        token: config.discord_token.clone(),
+        dev_guild: std::env::var("DEV_GUILD_ID")
+            .ok()
+            .and_then(|v| v.parse().ok()),
+    };
+    let bot_pool = pool.clone();
+    let bot_shutdown = shutdown_rx.clone();
+    let bot = tokio::spawn(async move {
+        if let Err(e) = leaf_bot::run(bot_cfg, bot_pool, bot_shutdown).await {
+            // Loud but non-fatal: the HTTP server (and setup-mode recovery
+            // via --reconfigure) must stay reachable on a dead gateway.
+            tracing::error!(
+                error = format!("{e:#}"),
+                "gateway exited with error; server continues"
+            );
+        }
+    });
 
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .with_context(|| format!("binding {bind}"))?;
     info!(%bind, "serving");
 
+    let mut server_shutdown = shutdown_rx;
     axum::serve(listener, leaf_server::run::router())
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(async move {
+            while !*server_shutdown.borrow_and_update() {
+                if server_shutdown.changed().await.is_err() {
+                    return;
+                }
+            }
+        })
         .await
         .context("server failed")?;
+
+    // Server is down (shutdown); wait for the gateway task to drain.
+    if let Err(e) = bot.await {
+        tracing::error!(error = %e, "gateway task panicked");
+    }
 
     pool.close().await;
     info!("shut down cleanly");

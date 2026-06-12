@@ -7,7 +7,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use sqlx::SqlitePool;
+pub use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 
 pub mod guilds;

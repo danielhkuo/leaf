@@ -34,11 +34,14 @@ Rules:
 
 ---
 
-> **Status (2026-06-11)**: Phases 1–3 implemented and green locally (fmt,
-> clippy pedantic-deny, 40 tests, cargo-deny, sqlx offline artifact, live
-> boot smoke). Outstanding human verification: push to GitHub to see CI run,
-> `docker compose up` walkthrough of the real setup page, and live-credential
-> validation (needs a real bot token + R2 bucket). Phase 4 is next.
+> **Status (2026-06-12)**: Phases 1–5 implemented and green locally (fmt,
+> clippy pedantic-deny, 45 tests + 1 ignored ffmpeg test verified manually,
+> cargo-deny with documented serenity-stack advisory ignores, sqlx offline
+> artifact, boot + dead-gateway smoke tests). Phases 1–3 committed and
+> human-verified. **Blocked on a dev Discord application** (bot token,
+> client id/secret, dev guild) to live-verify Phase 4 (`/ping`, greeting,
+> reconnect) before building Phase 6+ commands on top. Set `DEV_GUILD_ID`
+> for instant guild-scoped command registration during development.
 
 ## Phase 1 — Workspace, toolchain & CI
 
