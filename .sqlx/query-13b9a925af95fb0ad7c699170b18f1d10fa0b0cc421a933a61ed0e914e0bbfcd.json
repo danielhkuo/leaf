@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO guild_settings\n                   (guild_id, setup_complete, log_channel_id, watched_channels,\n                    creator_role_id, timezone, max_series_per_user,\n                    min_account_age_days, min_membership_age_days,\n                    sprout_enabled, sprout_threshold, active_persona)\n               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\n               ON CONFLICT (guild_id) DO UPDATE SET\n                    setup_complete = excluded.setup_complete,\n                    log_channel_id = excluded.log_channel_id,\n                    watched_channels = excluded.watched_channels,\n                    creator_role_id = excluded.creator_role_id,\n                    timezone = excluded.timezone,\n                    max_series_per_user = excluded.max_series_per_user,\n                    min_account_age_days = excluded.min_account_age_days,\n                    min_membership_age_days = excluded.min_membership_age_days,\n                    sprout_enabled = excluded.sprout_enabled,\n                    sprout_threshold = excluded.sprout_threshold,\n                    active_persona = excluded.active_persona",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 12
+    },
+    "nullable": []
+  },
+  "hash": "13b9a925af95fb0ad7c699170b18f1d10fa0b0cc421a933a61ed0e914e0bbfcd"
+}

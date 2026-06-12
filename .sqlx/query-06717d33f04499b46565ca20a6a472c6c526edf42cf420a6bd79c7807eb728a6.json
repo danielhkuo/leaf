@@ -1,0 +1,86 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT guild_id, setup_complete, log_channel_id, watched_channels,\n                      creator_role_id, timezone, max_series_per_user,\n                      min_account_age_days, min_membership_age_days,\n                      sprout_enabled, sprout_threshold, active_persona\n               FROM guild_settings WHERE guild_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "guild_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "setup_complete",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "log_channel_id",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "watched_channels",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "creator_role_id",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "timezone",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "max_series_per_user",
+        "ordinal": 6,
+        "type_info": "Integer"
+      },
+      {
+        "name": "min_account_age_days",
+        "ordinal": 7,
+        "type_info": "Integer"
+      },
+      {
+        "name": "min_membership_age_days",
+        "ordinal": 8,
+        "type_info": "Integer"
+      },
+      {
+        "name": "sprout_enabled",
+        "ordinal": 9,
+        "type_info": "Integer"
+      },
+      {
+        "name": "sprout_threshold",
+        "ordinal": 10,
+        "type_info": "Integer"
+      },
+      {
+        "name": "active_persona",
+        "ordinal": 11,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "06717d33f04499b46565ca20a6a472c6c526edf42cf420a6bd79c7807eb728a6"
+}

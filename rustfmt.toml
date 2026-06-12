@@ -1,0 +1,3 @@
+# rustfmt defaults, declared explicitly so the file exists as the single
+# place to change formatting policy (see docs/rust-guidelines.md).
+edition = "2024"

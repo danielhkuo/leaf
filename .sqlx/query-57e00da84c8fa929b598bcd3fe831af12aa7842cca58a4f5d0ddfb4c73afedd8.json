@@ -1,0 +1,128 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!: i64\", guild_id, creator_id, name, description, channels,\n                      cadence, detection_mode, privacy, privacy_role_id, start_day,\n                      reminder_enabled, reminder_time, reminder_timezone, reminder_dm,\n                      milestone_template, emoji, state, created_at\n               FROM series WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "guild_id",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "creator_id",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "name",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "description",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "channels",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "cadence",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "detection_mode",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "privacy",
+        "ordinal": 8,
+        "type_info": "Text"
+      },
+      {
+        "name": "privacy_role_id",
+        "ordinal": 9,
+        "type_info": "Text"
+      },
+      {
+        "name": "start_day",
+        "ordinal": 10,
+        "type_info": "Integer"
+      },
+      {
+        "name": "reminder_enabled",
+        "ordinal": 11,
+        "type_info": "Integer"
+      },
+      {
+        "name": "reminder_time",
+        "ordinal": 12,
+        "type_info": "Text"
+      },
+      {
+        "name": "reminder_timezone",
+        "ordinal": 13,
+        "type_info": "Text"
+      },
+      {
+        "name": "reminder_dm",
+        "ordinal": 14,
+        "type_info": "Integer"
+      },
+      {
+        "name": "milestone_template",
+        "ordinal": 15,
+        "type_info": "Text"
+      },
+      {
+        "name": "emoji",
+        "ordinal": 16,
+        "type_info": "Text"
+      },
+      {
+        "name": "state",
+        "ordinal": 17,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at",
+        "ordinal": 18,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      true,
+      true,
+      false,
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "57e00da84c8fa929b598bcd3fe831af12aa7842cca58a4f5d0ddfb4c73afedd8"
+}

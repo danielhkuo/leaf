@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM posts WHERE series_id = ? AND day = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "9d70150d6f76ebba5c65230cd3f3d4258ca5b11c66f1414d2e0567eeef1e3098"
+}

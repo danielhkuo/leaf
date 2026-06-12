@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT MAX(day) AS \"max: i64\" FROM posts WHERE series_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "max: i64",
+        "ordinal": 0,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "bf1a10df9e72d4675a0b708b821e8e877e83366c614aa8bc6ea9331c29728d30"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO media_attachments\n                       (series_id, day, attachment_id, channel_id, message_id,\n                        content_type, original_key, thumb_key, media_missing)\n                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 9
+    },
+    "nullable": []
+  },
+  "hash": "519600999c9a78bf9dc44b524c12815d4b369127a842ec93b36233b57dd4ba0f"
+}

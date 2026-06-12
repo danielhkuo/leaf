@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO series\n                   (guild_id, creator_id, name, description, channels, cadence,\n                    detection_mode, privacy, privacy_role_id, start_day, state,\n                    created_at)\n               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 12
+    },
+    "nullable": []
+  },
+  "hash": "618781b7095b28d5de480a712a6b763558a0a1043dbe13a993984e8c2e05405d"
+}

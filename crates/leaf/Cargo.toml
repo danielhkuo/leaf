@@ -1,0 +1,25 @@
+[package]
+name = "leaf"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "leaf: composition root — one process running leaf-server and (in run mode) leaf-bot"
+
+[[bin]]
+name = "leaf"
+path = "src/main.rs"
+
+[dependencies]
+leaf-core.workspace = true
+leaf-bot.workspace = true
+leaf-server.workspace = true
+anyhow.workspace = true
+axum.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT day AS \"day: i64\" FROM posts\n               WHERE series_id = ? ORDER BY RANDOM() LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "day: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "a7d28d9bf0ef3b423610f2fc8536ff782929ed9ffb203bd7d12d5eadae0432ad"
+}

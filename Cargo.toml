@@ -1,0 +1,75 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/leaf",
+    "crates/leaf-core",
+    "crates/leaf-bot",
+    "crates/leaf-server",
+    "crates/leaf-migrate",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+publish = false
+license = "BSD-3-Clause"
+
+[workspace.dependencies]
+leaf-core = { path = "crates/leaf-core" }
+leaf-bot = { path = "crates/leaf-bot" }
+leaf-server = { path = "crates/leaf-server" }
+
+anyhow = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "fs", "time", "sync", "net"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.9"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "macros", "migrate", "chrono"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+axum = "0.8"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+object_store = { version = "0.12", features = ["aws"] }
+bytes = "1"
+rand = "0.9"
+tempfile = "3"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+unused_must_use = "deny"
+rust_2018_idioms = { level = "deny", priority = -1 }
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+
+# Panics are not error handling (tests opt out locally, with reason).
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+indexing_slicing = "deny"
+
+todo = "deny"
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+allow_attributes_without_reason = "deny"
+
+# Workspace-wide demotions (see docs/rust-guidelines.md exception protocol).
+# pedantic: fires on every `Repo::new` style constructor; noise for us.
+module_name_repetitions = "allow"
+# pedantic: we document error conditions where they are non-obvious, not
+# mechanically on every Result-returning fn.
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+
+[profile.release]
+lto = "thin"
+strip = "symbols"
