@@ -108,6 +108,18 @@ pub fn thumb_key(m: &MediaMeta) -> String {
     )
 }
 
+/// Builds the R2-backed object store from Tier-1 configuration.
+pub fn r2_store(cfg: &crate::config::R2Config) -> Result<Arc<dyn ObjectStore>, MediaError> {
+    let store = object_store::aws::AmazonS3Builder::new()
+        .with_endpoint(&cfg.endpoint)
+        .with_bucket_name(&cfg.bucket)
+        .with_access_key_id(&cfg.access_key_id)
+        .with_secret_access_key(&cfg.secret_access_key)
+        .with_region("auto")
+        .build()?;
+    Ok(Arc::new(store))
+}
+
 /// The pipeline. Cheap to clone; share one per process.
 #[derive(Clone)]
 pub struct MediaPipeline {
@@ -236,6 +248,23 @@ impl MediaPipeline {
         })
     }
 
+    /// Fetches an object's bytes (e.g. a thumbnail for a chat embed).
+    pub async fn get_bytes(&self, key: &str) -> Result<Vec<u8>, MediaError> {
+        let got = self.store.get(&ObjectPath::from(key.to_owned())).await?;
+        Ok(got.bytes().await?.to_vec())
+    }
+
+    /// Best-effort removal of stored objects (post deletion). Failures are
+    /// logged, not returned: the DB row is already gone and an orphaned
+    /// object is preferable to a phantom database entry.
+    pub async fn delete_keys(&self, keys: &[String]) {
+        for key in keys {
+            if let Err(e) = self.store.delete(&ObjectPath::from(key.clone())).await {
+                tracing::warn!(key, error = %e, "failed to delete stored media object");
+            }
+        }
+    }
+
     /// Uploads a file: single put when small, multipart stream when large.
     async fn upload_file(&self, path: &Path, key: &str, size: u64) -> Result<(), MediaError> {
         let object_path = ObjectPath::from(key.to_owned());
@@ -338,7 +367,13 @@ fn thumbnail_webp(source: &[u8]) -> Result<Vec<u8>, MediaError> {
         .map_err(|e| MediaError::Transform(e.to_string()))?;
 
     let img = apply_orientation(img, exif_orientation(source).unwrap_or(1));
-    let thumb = img.thumbnail(THUMB_LONG_EDGE, THUMB_LONG_EDGE);
+    // `thumbnail` also UPSCALES smaller images; never do that — a 64px
+    // sticker should stay 64px.
+    let thumb = if img.width() <= THUMB_LONG_EDGE && img.height() <= THUMB_LONG_EDGE {
+        img
+    } else {
+        img.thumbnail(THUMB_LONG_EDGE, THUMB_LONG_EDGE)
+    };
 
     let mut out = Vec::new();
     image::codecs::webp::WebPEncoder::new_lossless(&mut out)

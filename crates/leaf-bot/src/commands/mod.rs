@@ -1,5 +1,5 @@
-//! Slash commands. Each command's doc comment doubles as its description
-//! in the Discord UI (poise picks it up).
+//! Slash commands and context menus. Each command's doc comment doubles
+//! as its description in the Discord UI (poise picks it up).
 
 #![allow(
     missing_docs,
@@ -9,7 +9,30 @@
 
 use std::time::Duration;
 
-use crate::{Context, Error};
+use crate::{Context, Data, Error};
+
+pub mod archive;
+pub mod query;
+pub mod series;
+pub mod settings;
+pub mod setup;
+
+/// Every command leaf registers, in menu order.
+#[must_use]
+pub fn all() -> Vec<poise::Command<Data, Error>> {
+    vec![
+        ping(),
+        setup::setup(),
+        settings::settings(),
+        series::series(),
+        archive::archive_menu(),
+        query::search(),
+        query::status(),
+        query::random(),
+        query::delete(),
+        query::delete_menu(),
+    ]
+}
 
 /// Check that leaf is alive (version and uptime).
 #[poise::command(slash_command)]

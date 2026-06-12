@@ -109,6 +109,9 @@ async fn run_mode(
         let _send = shutdown_tx.send(true);
     });
 
+    let store = leaf_core::media::r2_store(&config.r2).context("building R2 store")?;
+    let media = leaf_core::media::MediaPipeline::new(store).context("building media pipeline")?;
+
     let bot_cfg = leaf_bot::BotConfig {
         token: config.discord_token.clone(),
         dev_guild: std::env::var("DEV_GUILD_ID")
@@ -118,7 +121,7 @@ async fn run_mode(
     let bot_pool = pool.clone();
     let bot_shutdown = shutdown_rx.clone();
     let bot = tokio::spawn(async move {
-        if let Err(e) = leaf_bot::run(bot_cfg, bot_pool, bot_shutdown).await {
+        if let Err(e) = leaf_bot::run(bot_cfg, bot_pool, media, bot_shutdown).await {
             // Loud but non-fatal: the HTTP server (and setup-mode recovery
             // via --reconfigure) must stay reachable on a dead gateway.
             tracing::error!(

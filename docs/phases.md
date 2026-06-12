@@ -34,14 +34,17 @@ Rules:
 
 ---
 
-> **Status (2026-06-12)**: Phases 1–5 implemented and green locally (fmt,
-> clippy pedantic-deny, 45 tests + 1 ignored ffmpeg test verified manually,
-> cargo-deny with documented serenity-stack advisory ignores, sqlx offline
-> artifact, boot + dead-gateway smoke tests). Phases 1–3 committed and
-> human-verified. **Blocked on a dev Discord application** (bot token,
-> client id/secret, dev guild) to live-verify Phase 4 (`/ping`, greeting,
-> reconnect) before building Phase 6+ commands on top. Set `DEV_GUILD_ID`
-> for instant guild-scoped command registration during development.
+> **Status (2026-06-12, evening)**: Phases 1–5 committed and live-verified
+> against a real Discord app + R2 bucket. Phases 6–9 implemented and green
+> (69 tests): `/setup` (channel-select flow), `/settings` (show/policy/
+> timezone), `/series` (create/edit/list/remove with policy + sprout),
+> 🍃 Archive-to-Series context menu (modal-first, parser-prefilled day,
+> R2 upload + transactional insert), `/search` `/status` `/random`
+> `/delete` + 🗑️ context menu, privacy enforced via `policy::can_view`.
+> Deviations from the guide, accepted: passive watcher + channel→series
+> index deferred to Phase 11 (their consumer); series creation takes one
+> channel (multi-channel via later `/series edit`). **Awaiting human
+> verification of the full creator loop in the dev guild.**
 
 ## Phase 1 — Workspace, toolchain & CI
 

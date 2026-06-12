@@ -5,10 +5,12 @@
 use std::time::Instant;
 
 use anyhow::Context as _;
-use leaf_core::db::SqlitePool;
+use leaf_core::db::{GuildSettingsRepo, PostRepo, SeriesRepo, SqlitePool};
+use leaf_core::media::MediaPipeline;
 use poise::serenity_prelude as serenity;
 use tracing::info;
 
+pub mod checks;
 pub mod commands;
 pub mod error;
 pub mod events;
@@ -19,6 +21,14 @@ pub struct Data {
     pub pool: SqlitePool,
     /// Process start, for `/ping` uptime.
     pub started: Instant,
+    /// Guild settings repository.
+    pub guilds: GuildSettingsRepo,
+    /// Series repository.
+    pub series: SeriesRepo,
+    /// Posts + media repository.
+    pub posts: PostRepo,
+    /// R2 media pipeline.
+    pub media: MediaPipeline,
 }
 
 /// Error type carried by all commands.
@@ -44,6 +54,7 @@ pub struct BotConfig {
 pub async fn run(
     cfg: BotConfig,
     pool: SqlitePool,
+    media: MediaPipeline,
     shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
     let intents = serenity::GatewayIntents::GUILDS
@@ -60,7 +71,7 @@ pub async fn run(
 
     let framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
-            commands: vec![commands::ping()],
+            commands: commands::all(),
             on_error: |e| Box::pin(error::on_error(e)),
             event_handler: |ctx, event, fw, data| Box::pin(events::handle(ctx, event, fw, data)),
             ..Default::default()
@@ -92,6 +103,10 @@ pub async fn run(
 
                 info!(user = %ready.user.name, "gateway connected");
                 Ok(Data {
+                    guilds: GuildSettingsRepo::new(pool.clone()),
+                    series: SeriesRepo::new(pool.clone()),
+                    posts: PostRepo::new(pool.clone()),
+                    media,
                     pool,
                     started: Instant::now(),
                 })
