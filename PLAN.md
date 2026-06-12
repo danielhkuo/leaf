@@ -419,6 +419,42 @@ Serving path: `leaf-server GET /api/media/:attachment_id` (+ `?thumb` variant)
   Activity URL mappings and serve direct from R2, offloading image bandwidth
   from leaf-server entirely.
 
+### Serving through Discord's proxy: the caching architecture
+
+Important for the gallery frontend (Phases 14–16). Discord sandboxes
+Activities and routes **all** asset traffic through its proxy
+(`discordsays.com`); CSP blocks direct `<img>` links to any external
+domain. The request chain we design for:
+
+```
+iframe <img src="/media/...">         (relative path, CSP-safe)
+  → Discord Proxy (URL mapping: /media → our Cloudflare-proxied domain)
+    → Cloudflare edge cache  ← cache HIT ends here: $0, R2 untouched
+      → R2 origin            ← only on MISS: 1 Class B op
+```
+
+Discord's proxy respects cache headers on non-HTML assets, so the whole
+chain stays warm. Rules we commit to:
+
+1. **URL mappings, not absolute URLs**: the frontend always requests
+   relative paths; mappings route `/` (app+api) and—if we later serve
+   media direct from the bucket—`/media` to the R2 custom domain.
+2. **`Cache-Control: public, max-age=31536000, immutable`** on every media
+   response (leaf-server sets it; a Cloudflare Cache Rule enforces it if
+   serving direct from R2).
+3. **Enable Tiered Cache** in Cloudflare (one toggle): regional caches
+   check the upper tier before hitting R2, so one global archive view
+   costs ~1 Class B op instead of one per region.
+4. **Cache busting is structural, not manual**: object keys embed the
+   Discord attachment id (`…/d/<day>/<attachment_id>`), and archived media
+   is immutable by product design — content never changes under a key.
+   Replacing a day = delete + re-archive = new attachment id = new key.
+   No versioning strings needed, ever.
+5. **Expectation setting**: edge caches evict cold objects, so a
+   low-traffic archive still produces a trickle of Class B ops on rarely
+   viewed days. With 10M free ops/month this is noise, but it is why the
+   bill is "essentially zero" rather than literally zero.
+
 ### Activity data flow
 
 ```

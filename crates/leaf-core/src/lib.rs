@@ -10,6 +10,7 @@ pub mod media;
 pub mod parser;
 pub mod policy;
 pub mod stats;
+pub mod transfer;
 
 #[cfg(test)]
 mod smoke {
