@@ -152,6 +152,23 @@ impl PostRepo {
         Ok(max)
     }
 
+    /// Resolves an attachment id to its storage keys and type, for the
+    /// media proxy. `None` if unknown; keys are `None` when the media is a
+    /// missing placeholder (imported but never fetched).
+    pub async fn media_location(
+        &self,
+        attachment_id: &str,
+    ) -> DbResult<Option<(Option<String>, Option<String>, String)>> {
+        let row = sqlx::query!(
+            r#"SELECT original_key, thumb_key, content_type
+               FROM media_attachments WHERE attachment_id = ? LIMIT 1"#,
+            attachment_id
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| (r.original_key, r.thumb_key, r.content_type)))
+    }
+
     /// `(day, posted_at, message_id, channel_id)` for every post, ascending
     /// by day. Input to the `/wrapped` recap (which buckets by timezone in
     /// pure code). A series is at most a few thousand rows, so loading all

@@ -110,7 +110,25 @@ async fn run_mode(
     });
 
     let store = leaf_core::media::r2_store(&config.r2).context("building R2 store")?;
-    let media = leaf_core::media::MediaPipeline::new(store).context("building media pipeline")?;
+    let media =
+        leaf_core::media::MediaPipeline::new(store.clone()).context("building media pipeline")?;
+
+    // REST API state shared by the run-mode router.
+    let discord = leaf_server::api::discord::LiveDiscord::new(
+        &config.client_id,
+        &config.client_secret,
+        &config.discord_token,
+    )
+    .context("building Discord API client")?;
+    let api_state = leaf_server::api::state::ApiState {
+        series: leaf_core::db::SeriesRepo::new(pool.clone()),
+        posts: leaf_core::db::PostRepo::new(pool.clone()),
+        guilds: leaf_core::db::GuildSettingsRepo::new(pool.clone()),
+        store,
+        key: leaf_server::api::auth::SessionKey::derive(&config.client_secret),
+        discord: std::sync::Arc::new(discord),
+        redirect_uri: config.public_url.clone(),
+    };
 
     let bot_cfg = leaf_bot::BotConfig {
         token: config.discord_token.clone(),
@@ -137,7 +155,7 @@ async fn run_mode(
     info!(%bind, "serving");
 
     let mut server_shutdown = shutdown_rx;
-    axum::serve(listener, leaf_server::run::router())
+    axum::serve(listener, leaf_server::run::router(api_state))
         .with_graceful_shutdown(async move {
             while !*server_shutdown.borrow_and_update() {
                 if server_shutdown.changed().await.is_err() {

@@ -21,6 +21,9 @@ reqwest.workspace = true
 object_store.workspace = true
 bytes.workspace = true
 rand.workspace = true
+hmac.workspace = true
+sha2.workspace = true
+base64.workspace = true
 
 [dev-dependencies]
 tower = { workspace = true, features = ["util"] }

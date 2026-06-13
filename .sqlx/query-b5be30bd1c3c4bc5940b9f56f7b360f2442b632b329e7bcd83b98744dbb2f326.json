@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT original_key, thumb_key, content_type\n               FROM media_attachments WHERE attachment_id = ? LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "original_key",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "thumb_key",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "content_type",
+        "ordinal": 2,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "b5be30bd1c3c4bc5940b9f56f7b360f2442b632b329e7bcd83b98744dbb2f326"
+}

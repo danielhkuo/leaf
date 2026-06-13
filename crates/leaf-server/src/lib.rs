@@ -3,6 +3,7 @@
 //! hosting. This server always starts before the gateway; in setup mode it
 //! is the only thing running.
 
+pub mod api;
 pub mod run;
 pub mod setup;
 pub mod validate;
