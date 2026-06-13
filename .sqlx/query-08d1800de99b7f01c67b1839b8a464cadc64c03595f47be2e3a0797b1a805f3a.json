@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE series SET reminder_enabled = ?, reminder_time = ?,\n                   reminder_timezone = ?, reminder_dm = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "08d1800de99b7f01c67b1839b8a464cadc64c03595f47be2e3a0797b1a805f3a"
+}

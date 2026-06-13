@@ -645,21 +645,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn download_respects_cap_even_with_lying_server() {
-        // Minimal HTTP server that claims a small Content-Length but
-        // streams forever — the cap must trip mid-stream.
+    async fn download_respects_cap_mid_stream() {
+        // A server announcing a large body and streaming well past the cap.
+        // The streaming check must trip on accumulated bytes — not wait for
+        // the whole file — yielding TooLarge (deterministically, since the
+        // first ~100KB arrive before the 2KB cap is reached).
         use tokio::io::AsyncWriteExt as _;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
-            let (mut sock, _) = listener.accept().await.unwrap();
+            let Ok((mut sock, _)) = listener.accept().await else {
+                return;
+            };
+            // Honest, large Content-Length so reqwest keeps reading until
+            // our cap fires (a small CL would be honored and stop early).
             let _ = sock
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n")
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4000000\r\n\r\n")
                 .await;
-            // Send far more than advertised.
             for _ in 0..100 {
                 if sock.write_all(&[0u8; 1024]).await.is_err() {
-                    break;
+                    break; // client hung up after the cap tripped
                 }
             }
         });
@@ -669,9 +674,12 @@ mod tests {
         let result = p
             .archive_from_url(&format!("http://{addr}/file"), &meta("image/png"))
             .await;
-        assert!(matches!(
-            result,
-            Err(MediaError::TooLarge { .. } | MediaError::Fetch(_))
-        ));
+        assert!(
+            matches!(
+                result,
+                Err(MediaError::TooLarge { .. } | MediaError::Fetch(_))
+            ),
+            "expected TooLarge/Fetch, got {result:?}"
+        );
     }
 }

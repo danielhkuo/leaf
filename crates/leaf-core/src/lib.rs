@@ -13,6 +13,7 @@ pub mod policy;
 pub mod reminder;
 pub mod stats;
 pub mod transfer;
+pub mod wrapped;
 
 #[cfg(test)]
 mod smoke {

@@ -34,7 +34,17 @@ Rules:
 
 ---
 
-> **Status (2026-06-13)**: Phases 1–10 committed; Phases 12–13(part) on top.
+> **Status (2026-06-13, later)**: Phase 13 `/wrapped` added — yearly recap
+> embed over pure, tz-aware `wrapped::summarize` (year bucketing, busiest
+> month with earliest-tie-break, in-year longest streak; table-tested).
+> Personas/dialogue **deliberately deferred** (plan flags them heavy and
+> cuttable; a switch that changes nothing is worse than none — its own
+> pass). Also hardened a flaky Phase-5 media test (lying-server cap now
+> deterministic). 94 tests, all gates green, `/wrapped` registered live.
+> **Bot side is now feature-complete for v1; next is Phase 14 — the REST
+> API — then the Svelte gallery.**
+>
+> **Earlier — Status (2026-06-13)**: Phases 1–10 committed; Phases 12–13(part) on top.
 > Phase 12 (scheduling): pure `reminder_due` predicate (cadence-aware,
 > ISO-week weekly, DST-safe, structural downtime catch-up, at-most-once via
 > mark-before-send + rollback), one-minute scheduler tick sharing the

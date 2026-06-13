@@ -10,7 +10,7 @@ use crate::commands::series::{autocomplete_any_series, owned_series};
 use crate::{Context, Error, checks};
 
 /// Builds the viewer facts for the invoker.
-async fn viewer_parts(ctx: &Context<'_>) -> (String, Vec<String>, bool) {
+pub(crate) async fn viewer_parts(ctx: &Context<'_>) -> (String, Vec<String>, bool) {
     let roles = match ctx.author_member().await {
         Some(m) => m.roles.iter().map(ToString::to_string).collect(),
         None => Vec::new(),
@@ -20,7 +20,7 @@ async fn viewer_parts(ctx: &Context<'_>) -> (String, Vec<String>, bool) {
 
 /// Loads a series by name and checks the invoker may view it. Replies and
 /// returns `None` otherwise. The bool is "reply should be ephemeral".
-async fn viewable_series(
+pub(crate) async fn viewable_series(
     ctx: &Context<'_>,
     guild_id: &str,
     name: &str,

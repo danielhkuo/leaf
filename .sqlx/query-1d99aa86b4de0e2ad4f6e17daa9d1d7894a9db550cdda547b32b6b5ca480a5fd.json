@@ -1,0 +1,92 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT s.id AS \"id!: i64\", s.guild_id, s.name, s.creator_id,\n                      s.channels, s.cadence, s.start_day,\n                      s.reminder_time AS \"reminder_time!: String\",\n                      COALESCE(s.reminder_timezone, g.timezone) AS \"timezone!: String\",\n                      s.reminder_dm, s.last_reminder_day,\n                      (SELECT MAX(day) FROM posts p WHERE p.series_id = s.id) AS \"max_day: i64\",\n                      (SELECT MAX(posted_at) FROM posts p WHERE p.series_id = s.id) AS \"last_post_at: i64\"\n               FROM series s\n               JOIN guild_settings g ON g.guild_id = s.guild_id\n               WHERE s.reminder_enabled = 1\n                 AND s.reminder_time IS NOT NULL\n                 AND s.state != 'revoked'",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "guild_id",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "name",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "creator_id",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "channels",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "cadence",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "start_day",
+        "ordinal": 6,
+        "type_info": "Integer"
+      },
+      {
+        "name": "reminder_time!: String",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "timezone!: String",
+        "ordinal": 8,
+        "type_info": "Text"
+      },
+      {
+        "name": "reminder_dm",
+        "ordinal": 9,
+        "type_info": "Integer"
+      },
+      {
+        "name": "last_reminder_day",
+        "ordinal": 10,
+        "type_info": "Integer"
+      },
+      {
+        "name": "max_day: i64",
+        "ordinal": 11,
+        "type_info": "Integer"
+      },
+      {
+        "name": "last_post_at: i64",
+        "ordinal": 12,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "1d99aa86b4de0e2ad4f6e17daa9d1d7894a9db550cdda547b32b6b5ca480a5fd"
+}

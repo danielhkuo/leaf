@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT day AS \"day!: i64\", posted_at AS \"posted_at!: i64\", message_id, channel_id\n               FROM posts WHERE series_id = ? ORDER BY day",
+  "describe": {
+    "columns": [
+      {
+        "name": "day!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "posted_at!: i64",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "message_id",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "channel_id",
+        "ordinal": 3,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "25c0dabfede831b0c9ae273bcc9e756a79d0194ee8daabad7abb7e9101f56bca"
+}

@@ -152,6 +152,27 @@ impl PostRepo {
         Ok(max)
     }
 
+    /// `(day, posted_at, message_id, channel_id)` for every post, ascending
+    /// by day. Input to the `/wrapped` recap (which buckets by timezone in
+    /// pure code). A series is at most a few thousand rows, so loading all
+    /// is cheaper than a SQL date-bucketing query that would hard-code a tz.
+    pub async fn list_for_wrapped(
+        &self,
+        series_id: i64,
+    ) -> DbResult<Vec<(i64, i64, String, String)>> {
+        let rows = sqlx::query!(
+            r#"SELECT day AS "day!: i64", posted_at AS "posted_at!: i64", message_id, channel_id
+               FROM posts WHERE series_id = ? ORDER BY day"#,
+            series_id
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| (r.day, r.posted_at, r.message_id, r.channel_id))
+            .collect())
+    }
+
     /// Every archived day number, ascending (input to streak math).
     pub async fn all_days(&self, series_id: i64) -> DbResult<Vec<i64>> {
         let days = sqlx::query_scalar!(

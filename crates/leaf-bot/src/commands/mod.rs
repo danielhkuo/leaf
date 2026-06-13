@@ -17,6 +17,7 @@ pub mod series;
 pub mod settings;
 pub mod setup;
 pub mod transfer;
+pub mod wrapped;
 
 /// Every command leaf registers, in menu order.
 #[must_use]
@@ -34,6 +35,7 @@ pub fn all() -> Vec<poise::Command<Data, Error>> {
         query::delete_menu(),
         transfer::export(),
         transfer::import(),
+        wrapped::wrapped(),
     ]
 }
 

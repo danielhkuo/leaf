@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE series SET last_reminder_day = ?, last_reminder_check = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "6c5da7240411663461b991c251b6c3d8d3f01563690b5ec8a389462576a1cd6d"
+}

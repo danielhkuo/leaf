@@ -11,9 +11,11 @@ data/
 *.db-shm
 *.db-wal
 
-# Local-only reference material (re-download, do not commit)
-# docs/reference/svelte-llms-full.txt: curl -sL https://svelte.dev/llms-full.txt -o docs/reference/svelte-llms-full.txt
-docs/reference/
+# Planning & docs — kept local only, not committed.
+# (Includes docs/reference/, the vendored Svelte docs; restore with:
+#  curl -sL https://svelte.dev/llms-full.txt -o docs/reference/svelte-llms-full.txt)
+/PLAN.md
+/docs/
 
 # Secrets
 leaf.conf
