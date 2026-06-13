@@ -1227,6 +1227,7 @@ name = "leaf-bot"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "chrono-tz",
  "leaf-core",
  "poise",
@@ -1240,6 +1241,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "chrono",
+ "chrono-tz",
  "image",
  "kamadak-exif",
  "object_store",

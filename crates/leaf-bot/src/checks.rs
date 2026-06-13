@@ -13,6 +13,12 @@ pub fn now_unix() -> i64 {
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
 }
 
+/// True if `s` is a 24-hour `HH:MM` time (the reminder-time format).
+#[must_use]
+pub fn valid_hh_mm(s: &str) -> bool {
+    chrono::NaiveTime::parse_from_str(s, "%H:%M").is_ok()
+}
+
 /// The invoking guild id as a string, or a friendly refusal in DMs.
 /// (Commands are `guild_only`, so this is a belt-and-braces guard.)
 pub async fn guild_id(ctx: &Context<'_>) -> Result<Option<String>, Error> {

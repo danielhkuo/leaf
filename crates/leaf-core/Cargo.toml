@@ -17,6 +17,7 @@ serde_path_to_error = "0.1"
 toml.workspace = true
 sqlx.workspace = true
 chrono.workspace = true
+chrono-tz.workspace = true
 rand.workspace = true
 object_store.workspace = true
 bytes.workspace = true

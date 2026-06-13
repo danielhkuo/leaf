@@ -14,6 +14,7 @@ pub mod checks;
 pub mod commands;
 pub mod error;
 pub mod events;
+pub mod reminders;
 
 /// Shared state available to every command and event handler.
 pub struct Data {
@@ -62,6 +63,11 @@ pub async fn run(
         | serenity::GatewayIntents::MESSAGE_CONTENT;
 
     let dev_guild = cfg.dev_guild.map(serenity::GuildId::new);
+
+    // Clones for the reminder scheduler, taken before `pool` and `shutdown`
+    // are moved into the setup closure and the shard-shutdown task.
+    let sched_series = SeriesRepo::new(pool.clone());
+    let sched_shutdown = shutdown.clone();
 
     // A setup-hook failure (e.g. registering commands in a guild the bot
     // was not yet invited to) must not leave a zombie gateway: connected,
@@ -118,6 +124,14 @@ pub async fn run(
         .framework(framework)
         .await
         .context("building gateway client")?;
+
+    // Reminder scheduler: shares the gateway's HTTP client, stops on the
+    // same shutdown signal.
+    tokio::spawn(reminders::run(
+        client.http.clone(),
+        sched_series,
+        sched_shutdown,
+    ));
 
     // Shut the shards down on either the process-wide shutdown signal or
     // a fatal setup failure; client.start() then returns.

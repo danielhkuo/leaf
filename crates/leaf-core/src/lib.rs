@@ -7,8 +7,10 @@ pub mod config;
 pub mod db;
 pub mod domain;
 pub mod media;
+pub mod milestone;
 pub mod parser;
 pub mod policy;
+pub mod reminder;
 pub mod stats;
 pub mod transfer;
 

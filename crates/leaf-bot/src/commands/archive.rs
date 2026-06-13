@@ -279,7 +279,28 @@ async fn execute_archive(
         ),
     )
     .await;
+
+    announce_milestone(ctx, series, day, msg).await;
     Ok(())
+}
+
+/// Posts a celebratory line in the channel when `day` is a milestone
+/// (first post, year marks, round hundreds). Best-effort; never fails the
+/// archive.
+async fn announce_milestone(ctx: &Context<'_>, series: &Series, day: i64, msg: &serenity::Message) {
+    let Some(milestone) = leaf_core::milestone::classify(day) else {
+        return;
+    };
+    let text = leaf_core::milestone::render(
+        series.milestone_template.as_deref(),
+        milestone,
+        day,
+        &series.name,
+        &format!("<@{}>", series.creator_id),
+    );
+    if let Err(e) = msg.channel_id.say(ctx.http(), text).await {
+        tracing::warn!(series = series.id, day, error = %e, "milestone announcement failed");
+    }
 }
 
 /// Uploads originals + thumbnails for every usable attachment. On failure

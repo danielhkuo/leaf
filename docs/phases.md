@@ -34,7 +34,18 @@ Rules:
 
 ---
 
-> **Status (2026-06-12, evening)**: Phases 1–5 committed and live-verified
+> **Status (2026-06-13)**: Phases 1–10 committed; Phases 12–13(part) on top.
+> Phase 12 (scheduling): pure `reminder_due` predicate (cadence-aware,
+> ISO-week weekly, DST-safe, structural downtime catch-up, at-most-once via
+> mark-before-send + rollback), one-minute scheduler tick sharing the
+> gateway HTTP client, `/series reminder` config command, and milestone
+> announcements (`milestone::classify` — first/years/hundreds — posted in
+> the channel on archive). 88 tests, clippy/deny/fmt green. **Phase 11
+> (passive watcher) still deferred.** Phase 13 (personas, `/wrapped`) and
+> Phase 14+ (API + gallery) remain. Awaiting human verification of a live
+> reminder firing and a milestone post.
+>
+> **Earlier — Status (2026-06-12, evening)**: Phases 1–5 committed and live-verified
 > against a real Discord app + R2 bucket. Phases 6–9 implemented and green
 > (69 tests): `/setup` (channel-select flow), `/settings` (show/policy/
 > timezone), `/series` (create/edit/list/remove with policy + sprout),

@@ -63,7 +63,7 @@ impl From<PrivacyChoice> for Privacy {
 #[poise::command(
     slash_command,
     guild_only,
-    subcommands("create", "edit", "list", "remove")
+    subcommands("create", "edit", "list", "remove", "reminder")
 )]
 #[allow(
     clippy::unused_async,
@@ -396,6 +396,110 @@ pub async fn owned_series(
         return Ok(None);
     }
     Ok(Some(s))
+}
+
+/// Turn reminders on or off for one of your series.
+#[poise::command(slash_command, guild_only)]
+async fn reminder(
+    ctx: Context<'_>,
+    #[description = "Which series"]
+    #[autocomplete = "autocomplete_own_series"]
+    name: String,
+    #[description = "Enable or disable reminders"] enabled: bool,
+    #[description = "Time of day, 24h HH:MM (required to enable)"] time: Option<String>,
+    #[description = "DM me (default) or ping the channel"] dm: Option<bool>,
+    #[description = "Timezone override (IANA, else server default)"] timezone: Option<String>,
+) -> Result<(), Error> {
+    let Some(settings) = checks::setup_settings(&ctx).await? else {
+        return Ok(());
+    };
+    let Some(s) = owned_series(&ctx, &settings.guild_id, &name).await? else {
+        return Ok(());
+    };
+
+    if !enabled {
+        ctx.data()
+            .series
+            .set_reminder_config(
+                s.id,
+                false,
+                s.reminder_time.as_deref(),
+                s.reminder_timezone.as_deref(),
+                s.reminder_dm,
+            )
+            .await?;
+        ctx.send(
+            poise::CreateReply::default()
+                .content(format!("🍃 Reminders off for **{}**.", s.name))
+                .ephemeral(true),
+        )
+        .await?;
+        return Ok(());
+    }
+
+    let Some(time) = time else {
+        ctx.send(
+            poise::CreateReply::default()
+                .content("To enable reminders, give a `time` (24h HH:MM).")
+                .ephemeral(true),
+        )
+        .await?;
+        return Ok(());
+    };
+    if !checks::valid_hh_mm(&time) {
+        ctx.send(
+            poise::CreateReply::default()
+                .content(format!(
+                    "`{time}` isn't a valid 24h time — use HH:MM, e.g. 17:30."
+                ))
+                .ephemeral(true),
+        )
+        .await?;
+        return Ok(());
+    }
+    if let Some(tz) = &timezone
+        && tz.parse::<chrono_tz::Tz>().is_err()
+    {
+        ctx.send(
+            poise::CreateReply::default()
+                .content(format!(
+                    "`{tz}` isn't a timezone I know — pick a valid IANA name."
+                ))
+                .ephemeral(true),
+        )
+        .await?;
+        return Ok(());
+    }
+    if s.cadence == Cadence::Freeform {
+        ctx.send(
+            poise::CreateReply::default()
+                .content("🍂 Freeform series have no schedule to remind against — set a cadence with `/series edit` first.")
+                .ephemeral(true),
+        )
+        .await?;
+        return Ok(());
+    }
+
+    let dm = dm.unwrap_or(true);
+    ctx.data()
+        .series
+        .set_reminder_config(s.id, true, Some(&time), timezone.as_deref(), dm)
+        .await?;
+    let tz_note = timezone
+        .as_deref()
+        .map_or_else(|| settings.timezone.clone(), ToOwned::to_owned);
+    let how = if dm { "by DM" } else { "in the channel" };
+    ctx.send(
+        poise::CreateReply::default()
+            .content(format!(
+                "🍃 Reminders on for **{}** at `{time}` ({tz_note}), {how}, \
+                 when you're behind.",
+                s.name
+            ))
+            .ephemeral(true),
+    )
+    .await?;
+    Ok(())
 }
 
 /// Autocomplete: the invoker's own non-revoked series names.
