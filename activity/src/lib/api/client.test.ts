@@ -21,6 +21,7 @@ const SERIES = {
   creator_id: 'u',
   cadence: 'daily',
   emoji: '🍃',
+  start_day: 1,
   max_day: 3,
 };
 
@@ -59,6 +60,22 @@ describe('LeafApi', () => {
     const api = new LeafApi({ token: 't', fetch: fetchImpl });
 
     await expect(api.listSeries('g1')).rejects.toBeTruthy();
+  });
+
+  it('falls back to the global fetch when none is injected', async () => {
+    const spy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(
+        new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } }),
+      );
+    // No fetch injected → must use a correctly-bound global fetch, not call
+    // it as a method (which throws "Illegal invocation" in a real browser).
+    const out = await new LeafApi({ token: 't', baseUrl: '/api' }).listSeries('g1');
+    expect(out).toEqual([]);
+    expect(spy).toHaveBeenCalledWith('/api/guilds/g1/series', {
+      headers: { authorization: 'Bearer t' },
+    });
+    spy.mockRestore();
   });
 });
 

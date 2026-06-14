@@ -19,5 +19,5 @@
     "allowJs": false,
     "noEmit": true
   },
-  "include": ["src/**/*.ts", "src/**/*.svelte", "src/**/*.svelte.ts"]
+  "include": ["src/**/*.ts", "src/**/*.svelte", "src/**/*.svelte.ts", "vitest-setup.ts"]
 }

@@ -178,7 +178,7 @@ async fn list_days<D: DiscordApi>(
         return Err(ApiError::BadRequest);
     }
 
-    let signer = MediaSigner::new(&st.key, now_unix(), SESSION_TTL_SECS);
+    let signer = MediaSigner::new(&st.key, now_unix());
     let mut out = Vec::new();
     for day in st.posts.days_in_range(series.id, from, to).await? {
         if let Some((_, media)) = st.posts.get(series.id, day).await? {
@@ -200,7 +200,7 @@ async fn get_day<D: DiscordApi>(
         .get(series.id, day)
         .await?
         .ok_or(ApiError::NotFound)?;
-    let signer = MediaSigner::new(&st.key, now_unix(), SESSION_TTL_SECS);
+    let signer = MediaSigner::new(&st.key, now_unix());
     Ok(Json(DayDto::build(&gid, &post, &media, &signer)))
 }
 

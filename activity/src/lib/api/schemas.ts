@@ -11,6 +11,7 @@ export const seriesSchema = z.object({
   creator_id: z.string(),
   cadence: z.string(),
   emoji: z.string(),
+  start_day: z.number(),
   max_day: z.number().nullable(),
 });
 export const seriesListSchema = z.array(seriesSchema);

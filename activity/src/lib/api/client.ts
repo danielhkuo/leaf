@@ -58,7 +58,10 @@ export class LeafApi {
   constructor(opts: ClientOptions) {
     this.#token = opts.token;
     this.#base = opts.baseUrl ?? API_BASE;
-    this.#fetch = opts.fetch ?? fetch;
+    // Bind to the global: native fetch throws "Illegal invocation" if called
+    // with `this` set to anything but the window (which `this.#fetch(...)`
+    // would do). Injected fetches (tests) are used as-is.
+    this.#fetch = opts.fetch ?? globalThis.fetch.bind(globalThis);
   }
 
   async #get<T>(path: string, schema: z.ZodType<T>): Promise<T> {

@@ -6,10 +6,17 @@ import { defineConfig } from 'vite';
 // target with LEAF_API_TARGET if leaf-server runs elsewhere.
 const API_TARGET = process.env.LEAF_API_TARGET ?? 'http://localhost:8080';
 
+// Discord loads the activity over a public HTTPS tunnel, so the dev server is
+// reached via a non-localhost Host header — which Vite blocks by default since
+// 5.4. Allow quick tunnels (*.trycloudflare.com) out of the box; set
+// LEAF_DEV_HOST=leaf-dev.example.com for a stable named tunnel.
+const devHost = process.env.LEAF_DEV_HOST;
+
 export default defineConfig({
   plugins: [svelte()],
   server: {
     port: 5173,
+    allowedHosts: devHost ? [devHost, '.trycloudflare.com'] : ['.trycloudflare.com'],
     proxy: {
       '/api': { target: API_TARGET, changeOrigin: true },
     },

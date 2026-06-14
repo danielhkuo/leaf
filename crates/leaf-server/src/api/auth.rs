@@ -122,13 +122,31 @@ pub struct MediaSigner<'a> {
     exp: i64,
 }
 
+/// Bucket that signed-media expiries are quantized to.
+///
+/// Every session shares one URL per attachment per bucket — turning
+/// per-session cache misses (one R2 op each) into shared edge cache hits.
+/// Tradeoff: a minted URL is replayable until its bucket boundary (1–2×
+/// this). One day balances the cache hit rate against the replay window for
+/// already-entitled media.
+pub const SIGNED_URL_BUCKET_SECS: i64 = 86_400;
+
+/// Rounds `now` to a stable expiry at least one bucket in the future. The
+/// result depends only on `now`'s bucket, so every session within a bucket
+/// mints identical (edge-cacheable) URLs.
+const fn quantized_exp(now_unix: i64) -> i64 {
+    (now_unix / SIGNED_URL_BUCKET_SECS + 2) * SIGNED_URL_BUCKET_SECS
+}
+
 impl<'a> MediaSigner<'a> {
-    /// A signer valid for `ttl_secs` from `now_unix`.
+    /// A signer whose expiry is quantized to a shared bucket (see
+    /// [`SIGNED_URL_BUCKET_SECS`]) so the URLs it emits are identical for
+    /// every viewer in that bucket, while still expiring on their own.
     #[must_use]
-    pub const fn new(key: &'a SessionKey, now_unix: i64, ttl_secs: i64) -> Self {
+    pub const fn new(key: &'a SessionKey, now_unix: i64) -> Self {
         Self {
             key,
-            exp: now_unix + ttl_secs,
+            exp: quantized_exp(now_unix),
         }
     }
 
@@ -253,10 +271,22 @@ mod tests {
     #[test]
     fn media_signer_emits_signed_full_and_thumb_urls() {
         let key = SessionKey::derive("k");
-        let signer = MediaSigner::new(&key, 0, 100);
+        let signer = MediaSigner::new(&key, 0);
         let (full, thumb) = signer.urls("att9");
-        assert!(full.starts_with("/api/media/att9?exp=100&sig="));
+        assert!(full.starts_with("/api/media/att9?exp="));
         assert!(thumb.contains("thumb=1"));
+    }
+
+    #[test]
+    fn media_signer_quantizes_exp_into_a_shared_bucket() {
+        let key = SessionKey::derive("k");
+        // Two sessions seconds apart in the same bucket mint identical URLs,
+        // so the edge caches one object instead of one per session.
+        let a = MediaSigner::new(&key, 10).urls("att");
+        let b = MediaSigner::new(&key, 20).urls("att");
+        assert_eq!(a, b);
+        // The shared expiry is bucket-aligned and outlives the session TTL.
+        assert!(a.0.contains(&format!("exp={}", 2 * SIGNED_URL_BUCKET_SECS)));
     }
 
     #[test]

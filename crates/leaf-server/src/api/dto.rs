@@ -25,6 +25,8 @@ pub struct SeriesDto {
     pub cadence: String,
     /// Reaction emoji.
     pub emoji: String,
+    /// The series' configured first day number (for heatmap rendering).
+    pub start_day: i64,
     /// Highest archived day, if any.
     pub max_day: Option<i64>,
 }
@@ -40,6 +42,7 @@ impl SeriesDto {
             creator_id: s.creator_id.clone(),
             cadence: s.cadence.as_str().to_owned(),
             emoji: s.emoji.clone(),
+            start_day: s.start_day,
             max_day,
         }
     }
@@ -186,9 +189,9 @@ mod tests {
     #[test]
     fn media_dto_uses_signed_proxied_paths_only() {
         let key = SessionKey::derive("k");
-        let signer = MediaSigner::new(&key, 0, 100);
+        let signer = MediaSigner::new(&key, 0);
         let m = MediaDto::from_attachment(&attachment(false), &signer);
-        assert!(m.url.starts_with("/api/media/att42?exp=100&sig="));
+        assert!(m.url.starts_with("/api/media/att42?exp="));
         assert!(m.thumb_url.contains("thumb=1"));
         assert!(!m.url.contains("discord") && !m.url.contains("r2"));
     }
@@ -205,7 +208,7 @@ mod tests {
             archived_at: 1701,
         };
         let key = SessionKey::derive("k");
-        let signer = MediaSigner::new(&key, 0, 100);
+        let signer = MediaSigner::new(&key, 0);
         let dto = DayDto::build("guild9", &post, &[attachment(true)], &signer);
         assert_eq!(dto.jump_url, "https://discord.com/channels/guild9/chan/msg");
         assert!(dto.media.first().unwrap().missing);
