@@ -1,0 +1,14 @@
+# Keep the build context lean and reproducible.
+target/
+**/node_modules/
+activity/dist/
+data/
+*.db
+*.db-shm
+*.db-wal
+.git/
+.github/
+docs/
+PLAN.md
+.env
+leaf.conf

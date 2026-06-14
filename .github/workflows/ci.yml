@@ -36,6 +36,27 @@ jobs:
       - name: cargo-deny
         uses: EmbarkStudios/cargo-deny-action@v2
 
+  frontend:
+    name: prettier · eslint · svelte-check · vitest · build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: activity
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: activity/package-lock.json
+      - run: npm ci
+      - run: npm run format:check
+      - run: npm run lint
+      - run: npm run check
+      - run: npm run test:run
+      - run: npm run build
+      - run: npm run bundle:check
+
   docker:
     name: docker build
     runs-on: ubuntu-latest

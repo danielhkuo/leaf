@@ -58,7 +58,12 @@ struct TokenRequest {
 
 #[derive(Serialize)]
 struct TokenResponse {
+    /// Our HMAC session token; gates every leaf API route.
     token: String,
+    /// The Discord OAuth access token, handed back for the embedded-app
+    /// `sdk.commands.authenticate({ access_token })` step.
+    access_token: String,
+    /// Lifetime of `token` in seconds.
     expires_in: i64,
 }
 
@@ -83,6 +88,7 @@ async fn token<D: DiscordApi>(
     let token = st.key.mint(&user_id, now_unix(), SESSION_TTL_SECS);
     Ok(Json(TokenResponse {
         token,
+        access_token: access,
         expires_in: SESSION_TTL_SECS,
     }))
 }
@@ -521,6 +527,8 @@ mod tests {
             .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         let token = v["token"].as_str().unwrap();
+        // The Discord access token is handed back for `sdk.authenticate`.
+        assert_eq!(v["access_token"].as_str().unwrap(), "access-for-member1");
         assert_eq!(
             get(&app, "/api/guilds/g1/series", Some(token)).await,
             StatusCode::OK

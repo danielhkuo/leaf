@@ -1,4 +1,13 @@
-# ---- build stage ------------------------------------------------------
+# ---- frontend build ----------------------------------------------------
+FROM node:22-bookworm-slim AS frontend
+WORKDIR /app
+# Install against the committed lockfile first for layer caching.
+COPY activity/package.json activity/package-lock.json ./
+RUN npm ci
+COPY activity/ ./
+RUN npm run build
+
+# ---- rust build --------------------------------------------------------
 FROM rust:1.96-slim-bookworm AS build
 WORKDIR /src
 
@@ -27,9 +36,12 @@ RUN mkdir -p /data && chown leaf:leaf /data
 
 COPY --from=build /src/target/release/leaf /usr/local/bin/leaf
 COPY --from=build /src/target/release/leaf-migrate /usr/local/bin/leaf-migrate
+# The built gallery; leaf-server serves it from STATIC_DIR.
+COPY --from=frontend /app/dist /app/dist
 
 USER leaf
 ENV DATA_DIR=/data
+ENV STATIC_DIR=/app/dist
 VOLUME /data
 EXPOSE 8080
 
