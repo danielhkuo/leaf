@@ -8,6 +8,7 @@
   import { nav } from '../lib/stores/nav.svelte';
   import Home from './Home.svelte';
   import Picker from './Picker.svelte';
+  import Viewer from './Viewer.svelte';
 
   interface Props {
     session: Session;
@@ -27,11 +28,12 @@
       nav.reset({ name: 'home', seriesId: only.id });
       return;
     }
+    // Seed the picker beneath any remembered series so the back button always
+    // returns to the full series list (rather than stranding you in one).
     const remembered = lastSeries();
+    nav.reset({ name: 'picker' });
     if (remembered !== null && list.some((s) => s.id === remembered)) {
-      nav.reset({ name: 'home', seriesId: remembered });
-    } else {
-      nav.reset({ name: 'picker' });
+      nav.push({ name: 'home', seriesId: remembered });
     }
   }
 
@@ -52,13 +54,7 @@
 {:else if activeSeries}
   <Home series={activeSeries} canGoBack={nav.canGoBack} />
   {#if view.name === 'viewer'}
-    <div class="viewer-stub" role="dialog" aria-modal="true" aria-label={`Day ${view.day}`}>
-      <div class="card">
-        <p class="eyebrow">Day {view.day}</p>
-        <p class="muted">The day viewer arrives in the next phase.</p>
-        <button class="btn" onclick={() => nav.back()}>Close</button>
-      </div>
-    </div>
+    <Viewer series={activeSeries} day={view.day} onClose={() => nav.back()} />
   {/if}
 {:else}
   <div class="boot">
@@ -72,46 +68,5 @@
     place-items: center;
     min-height: 60vh;
     padding: var(--space-lg);
-  }
-  .viewer-stub {
-    position: fixed;
-    inset: 0;
-    display: grid;
-    place-items: center;
-    padding: var(--space-lg);
-    background: rgb(0 0 0 / 80%);
-  }
-  .card {
-    display: grid;
-    gap: var(--space-sm);
-    justify-items: center;
-    padding: var(--space-xl);
-    text-align: center;
-    background: var(--surface-1);
-    border: 1px solid var(--hairline);
-    border-radius: var(--radius-lg);
-  }
-  .eyebrow {
-    margin: 0;
-    color: var(--ink-subtle);
-    font-size: var(--fs-eyebrow);
-    font-weight: var(--fw-emphasis);
-    letter-spacing: 0.6px;
-    text-transform: uppercase;
-  }
-  .muted {
-    margin: 0;
-    color: var(--ink-muted);
-  }
-  .btn {
-    padding: 10px 18px;
-    color: var(--on-accent-dark);
-    font: inherit;
-    font-size: var(--fs-body-sm);
-    font-weight: var(--fw-emphasis);
-    background: var(--brand);
-    border: 0;
-    border-radius: var(--radius-md);
-    cursor: pointer;
   }
 </style>

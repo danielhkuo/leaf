@@ -10,6 +10,14 @@ import type { SdkLike } from './types';
 
 const CLIENT_ID = import.meta.env.VITE_DISCORD_CLIENT_ID;
 
+let sdkInstance: DiscordSDK | null = null;
+
+/** The live SDK, available after {@link boot} (for post-handshake commands). */
+export function getSdk(): DiscordSDK {
+  if (!sdkInstance) throw new Error('SDK used before boot()');
+  return sdkInstance;
+}
+
 /** Constructs the SDK and runs the handshake; resolves to a session. */
 export async function boot(): Promise<Session> {
   if (!CLIENT_ID) {
@@ -19,6 +27,7 @@ export async function boot(): Promise<Session> {
     );
   }
   const sdk = new DiscordSDK(CLIENT_ID);
+  sdkInstance = sdk;
   // The real SDK is a structural superset of `SdkLike`.
   return runHandshake({
     clientId: CLIENT_ID,

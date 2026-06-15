@@ -3,7 +3,7 @@
 
 import { LeafApi } from '../api/client';
 import type { Session } from '../sdk/handshake';
-import type { Series } from '../types/api';
+import type { DaySummary, Series } from '../types/api';
 
 let api: LeafApi | null = null;
 let guildId = '';
@@ -44,6 +44,30 @@ export async function initGallery(session: Session): Promise<void> {
     gallery.status = 'error';
     gallery.error = e instanceof Error ? e.message : String(e);
   }
+}
+
+/** Matches the API's MAX_WINDOW cap on a single `/days` range. */
+const DAY_WINDOW = 366;
+const indexCache = new Map<number, DaySummary[]>();
+
+/**
+ * The full ordered present-day list (with thumbnails) for a series, paged in
+ * and cached per id. Feeds the day viewer's gap-aware prev/next and its
+ * adjacent-thumbnail preload. Cheap — day numbers and short URLs, no images.
+ */
+export async function loadDaysIndex(seriesId: number, maxDay: number): Promise<DaySummary[]> {
+  const cached = indexCache.get(seriesId);
+  if (cached) return cached;
+  const client = getApi();
+  const gid = getGuildId();
+  const all: DaySummary[] = [];
+  for (let from = 1; from <= Math.max(1, maxDay); from += DAY_WINDOW) {
+    const to = Math.min(from + DAY_WINDOW - 1, maxDay);
+    if (from > to) break;
+    all.push(...(await client.listDays(gid, seriesId, { from, to })));
+  }
+  indexCache.set(seriesId, all);
+  return all;
 }
 
 const LAST_KEY = 'leaf:lastSeries';
