@@ -19,6 +19,10 @@ export default defineConfig({
     allowedHosts: devHost ? [devHost, '.trycloudflare.com'] : ['.trycloudflare.com'],
     proxy: {
       '/api': { target: API_TARGET, changeOrigin: true },
+      // The admin panel's OAuth login/callback are server routes (not the
+      // SPA), so forward them to leaf-server — Vite serves /admin itself.
+      '/admin/login': { target: API_TARGET, changeOrigin: true },
+      '/admin/callback': { target: API_TARGET, changeOrigin: true },
     },
   },
   build: {

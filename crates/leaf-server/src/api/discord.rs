@@ -50,6 +50,18 @@ struct MemberResponse {
     roles: Vec<String>,
 }
 
+/// Discord's Manage-Guild permission bit.
+const MANAGE_GUILD: u64 = 1 << 5;
+
+#[derive(Deserialize)]
+struct UserGuild {
+    id: String,
+    #[serde(default)]
+    owner: bool,
+    /// Stringified permission bitfield for the current user in this guild.
+    permissions: String,
+}
+
 impl DiscordApi for LiveDiscord {
     async fn exchange_code(&self, code: &str, redirect_uri: &str) -> Result<String, String> {
         let resp = self
@@ -116,5 +128,32 @@ impl DiscordApi for LiveDiscord {
             reqwest::StatusCode::NOT_FOUND => Ok(None),
             s => Err(format!("member lookup returned {s}")),
         }
+    }
+
+    async fn managed_guild_ids(&self, access_token: &str) -> Result<Vec<String>, String> {
+        let resp = self
+            .http
+            .get(format!("{API}/users/@me/guilds"))
+            .bearer_auth(access_token)
+            .send()
+            .await
+            .map_err(|e| format!("guild list failed: {e}"))?;
+        if !resp.status().is_success() {
+            return Err(format!("guild list returned {}", resp.status()));
+        }
+        let guilds: Vec<UserGuild> = resp
+            .json()
+            .await
+            .map_err(|e| format!("bad guild list response: {e}"))?;
+        Ok(guilds
+            .into_iter()
+            .filter(|g| {
+                g.owner
+                    || g.permissions
+                        .parse::<u64>()
+                        .is_ok_and(|p| p & MANAGE_GUILD != 0)
+            })
+            .map(|g| g.id)
+            .collect())
     }
 }

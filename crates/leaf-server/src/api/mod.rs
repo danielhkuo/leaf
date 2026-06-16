@@ -10,6 +10,7 @@
 //! scope here — API viewers are treated as non-admin members; moderation
 //! stays in the bot. Membership caching is a Phase-19 optimization.
 
+pub mod admin;
 pub mod auth;
 pub mod discord;
 pub mod dto;
@@ -47,6 +48,7 @@ pub fn router<D: DiscordApi>(state: ApiState<D>) -> Router {
         )
         .route("/api/guilds/{gid}/series/{sid}/stats", get(get_stats::<D>))
         .route("/api/media/{attachment_id}", get(media::media::<D>))
+        .merge(admin::router::<D>())
         .with_state(state)
 }
 
@@ -247,10 +249,13 @@ mod tests {
     use super::*;
     use crate::api::auth::{DiscordApi, SessionKey};
 
-    /// Mock Discord: a fixed membership map, never hits the network.
+    /// Mock Discord: fixed membership + managed-guild maps, never hits the
+    /// network. The test "code"/access-token encodes the user id.
     struct MockDiscord {
         /// (guild, user) → roles. Absent = not a member.
         members: std::collections::HashMap<(String, String), Vec<String>>,
+        /// user → guild ids they manage (Manage-Guild).
+        manages: std::collections::HashMap<String, Vec<String>>,
     }
 
     impl DiscordApi for MockDiscord {
@@ -270,6 +275,10 @@ mod tests {
                 .members
                 .get(&(guild_id.to_owned(), user_id.to_owned()))
                 .cloned())
+        }
+        async fn managed_guild_ids(&self, access_token: &str) -> Result<Vec<String>, String> {
+            let user = access_token.trim_start_matches("access-for-");
+            Ok(self.manages.get(user).cloned().unwrap_or_default())
         }
     }
 
@@ -349,6 +358,10 @@ mod tests {
         members.insert((GUILD.to_owned(), MEMBER.to_owned()), vec![]);
         members.insert((GUILD.to_owned(), "vip".to_owned()), vec![ROLE.to_owned()]);
 
+        // CREATOR manages the guild; MEMBER manages nothing.
+        let mut manages = std::collections::HashMap::new();
+        manages.insert(CREATOR.to_owned(), vec![GUILD.to_owned()]);
+
         let key = SessionKey::derive("test-secret");
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let state = ApiState {
@@ -357,8 +370,9 @@ mod tests {
             guilds: GuildSettingsRepo::new(pool),
             store,
             key: key.clone(),
-            discord: Arc::new(MockDiscord { members }),
-            redirect_uri: "https://leaf.test/cb".to_owned(),
+            discord: Arc::new(MockDiscord { members, manages }),
+            redirect_uri: "https://leaf.test".to_owned(),
+            client_id: "client-123".to_owned(),
         };
         (router(state), key)
     }
@@ -533,6 +547,206 @@ mod tests {
             get(&app, "/api/guilds/g1/series", Some(token)).await,
             StatusCode::OK
         );
+    }
+
+    // --- admin panel ---
+    fn admin_token(key: &SessionKey, user: &str, guilds: &[&str]) -> String {
+        let g: Vec<String> = guilds.iter().map(|s| (*s).to_owned()).collect();
+        key.mint_admin(user, &g, now_unix(), 3600)
+    }
+
+    async fn patch_json(
+        router: &Router,
+        path: &str,
+        bearer: &str,
+        body: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        let resp = router
+            .clone()
+            .oneshot(
+                Request::patch(path)
+                    .header("Authorization", format!("Bearer {bearer}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_owned()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let v = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, v)
+    }
+
+    #[tokio::test]
+    async fn admin_routes_reject_missing_and_gallery_tokens() {
+        let (app, key) = app().await;
+        assert_eq!(
+            get(&app, "/api/admin/guilds", None).await,
+            StatusCode::UNAUTHORIZED
+        );
+        // A gallery session token is not an admin token.
+        let gallery = token_for(&key, CREATOR);
+        assert_eq!(
+            get(&app, "/api/admin/guilds", Some(&gallery)).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_lists_managed_guilds_and_hides_others() {
+        let (app, key) = app().await;
+        let tok = admin_token(&key, CREATOR, &[GUILD]);
+        let guilds = router_json(&app, "/api/admin/guilds", &tok).await;
+        assert_eq!(guilds.len(), 1);
+        assert_eq!(guilds[0]["guild_id"].as_str().unwrap(), GUILD);
+        assert_eq!(guilds[0]["series_count"].as_u64().unwrap(), 5);
+        // A guild not in the token is hidden as 404.
+        assert_eq!(
+            get(&app, "/api/admin/guilds/other", Some(&tok)).await,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_reads_guild_detail() {
+        let (app, key) = app().await;
+        let tok = admin_token(&key, CREATOR, &[GUILD]);
+        let detail = router_json_value(&app, "/api/admin/guilds/g1", &tok).await;
+        assert_eq!(detail["guild_id"].as_str().unwrap(), GUILD);
+        assert!(detail["settings"].is_object());
+        assert_eq!(detail["series"].as_array().unwrap().len(), 5);
+    }
+
+    #[tokio::test]
+    async fn admin_patches_settings() {
+        let (app, key) = app().await;
+        let tok = admin_token(&key, CREATOR, &[GUILD]);
+        let (status, v) = patch_json(
+            &app,
+            "/api/admin/guilds/g1/settings",
+            &tok,
+            r#"{"timezone":"America/Chicago","sprout_enabled":true,"max_series_per_user":9}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(v["timezone"].as_str().unwrap(), "America/Chicago");
+        assert!(v["sprout_enabled"].as_bool().unwrap());
+        assert_eq!(v["max_series_per_user"].as_i64().unwrap(), 9);
+    }
+
+    #[tokio::test]
+    async fn admin_revokes_and_edits_series_privacy() {
+        let (app, key) = app().await;
+        let tok = admin_token(&key, CREATOR, &[GUILD]);
+        let (status, v) = patch_json(
+            &app,
+            "/api/admin/guilds/g1/series/1",
+            &tok,
+            r#"{"state":"revoked"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(v["state"].as_str().unwrap(), "revoked");
+
+        let (status, v) = patch_json(
+            &app,
+            "/api/admin/guilds/g1/series/1",
+            &tok,
+            r#"{"privacy":"creator_only"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(v["privacy"].as_str().unwrap(), "creator_only");
+
+        // A bogus enum value is a 400.
+        let (status, _) = patch_json(
+            &app,
+            "/api/admin/guilds/g1/series/1",
+            &tok,
+            r#"{"state":"nope"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn admin_cannot_reach_series_through_an_unmanaged_guild() {
+        let (app, key) = app().await;
+        let tok = admin_token(&key, CREATOR, &[GUILD]);
+        // Series 1 exists (in g1) but is referenced under an unmanaged guild.
+        let (status, _) = patch_json(
+            &app,
+            "/api/admin/guilds/other/series/1",
+            &tok,
+            r#"{"state":"revoked"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn admin_login_redirects_to_discord_consent() {
+        let (app, _key) = app().await;
+        let resp = app
+            .clone()
+            .oneshot(Request::get("/admin/login").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+        let loc = resp.headers().get("location").unwrap().to_str().unwrap();
+        assert!(loc.contains("discord.com/oauth2/authorize"));
+        assert!(loc.contains("client_id=client-123"));
+        assert!(loc.contains("redirect_uri=https%3A%2F%2Fleaf.test%2Fadmin%2Fcallback"));
+    }
+
+    #[tokio::test]
+    async fn admin_callback_mints_a_scoped_token_or_refuses() {
+        let (app, key) = app().await;
+        let state = key.sign_oauth_state(now_unix(), 600);
+
+        // CREATOR manages GUILD → a token scoped to it.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/admin/callback?code={CREATOR}&state={state}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+        let loc = resp.headers().get("location").unwrap().to_str().unwrap();
+        let token = loc.strip_prefix("/admin#token=").unwrap();
+        let claims = key.verify_admin(token, now_unix()).unwrap();
+        assert_eq!(claims.user_id, CREATOR);
+        assert_eq!(claims.guild_ids, vec![GUILD.to_owned()]);
+
+        // A member who manages nothing is forbidden.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/admin/callback?code={MEMBER}&state={state}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // A forged state is rejected before any exchange.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/admin/callback?code={CREATOR}&state=forged"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
     // --- helpers that return parsed JSON ---

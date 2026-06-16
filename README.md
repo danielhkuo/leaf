@@ -18,6 +18,9 @@ First run boots into **setup mode**: a local page collects the bot token,
 Discord OAuth pair, public URL, and R2 credentials, validates them live, and
 writes `leaf.conf` to the data volume. No env vars to edit, no redeploy.
 
+For a full production deploy — public HTTPS, the Discord app wiring, the Entry
+Point launch command, and the web admin panel — see [DEPLOY.md](DEPLOY.md).
+
 ## Development
 
 ```sh

@@ -128,6 +128,7 @@ async fn run_mode(
         key: leaf_server::api::auth::SessionKey::derive(&config.client_secret),
         discord: std::sync::Arc::new(discord),
         redirect_uri: config.public_url.clone(),
+        client_id: config.client_id.clone(),
     };
 
     let bot_cfg = leaf_bot::BotConfig {

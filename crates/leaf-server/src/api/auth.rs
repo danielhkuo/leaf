@@ -115,6 +115,108 @@ impl SessionKey {
     }
 }
 
+/// What an admin session token carries: who, and which guilds they manage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdminClaims {
+    /// Discord user snowflake.
+    pub user_id: String,
+    /// Guild ids the user managed at login (Manage-Guild or owner).
+    pub guild_ids: Vec<String>,
+}
+
+/// Admin tokens authorize the web panel.
+///
+/// Minted only after a browser OAuth login proves the user manages a guild,
+/// and domain-separated from gallery tokens so neither works as the other.
+/// The managed-guild set is baked in at login — re-login to pick up changes.
+impl SessionKey {
+    /// Mints an admin token for `user_id` managing `guild_ids`.
+    #[must_use]
+    pub fn mint_admin(
+        &self,
+        user_id: &str,
+        guild_ids: &[String],
+        now_unix: i64,
+        ttl_secs: i64,
+    ) -> String {
+        let payload = format!(
+            "admin\0{user_id}\0{}\0{}",
+            guild_ids.join(","),
+            now_unix + ttl_secs
+        );
+        let sig = self.mac(payload.as_bytes()).finalize().into_bytes();
+        format!("{}.{}", B64.encode(payload.as_bytes()), B64.encode(sig))
+    }
+
+    /// Verifies an admin token, returning its claims if valid and unexpired.
+    pub fn verify_admin(&self, token: &str, now_unix: i64) -> Result<AdminClaims, AuthError> {
+        let (payload_b64, sig_b64) = token.split_once('.').ok_or(AuthError::Malformed)?;
+        let payload = B64.decode(payload_b64).map_err(|_| AuthError::Malformed)?;
+        let sig = B64.decode(sig_b64).map_err(|_| AuthError::Malformed)?;
+        self.mac(&payload)
+            .verify_slice(&sig)
+            .map_err(|_| AuthError::BadSignature)?;
+
+        let payload = String::from_utf8(payload).map_err(|_| AuthError::Malformed)?;
+        let mut parts = payload.split('\0');
+        if parts.next() != Some("admin") {
+            return Err(AuthError::Malformed);
+        }
+        let (Some(user_id), Some(guilds), Some(exp), None) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        else {
+            return Err(AuthError::Malformed);
+        };
+        let exp: i64 = exp.parse().map_err(|_| AuthError::Malformed)?;
+        if now_unix >= exp {
+            return Err(AuthError::Expired);
+        }
+        if user_id.is_empty() {
+            return Err(AuthError::Malformed);
+        }
+        let guild_ids = if guilds.is_empty() {
+            Vec::new()
+        } else {
+            guilds.split(',').map(ToOwned::to_owned).collect()
+        };
+        Ok(AdminClaims {
+            user_id: user_id.to_owned(),
+            guild_ids,
+        })
+    }
+
+    /// Signs a short-lived OAuth `state` (a CSRF/replay guard for admin login).
+    #[must_use]
+    pub fn sign_oauth_state(&self, now_unix: i64, ttl_secs: i64) -> String {
+        let exp = now_unix + ttl_secs;
+        let sig = self
+            .mac(format!("oauth-state\0{exp}").as_bytes())
+            .finalize()
+            .into_bytes();
+        format!("{exp}.{}", B64.encode(sig))
+    }
+
+    /// Verifies an OAuth `state` we issued that has not expired.
+    #[must_use]
+    pub fn verify_oauth_state(&self, state: &str, now_unix: i64) -> bool {
+        let Some((exp_str, sig_b64)) = state.split_once('.') else {
+            return false;
+        };
+        let Ok(exp) = exp_str.parse::<i64>() else {
+            return false;
+        };
+        if now_unix >= exp {
+            return false;
+        }
+        let Ok(sig) = B64.decode(sig_b64) else {
+            return false;
+        };
+        self.mac(format!("oauth-state\0{exp}").as_bytes())
+            .verify_slice(&sig)
+            .is_ok()
+    }
+}
+
 /// Builds signed media URL pairs (full + thumbnail) for one viewing
 /// session; carries the key and a shared expiry so DTOs stay key-free.
 pub struct MediaSigner<'a> {
@@ -207,6 +309,14 @@ pub trait DiscordApi: Send + Sync + 'static {
         guild_id: &str,
         user_id: &str,
     ) -> impl Future<Output = Result<Option<Vec<String>>, String>> + Send;
+
+    /// Guild ids the access-token's user can manage (owner or Manage-Guild),
+    /// via `/users/@me/guilds`. Gates the admin panel; needs the `guilds`
+    /// OAuth scope.
+    fn managed_guild_ids(
+        &self,
+        access_token: &str,
+    ) -> impl Future<Output = Result<Vec<String>, String>> + Send;
 }
 
 #[cfg(test)]
@@ -296,5 +406,46 @@ mod tests {
         let key = SessionKey::derive("k");
         let tok = key.mint("abc:def", 0, 100);
         assert_eq!(key.verify(&tok, 0).unwrap(), "abc:def");
+    }
+
+    #[test]
+    fn admin_token_round_trips_claims_and_expires() {
+        let key = SessionKey::derive("k");
+        let guilds = vec!["g1".to_owned(), "g2".to_owned()];
+        let tok = key.mint_admin("u1", &guilds, 1000, 100);
+        let claims = key.verify_admin(&tok, 1000).unwrap();
+        assert_eq!(claims.user_id, "u1");
+        assert_eq!(claims.guild_ids, guilds);
+        assert!(key.verify_admin(&tok, 1099).is_ok());
+        assert_eq!(key.verify_admin(&tok, 1100), Err(AuthError::Expired));
+    }
+
+    #[test]
+    fn admin_token_handles_no_managed_guilds() {
+        let key = SessionKey::derive("k");
+        let tok = key.mint_admin("u1", &[], 0, 100);
+        assert!(key.verify_admin(&tok, 0).unwrap().guild_ids.is_empty());
+    }
+
+    #[test]
+    fn admin_and_gallery_tokens_are_not_interchangeable() {
+        let key = SessionKey::derive("k");
+        // A gallery token must not verify as admin, and vice versa.
+        let gallery = key.mint("u1", 0, 100);
+        assert!(key.verify_admin(&gallery, 0).is_err());
+        let admin = key.mint_admin("u1", &["g".to_owned()], 0, 100);
+        assert!(key.verify(&admin, 0).is_err());
+        // A different key rejects an admin token.
+        assert!(SessionKey::derive("other").verify_admin(&admin, 0).is_err());
+    }
+
+    #[test]
+    fn oauth_state_signs_and_expires() {
+        let key = SessionKey::derive("k");
+        let state = key.sign_oauth_state(1000, 60);
+        assert!(key.verify_oauth_state(&state, 1000));
+        assert!(!key.verify_oauth_state(&state, 1060)); // expired
+        assert!(!key.verify_oauth_state("garbage", 1000));
+        assert!(!SessionKey::derive("other").verify_oauth_state(&state, 1000));
     }
 }

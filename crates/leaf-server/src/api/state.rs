@@ -26,8 +26,10 @@ pub struct ApiState<D> {
     pub key: SessionKey,
     /// Discord calls (token exchange, membership).
     pub discord: Arc<D>,
-    /// Default OAuth redirect URI for code exchange.
+    /// Default OAuth redirect URI for code exchange (the public origin).
     pub redirect_uri: String,
+    /// OAuth client id (public) — builds the admin login URL.
+    pub client_id: String,
 }
 
 // Manual `Clone`: deriving would wrongly require `D: Clone` (we only hold
@@ -42,6 +44,7 @@ impl<D> Clone for ApiState<D> {
             key: self.key.clone(),
             discord: Arc::clone(&self.discord),
             redirect_uri: self.redirect_uri.clone(),
+            client_id: self.client_id.clone(),
         }
     }
 }
