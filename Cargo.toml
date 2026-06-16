@@ -46,6 +46,7 @@ regex-lite = "0.1"
 chrono-tz = "0.10"
 rand = "0.9"
 tempfile = "3"
+clap = { version = "4", features = ["derive"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
