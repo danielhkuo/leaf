@@ -8,7 +8,7 @@
 //!
 //! Admin-in-gallery (an admin viewing others' private series) is out of
 //! scope here — API viewers are treated as non-admin members; moderation
-//! stays in the bot. Membership caching is a Phase-19 optimization.
+//! stays in the bot. Membership caching remains a future optimization.
 
 pub mod admin;
 pub mod auth;
@@ -286,6 +286,8 @@ mod tests {
     const CREATOR: &str = "creator1";
     const MEMBER: &str = "member1";
     const ROLE: &str = "role-vip";
+    /// Bytes seeded at the `k-orig` object key for the media-stream test.
+    const MEDIA_BYTES: &[u8] = b"\x89PNG\r\n\x1a\n not-a-real-image";
 
     /// Builds a fully-seeded app + key. Members: creator (no roles), a plain
     /// member, and a VIP member holding `ROLE`. Series of each visibility.
@@ -364,6 +366,15 @@ mod tests {
 
         let key = SessionKey::derive("test-secret");
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        // Seed only the original (not the thumb), so the streaming test gets
+        // bytes while the signature-gate test still 404s on the absent thumb.
+        store
+            .put(
+                &object_store::path::Path::from("k-orig"),
+                bytes::Bytes::from_static(MEDIA_BYTES).into(),
+            )
+            .await
+            .unwrap();
         let state = ApiState {
             series: series_repo,
             posts,
@@ -512,13 +523,51 @@ mod tests {
             get(&app, "/api/media/att1?exp=9999999999&sig=bad", None).await,
             StatusCode::FORBIDDEN
         );
-        // Correctly signed thumbnail streams from the store (seeded below).
-        // (The object itself isn't in InMemory here, so a valid sig yields
-        // 404 from the store, not 403 — proving the sig gate passed.)
+        // A correctly-signed *thumbnail* request passes the gate but 404s,
+        // because the thumb object (`k-thumb`) isn't seeded — proving the sig
+        // gate let it through to the store.
         let exp = now_unix() + 60;
         let sig = key.sign_media("att1", exp);
         let path = format!("/api/media/att1?thumb=1&exp={exp}&sig={sig}");
         assert_eq!(get(&app, &path, None).await, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn media_streams_the_original_with_immutable_cache_headers() {
+        let (app, key) = app().await;
+        let exp = now_unix() + 60;
+        // The original (no `thumb`) maps to the seeded `k-orig` object.
+        let sig = key.sign_media("att1", exp);
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/api/media/att1?exp={exp}&sig={sig}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get("content-type")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "image/png"
+        );
+        assert_eq!(
+            resp.headers()
+                .get("cache-control")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "public, max-age=31536000, immutable"
+        );
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        assert_eq!(body.as_ref(), MEDIA_BYTES);
     }
 
     #[tokio::test]

@@ -81,4 +81,18 @@ describe('DayViewer', () => {
     await fireEvent.click(dots[1]!);
     expect(screen.getByRole('img', { name: 'A nice day' })).toHaveAttribute('src', '/api/media/b');
   });
+
+  it('keeps exactly one full-res image across day navigation (no accumulation)', async () => {
+    const { container, rerender } = render(DayViewer, { props: props() });
+    expect(container.querySelectorAll('img.full')).toHaveLength(1);
+
+    // Navigate through several days; the full-res <img> is reused, never piled
+    // up — the structural guarantee behind "memory flat over a 50-day browse".
+    for (let day = 6; day <= 10; day += 1) {
+      await rerender(
+        props({ day: { ...DAY, day, media: [{ ...IMG, url: `/api/media/${day}` }] } }),
+      );
+      expect(container.querySelectorAll('img.full')).toHaveLength(1);
+    }
+  });
 });

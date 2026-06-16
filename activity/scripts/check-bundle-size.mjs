@@ -1,12 +1,13 @@
 // Fails when the gzipped initial JS chunk exceeds the budget. The gallery
 // runs in a sandboxed iframe on phones; a runaway bundle is a regression.
-// Phase 15 budget: 50KB gzipped (tightened in Phase 19).
+// Tightened in Phase 19 to measured reality (~34KB) + headroom. The admin
+// panel and the SDK are deferred chunks and don't count against this.
 
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { gzipSync } from 'node:zlib';
 
-const BUDGET_BYTES = 50 * 1024;
+const BUDGET_BYTES = 40 * 1024;
 const ASSET_DIR = 'dist/assets';
 
 let files;
