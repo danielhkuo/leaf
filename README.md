@@ -1,49 +1,33 @@
 # 🍃 leaf
 
-A peaceful photo/video archive bot and gallery for Discord. Creators run a
-**Series** — an ongoing archive of daily posts — and browse it in a gallery
-embedded app, without leaving Discord.
+leaf is a Discord bot and gallery for keeping a daily photo/video archive. You
+run a Series, post to it regularly, and browse it back as a calendar and day
+viewer inside Discord.
 
-- Product & architecture: [PLAN.md](PLAN.md)
-- Build plan (20 phases), code standards, guides: [docs/](docs/README.md)
+It runs as one container: the bot, the web API, the gallery, and an admin panel,
+all over a single SQLite database. Media is stored in Cloudflare R2.
 
-## Run it (Docker)
-
-```sh
-docker compose up
-# open http://localhost:8080/setup and enter the setup code from the logs
-```
-
-First run boots into **setup mode**: a local page collects the bot token,
-Discord OAuth pair, public URL, and R2 credentials, validates them live, and
-writes `leaf.conf` to the data volume. No env vars to edit, no redeploy.
-
-For a full production deploy — public HTTPS, the Discord app wiring, the Entry
-Point launch command, and the web admin panel — see [DEPLOY.md](DEPLOY.md).
-
-## Development
+## Quick start
 
 ```sh
-# toolchain is pinned by rust-toolchain.toml; sqlx-cli generates the dev DB
-cargo install sqlx-cli --no-default-features --features sqlite
-
-# create the dev database used by sqlx's compile-time query checking
-echo 'DATABASE_URL=sqlite:data/dev.db' > .env
-sqlx database create && sqlx migrate run --source migrations
-
-cargo test --workspace
-cargo clippy --workspace --all-targets --all-features -- -D warnings
+git clone <your-repo-url> leaf && cd leaf
+docker compose up -d
+docker compose logs -f leaf       # the first run prints a one-time setup code
 ```
 
-After changing any SQL, refresh the committed offline artifact:
+Open `http://localhost:8080/setup`, enter the code, and fill in your Discord and
+R2 credentials. leaf validates them and starts.
 
-```sh
-cargo sqlx prepare --workspace -- --all-targets
-```
+You'll need a Discord application and a Cloudflare R2 bucket before that step, and
+a public HTTPS hostname for anything past local testing. The
+[setup guide](guide/README.md) walks through all of it: Discord, Cloudflare
+Tunnel and R2, daily use, and importing an old archive.
 
-Quality gates (enforced in CI): rustfmt, clippy `pedantic` at deny, tests,
-cargo-deny, sqlx offline freshness, Docker build. See
-[docs/rust-guidelines.md](docs/rust-guidelines.md).
+## Documentation
+
+- [Setup & usage guide](guide/README.md)
+- [Local development](guide/06-local-dev.md)
+- [Web UI spec](WEB-UI-SPEC.md) (what the setup page and admin panel do)
 
 ## License
 

@@ -1,5 +1,9 @@
 # Deploying leaf
 
+> **Quick reference.** For the detailed, step-by-step version — Discord +
+> Cloudflare dashboards, in-Discord usage, migration, troubleshooting — see the
+> **[setup guide](guide/README.md)**.
+
 leaf is **one self-hosted process** (bot + REST API + gallery + admin panel),
 plus a way to put it on a public HTTPS origin (Discord activities require
 one). This guide covers production: exposing it, first-run setup, the Discord
