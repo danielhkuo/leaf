@@ -1,8 +1,8 @@
-# 07 — Troubleshooting & what to verify
+# 07 — Troubleshooting
 
-Two parts: common failures and fixes, then the **consolidated checklist of
-dashboard steps to verify yourself** (every `[VERIFY]` from this guide in one
-place).
+Common failures and fixes. (Discord/Cloudflare dashboard layouts drift; see the
+note in the [guide index](README.md#dashboards-change) if a menu isn't where a
+guide says.)
 
 ## Common failures
 
@@ -69,13 +69,3 @@ place).
 - **Many `message_deleted` rows.** Originals are gone; recoverable ones are kept
   as missing placeholders. If unexpectedly high, confirm the bot still has
   **Read Message History** on the source channel(s).
-
----
-
-## What to verify in current dashboards
-
-leaf's own behavior is documented as fact. The steps that depend on the Discord
-or Cloudflare dashboards can drift, so each is flagged inline with a
-`⚠️ [VERIFY]` callout in guides 02 (Discord), 03 (Cloudflare), 04 (usage), and 06
-(local dev). They were last confirmed 2026-06; re-check them against the live UI
-when something doesn't match.

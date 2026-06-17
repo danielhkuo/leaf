@@ -68,10 +68,6 @@ or **creator-only**. Privacy is enforced everywhere — commands *and* gallery.
 The primary capture path. **Right-click (or long-press) any message → Apps →
 `🍃 Archive to Series`.**
 
-> ⚠️ **[VERIFY] context-menu location** — message context-menu commands live
-> under the **Apps** submenu on right-click / long-press; confirm the current
-> path on your client.
-
 1. Pick the series (skipped if you have exactly one).
 2. A modal opens with the **day number pre-filled** (parsed from the message,
    falling back to the next expected day) — editable.
@@ -112,10 +108,6 @@ embedded app views). Launch it from the **app launcher** or the **Entry Point
 command** (see [02-discord.md § Entry Point](02-discord.md#5-entry-point-launch-command-recommended)) —
 prefer these over the voice-channel Activities shelf so no "Game Invitation"
 cards appear.
-
-> ⚠️ **[VERIFY] launching an Activity** — where the app launcher lives differs by
-> client (desktop vs mobile) and Discord changes it; confirm how to start an
-> Activity on your client.
 
 Inside the gallery:
 

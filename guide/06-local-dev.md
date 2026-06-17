@@ -68,11 +68,6 @@ Discord application**:
 cloudflared tunnel --url http://localhost:8080
 ```
 
-> ⚠️ **[VERIFY] cloudflared quick tunnel** — confirm the current `cloudflared
-> tunnel --url …` syntax and that quick tunnels (`*.trycloudflare.com`) are still
-> offered free with no account. This is the command Discord's own Activities
-> tutorial uses.
-
 Then, in a **dev** Discord application (don't reuse production):
 
 - Set its **URL mapping** target and **OAuth redirects** to the
@@ -86,9 +81,6 @@ Then, in a **dev** Discord application (don't reuse production):
 Everything else (creating the dev app, intents, R2 bucket/token) follows
 [02-discord.md](02-discord.md) and [03-cloudflare.md](03-cloudflare.md) — just
 with dev-scoped resources.
-
-> ⚠️ **[VERIFY] dev portal/R2 steps** — same dashboard caveats as the production
-> guides apply to the dev app and dev bucket.
 
 ## Where things live
 

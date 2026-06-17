@@ -32,8 +32,7 @@ Reference, read when you need them:
   with `leaf-migrate` (the Daily Johan cutover).
 - **[06-local-dev.md](06-local-dev.md)** — build, test, and run leaf locally as
   a contributor.
-- **[07-troubleshooting.md](07-troubleshooting.md)** — common failures and fixes,
-  plus the dashboard steps to re-check when Discord or Cloudflare change.
+- **[07-troubleshooting.md](07-troubleshooting.md)** — common failures and fixes.
 
 ```
                  ┌─────────────────┐
@@ -49,23 +48,10 @@ Reference, read when you need them:
                  └─────────────────┘
 ```
 
-## ⚠️ About the `[VERIFY]` callouts
+## Dashboards change
 
-leaf's own behavior (config fields, commands, env vars, the migrator) is
-documented here as **fact** — it comes from the code in this repo.
-
-The **Discord Developer Portal** and the **Cloudflare dashboard**, however,
-change their layouts, labels, requirements, and pricing regularly. Wherever this
-guide describes one of *their* screens, you'll see a callout like:
-
-> ⚠️ **[VERIFY] Cloudflare UI** — dashboards drift. As of writing the path is
-> *Zero Trust → Networks → Connectors*; confirm the current location/labels.
-
-Treat every `[VERIFY]` as "true when written; double-check it against the live
-dashboard." The flagged steps live in guides 02 (Discord), 03 (Cloudflare), 04
-(usage), and 06 (local dev); [07-troubleshooting.md](07-troubleshooting.md#what-to-verify-in-current-dashboards)
-lists them in one place.
-
-> 📸 Screenshots aren't included. The
-> fiddly steps carry a `screenshot` HTML comment marking where you may want to
-> add your own.
+leaf's own behavior (config fields, commands, env vars, the migrator) is fact;
+it comes from the code. The **Discord** and **Cloudflare** dashboards, though,
+move and rename things often, so the exact menus and labels in guides 02 and 03
+aren't guaranteed to match what you see. The values you need don't change; if a
+screen isn't where described, look for the equivalently-named section.
