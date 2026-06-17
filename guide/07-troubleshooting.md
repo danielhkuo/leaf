@@ -31,7 +31,7 @@ guide says.)
 - **502 / can't reach `leaf.example.com`.** Confirm the `leaf` container is up
   (`docker compose ps`), the tunnel sidecar is running
   (`docker compose --profile tunnel up -d`), `TUNNEL_TOKEN` is set in `.env`,
-  and the tunnel's public hostname targets `http://leaf:8080` (the compose
+  and the tunnel's public hostname targets `http://leaf:3777` (the compose
   service name). The DNS record should be **proxied** (orange cloud).
 
 ### Bot online but commands/greeting missing

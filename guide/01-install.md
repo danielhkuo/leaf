@@ -33,7 +33,7 @@ live here — it goes to Cloudflare R2.
 ```sh
 git clone <your-leaf-repo-url> leaf
 cd leaf
-docker compose up -d                 # builds the image, starts leaf on :8080
+docker compose up -d                 # builds the image, starts leaf on :3777
 docker compose logs -f leaf          # watch startup and grab the setup code
 ```
 
@@ -42,7 +42,7 @@ with an empty data volume you'll see something like:
 
 ```
 leaf  | no configuration found — starting in setup mode
-leaf  | → open http://localhost:8080/setup (or your mapped host)
+leaf  | → open http://localhost:3777/setup (or your mapped host)
 leaf  | → setup code: 7QF2-IDT4
 ```
 
@@ -50,7 +50,7 @@ leaf  | → setup code: 7QF2-IDT4
 > is what protects the setup page — Discord OAuth can't, because the bot isn't
 > running yet. If you lose it, restart the container to mint a new one.
 
-At this point leaf is reachable at `http://localhost:8080` but **not yet
+At this point leaf is reachable at `http://localhost:3777` but **not yet
 public**. Before you can finish setup you need a public HTTPS origin and your
 credentials — do [02-discord.md](02-discord.md) and [03-cloudflare.md](03-cloudflare.md)
 now, then return here.
@@ -64,7 +64,7 @@ and the defaults are fine for the supported Docker deployment:
 | Var | Default (Docker) | Purpose |
 | --- | --- | --- |
 | `DATA_DIR` | `/data` | Where `leaf.conf` and `leaf.db` live (the volume). |
-| `BIND_ADDR` | `0.0.0.0:8080` | Address/port the web server binds. |
+| `BIND_ADDR` | `0.0.0.0:3777` | Address/port the web server binds. |
 | `STATIC_DIR` | `/app/dist` | Built gallery assets (set in the image). |
 | `LOG_LEVEL` | `info` | `tracing` env-filter (e.g. `info,leaf_bot=debug`). |
 | `DEV_GUILD_ID` | *(unset)* | If set, registers slash commands to that one guild **instantly** instead of globally (which can take ~1h to propagate). Handy while testing; leave unset in production. |
@@ -77,7 +77,7 @@ credentials here — those go through the setup page into `leaf.conf`.
 
 Once you have a public hostname pointed at the container (see
 [03-cloudflare.md](03-cloudflare.md)), open **`https://leaf.example.com/setup`**
-(or `http://localhost:8080/setup` if you're finishing locally before exposing
+(or `http://localhost:3777/setup` if you're finishing locally before exposing
 it). `/` redirects to `/setup` automatically.
 
 Enter the **setup code** from the logs, then fill the form. Every field is

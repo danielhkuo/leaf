@@ -98,7 +98,7 @@ cargo run --bin leaf
 ```
 
 With no config it starts in **setup mode** and prints a `/setup` URL and a
-one-time **setup code** to the terminal. Open `http://localhost:8080/setup`,
+one-time **setup code** to the terminal. Open `http://localhost:3777/setup`,
 enter the code, then fill in the **Application ID**, **Client Secret**, **Bot
 Token**, **R2** bucket/keys, and **Public URL** = `https://leaf-dev.example.com`.
 Saving validates the values and flips leaf-server into run mode.
@@ -117,7 +117,7 @@ npm install
 ### 5. Run it (three terminals)
 
 ```sh
-cargo run --bin leaf                                          # API + assets on :8080
+cargo run --bin leaf                                          # API + assets on :3777
 LEAF_DEV_HOST=leaf-dev.example.com npm run dev                # Vite on :5173 (from activity/)
 cloudflared tunnel run leaf-dev                               # tunnel → :5173
 ```

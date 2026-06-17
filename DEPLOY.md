@@ -15,7 +15,7 @@ panel. For local iteration see [activity/README.md](activity/README.md).
 ## 1. Run the container
 
 ```sh
-docker compose up -d            # leaf on :8080
+docker compose up -d            # leaf on :3777
 docker compose logs -f leaf     # watch startup / grab the first-run setup code
 ```
 
@@ -28,7 +28,7 @@ edge-cached — keep the record **proxied / orange-cloud ON**):
 
 - **Cloudflare Tunnel (bundled sidecar).** Create a tunnel in Cloudflare →
   Zero Trust → Networks → Tunnels, add a public hostname routing
-  `leaf.example.com` → `http://leaf:8080`, copy the connector **token** into a
+  `leaf.example.com` → `http://leaf:3777`, copy the connector **token** into a
   `.env` next to `docker-compose.yml` as `TUNNEL_TOKEN=…`, then:
   ```sh
   docker compose --profile tunnel up -d
@@ -36,7 +36,7 @@ edge-cached — keep the record **proxied / orange-cloud ON**):
   No port-forwarding required.
 
 - **Your own reverse proxy** (e.g. nginx proxy manager). Add a proxy host
-  `leaf.example.com` → `http://127.0.0.1:8080`, enable SSL (Let's Encrypt),
+  `leaf.example.com` → `http://127.0.0.1:3777`, enable SSL (Let's Encrypt),
   Force SSL, and HTTP/2. Point a Cloudflare DNS record at it (orange-cloud on).
   No special headers needed — just don't force `X-Frame-Options: DENY` on this
   host.

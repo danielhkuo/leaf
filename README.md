@@ -20,15 +20,10 @@ R2 credentials. leaf validates them and starts.
 
 You'll need a Discord application and a Cloudflare R2 bucket before that step, and
 a public HTTPS hostname for anything past local testing. The
-[setup guide](guide/README.md) walks through all of it: Discord, Cloudflare
-Tunnel and R2, daily use, and importing an old archive.
+[setup guide](guide/README.md) walks through all of it.
 
 ## Documentation
 
 - [Setup & usage guide](guide/README.md)
 - [Local development](guide/06-local-dev.md)
 - [Web UI spec](WEB-UI-SPEC.md) (what the setup page and admin panel do)
-
-## License
-
-BSD-3-Clause.

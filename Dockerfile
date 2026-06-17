@@ -43,6 +43,6 @@ USER leaf
 ENV DATA_DIR=/data
 ENV STATIC_DIR=/app/dist
 VOLUME /data
-EXPOSE 8080
+EXPOSE 3777
 
 ENTRYPOINT ["/usr/local/bin/leaf"]

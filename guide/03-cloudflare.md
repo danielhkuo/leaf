@@ -33,7 +33,7 @@ This guide uses the **bundled `cloudflared` sidecar** in `docker-compose.yml`
    | --- | --- |
    | Subdomain / Domain | `leaf` / `example.com` (→ `leaf.example.com`) |
    | Service type | `HTTP` |
-   | URL | `leaf:8080` (the compose service name + port) |
+   | URL | `leaf:3777` (the compose service name + port) |
 
    The service target is `http://host:port`. On the compose network the host is
    the service name `leaf`; outside compose, use the reachable host/IP.
@@ -52,7 +52,7 @@ Keep the DNS record Cloudflare creates for the tunnel **proxied (orange cloud
 ON)** — that's what puts media behind Cloudflare's edge cache.
 
 > 💡 **Alternative: your own reverse proxy.** If you already run one (nginx proxy
-> manager, Caddy, Traefik), point `leaf.example.com` → `http://127.0.0.1:8080`
+> manager, Caddy, Traefik), point `leaf.example.com` → `http://127.0.0.1:3777`
 > with TLS, and a **proxied** Cloudflare DNS record at it instead of the tunnel.
 > Don't force `X-Frame-Options: DENY` on this host (it must load in Discord's
 > iframe).

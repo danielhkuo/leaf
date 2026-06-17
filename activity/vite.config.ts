@@ -4,7 +4,7 @@ import { defineConfig } from 'vite';
 // In dev the API is proxied to a locally-running leaf-server so the app is
 // same-origin (matching production behind Discord's proxy). Override the
 // target with LEAF_API_TARGET if leaf-server runs elsewhere.
-const API_TARGET = process.env.LEAF_API_TARGET ?? 'http://localhost:8080';
+const API_TARGET = process.env.LEAF_API_TARGET ?? 'http://localhost:3777';
 
 // Discord loads the activity over a public HTTPS tunnel, so the dev server is
 // reached via a non-localhost Host header — which Vite blocks by default since

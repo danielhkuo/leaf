@@ -221,7 +221,7 @@ mod tests {
         assert!(matches!(cfg.validate(), Err(ConfigError::BadPublicUrl)));
 
         let mut cfg = sample();
-        cfg.public_url = "http://localhost:8080".to_owned();
+        cfg.public_url = "http://localhost:3777".to_owned();
         assert!(cfg.validate().is_ok());
     }
 

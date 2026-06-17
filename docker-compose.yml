@@ -1,7 +1,7 @@
 # The one supported deployment (see PLAN.md § Hosting):
 # leaf (bot + server, one process) + Cloudflare Tunnel sidecar.
 #
-# First run: `docker compose up`, then open http://localhost:8080/setup and
+# First run: `docker compose up`, then open http://localhost:3777/setup and
 # enter the setup code from the logs. No env vars to edit.
 
 services:
@@ -10,7 +10,7 @@ services:
     container_name: leaf
     restart: unless-stopped
     ports:
-      - "8080:8080" # local access to setup page / API; the tunnel covers public
+      - "3777:3777" # local access to setup page / API; the tunnel covers public
     volumes:
       - leaf-data:/data
     environment:

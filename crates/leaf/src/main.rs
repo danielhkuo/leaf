@@ -30,9 +30,9 @@ async fn main() -> anyhow::Result<()> {
         .with_context(|| format!("creating data dir {}", data_dir.display()))?;
     let config_path = data_dir.join(CONFIG_FILE_NAME);
 
-    let bind: SocketAddr = env_or("BIND_ADDR", "0.0.0.0:8080")
+    let bind: SocketAddr = env_or("BIND_ADDR", "0.0.0.0:3777")
         .parse()
-        .context("BIND_ADDR must be a socket address like 0.0.0.0:8080")?;
+        .context("BIND_ADDR must be a socket address like 0.0.0.0:3777")?;
 
     let reconfigure = std::env::args().any(|a| a == "--reconfigure");
 

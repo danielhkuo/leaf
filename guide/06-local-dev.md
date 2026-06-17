@@ -64,8 +64,8 @@ dev needs a public origin. Use a **throwaway quick tunnel** and a **separate dev
 Discord application**:
 
 ```sh
-# expose your local leaf (default :8080) on a temporary public URL
-cloudflared tunnel --url http://localhost:8080
+# expose your local leaf (default :3777) on a temporary public URL
+cloudflared tunnel --url http://localhost:3777
 ```
 
 Then, in a **dev** Discord application (don't reuse production):
