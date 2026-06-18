@@ -52,6 +52,11 @@ jobs:
           # builds under QEMU emulation).
           platforms: linux/amd64
           push: true
+          # The Discord client id is public; it's baked into the gallery bundle
+          # at build time. Set it as a repo variable (Settings → Secrets and
+          # variables → Actions → Variables): VITE_DISCORD_CLIENT_ID.
+          build-args: |
+            VITE_DISCORD_CLIENT_ID=${{ vars.VITE_DISCORD_CLIENT_ID }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           # Shared with ci.yml's build-check, so this mostly hits cache.

@@ -5,7 +5,13 @@ WORKDIR /app
 COPY activity/package.json activity/package-lock.json ./
 RUN npm ci
 COPY activity/ ./
-RUN npm run build
+# The Discord application (client) id is public and is baked into the gallery
+# bundle at build time (Vite). Provide it with
+#   docker build --build-arg VITE_DISCORD_CLIENT_ID=<id>
+# (the publish workflow passes it from the VITE_DISCORD_CLIENT_ID repo variable).
+# Written to .env so Vite picks it up deterministically.
+ARG VITE_DISCORD_CLIENT_ID
+RUN printf 'VITE_DISCORD_CLIENT_ID=%s\n' "$VITE_DISCORD_CLIENT_ID" > .env && npm run build
 
 # ---- rust build --------------------------------------------------------
 FROM rust:1.96-slim-bookworm AS build
