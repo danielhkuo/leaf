@@ -29,8 +29,16 @@ jobs:
         run: cargo test --workspace
 
       - name: sqlx offline artifact is current
+        # prepare --check validates the committed .sqlx cache against a real
+        # schema, so it needs a live DB (SQLX_OFFLINE is for the cached build,
+        # not for prepare itself).
+        env:
+          DATABASE_URL: sqlite:ci.db
+          SQLX_OFFLINE: "false"
         run: |
           cargo install sqlx-cli --no-default-features --features sqlite --locked
+          sqlx database create
+          sqlx migrate run --source migrations
           cargo sqlx prepare --check --workspace -- --all-targets
 
       - name: cargo-deny
