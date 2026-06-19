@@ -23,14 +23,7 @@
   }: Props = $props();
 </script>
 
-<button
-  class="btn {variant}"
-  class:full
-  {type}
-  {disabled}
-  {onclick}
-  aria-label={ariaLabel}
->
+<button class="btn {variant}" class:full {type} {disabled} {onclick} aria-label={ariaLabel}>
   {@render children()}
 </button>
 

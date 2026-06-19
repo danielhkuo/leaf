@@ -10,11 +10,7 @@
 
 {#if cell.entry}
   {@const entry = cell.entry}
-  <button
-    class="cell present"
-    onclick={() => onOpenDay(entry.day)}
-    aria-label={`Day ${entry.day}`}
-  >
+  <button class="cell present" onclick={() => onOpenDay(entry.day)} aria-label={`Day ${entry.day}`}>
     {#if entry.thumbUrl}
       <img src={entry.thumbUrl} alt="" loading="lazy" decoding="async" width="120" height="120" />
     {:else}

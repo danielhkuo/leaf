@@ -32,11 +32,7 @@ describe('buildMonths', () => {
 
   it('spans every month between first and last, including gap-only months', () => {
     const months = buildMonths([day(1, 2023, 11, 20), day(2, 2024, 1, 10)], 'en-US');
-    expect(months.map((m) => m.label)).toEqual([
-      'December 2023',
-      'January 2024',
-      'February 2024',
-    ]);
+    expect(months.map((m) => m.label)).toEqual(['December 2023', 'January 2024', 'February 2024']);
     expect(months[1]?.cells.every((c) => c.entry === null)).toBe(true);
   });
 

@@ -42,10 +42,7 @@ function monthLabel(year: number, month: number, locale?: string): string {
 }
 
 /** Weekday column labels, Sunday-first. (2023-01-01 was a Sunday.) */
-export function weekdayLabels(
-  locale?: string,
-  weekday: 'narrow' | 'short' = 'short',
-): string[] {
+export function weekdayLabels(locale?: string, weekday: 'narrow' | 'short' = 'short'): string[] {
   const fmt = new Intl.DateTimeFormat(locale, { weekday });
   return Array.from({ length: WEEK }, (_, i) => fmt.format(new Date(2023, 0, 1 + i)));
 }

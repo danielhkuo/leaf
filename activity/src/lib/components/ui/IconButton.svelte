@@ -13,12 +13,7 @@
   let { ariaLabel, variant = 'ghost', disabled = false, onclick, children }: Props = $props();
 </script>
 
-<button
-  class="icon {variant}"
-  {disabled}
-  {onclick}
-  aria-label={ariaLabel}
->
+<button class="icon {variant}" {disabled} {onclick} aria-label={ariaLabel}>
   {@render children()}
 </button>
 

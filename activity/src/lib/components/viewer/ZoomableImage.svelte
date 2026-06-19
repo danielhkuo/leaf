@@ -149,9 +149,20 @@
   onpointercancel={onPointerUp}
   onwheel={onWheel}
 >
-  <div class="pan" class:smooth={!gesturing} style="transform:translate({tx}px,{ty}px) scale({scale})">
+  <div
+    class="pan"
+    class:smooth={!gesturing}
+    style="transform:translate({tx}px,{ty}px) scale({scale})"
+  >
     {#if placeholder}
-      <img class="ph" class:hidden={loaded} src={placeholder} alt="" aria-hidden="true" draggable="false" />
+      <img
+        class="ph"
+        class:hidden={loaded}
+        src={placeholder}
+        alt=""
+        aria-hidden="true"
+        draggable="false"
+      />
     {/if}
     <img
       class="full"
@@ -169,7 +180,12 @@
   {/if}
 
   <div class="zoom-controls">
-    <IconButton ariaLabel="Zoom out" variant="overlay" disabled={!zoomed} onclick={() => zoomTo(scale - STEP)}>
+    <IconButton
+      ariaLabel="Zoom out"
+      variant="overlay"
+      disabled={!zoomed}
+      onclick={() => zoomTo(scale - STEP)}
+    >
       −
     </IconButton>
     <IconButton ariaLabel="Zoom in" variant="overlay" onclick={() => zoomTo(scale + STEP)}>
