@@ -1,50 +1,56 @@
-/* leaf gallery — design tokens (dark-native), from docs/DESIGN.md.
- * Components consume these custom properties; they never hard-code values.
- * We ship dark only; the [data-theme] seam is reserved for a future light
- * theme (see the UI/UX plan) and is intentionally unbuilt. */
+/* leaf gallery — design tokens.
+ *
+ * Adapted from docs/DESIGN.md (Figma's design system) onto a dark base: a
+ * black/white structural frame, bright categorical accents, crisp 1px
+ * outlines instead of heavy shadows, geometric (not bubbly) radii, and pill
+ * controls. Components consume these custom properties; they never hard-code
+ * values. The [data-theme] seam is reserved for a future light theme. */
 
 :root {
   color-scheme: dark;
 
-  /* Surfaces — depth comes from lift, never shadow. */
+  /* Surfaces — depth from outline + contrast, never haze (DESIGN.md §6). */
   --canvas: #000000;
-  --surface-1: #15181e;
-  --surface-2: #1f232b;
-  --surface-3: #3b3d45;
-  --hairline: rgba(178, 182, 189, 0.1);
-  --hairline-strong: #3b3d45;
-  --hairline-soft: #252830;
+  --surface-1: #0d0d0f;
+  --surface-2: #18181b;
+  --surface-3: #27272b;
+  --hairline: rgba(255, 255, 255, 0.12);
+  --hairline-strong: rgba(255, 255, 255, 0.22);
+  --hairline-soft: rgba(255, 255, 255, 0.07);
 
   /* Ink. */
   --ink: #ffffff;
-  --ink-muted: #b2b6bd;
-  --ink-subtle: #656a76;
-  --on-accent-dark: #000000; /* text over bright accents (yellow/cyan) */
-  --inverse-canvas: #ffffff; /* white primary-button ground */
+  --ink-muted: #c4c4cc;
+  --ink-subtle: #8a8a93;
+  --on-accent-dark: #000000; /* text over bright accents */
+  --inverse-canvas: #ffffff; /* white primary-button ground (DESIGN.md primary) */
   --inverse-ink: #000000; /* text on inverse-canvas */
 
-  /* Links & semantics. */
-  --link: #2b89ff;
-  --visited: #a737ff;
-  --success: #00ca8e;
-  --warning: #ffcf25;
-  --error: #e62b1e;
+  /* Links & semantics (Figma palette, brightened for a black ground). */
+  --link: #6f6cff;
+  --visited: #c4baff;
+  --success: #24cb71;
+  --warning: #ff7237;
+  --error: #ff3737;
 
-  /* Series-accent palette — identity tokens, one assigned per series. */
-  --accent-terraform: #7b42bc;
-  --accent-vault: #ffcf25;
-  --accent-consul: #e62b1e;
-  --accent-waypoint: #14c6cb;
-  --accent-vagrant: #1868f2;
-  --accent-nomad: #00ca8e;
-  --accent-boundary: #f24c53;
+  /* Categorical accent palette — one identity color assigned per series
+   * (see utils/accent.ts). Bright and legible on black. */
+  --accent-indigo: #5b57ff;
+  --accent-green: #24cb71;
+  --accent-cyan: #00b6ff;
+  --accent-orange: #ff7237;
+  --accent-pink: #ff5c8a;
+  --accent-violet: #a07bff;
+  --accent-lime: #b5e848;
 
-  /* leaf brand anchor, and the live per-series accent (set at runtime). */
-  --brand: var(--accent-nomad);
+  /* leaf brand anchor (🍃), and the live per-series accent (set at runtime). */
+  --brand: var(--accent-green);
   --accent: var(--brand);
 
-  /* Type — system-ui (hashicorpSans fallback); weights 500/600/700. */
+  /* Type — system-ui (figmaSans is licensed; system stack is the fallback per
+   * the dependency discipline). Weights 400/500/600. */
   --font: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, monospace;
   --fs-eyebrow: 0.75rem; /* 12 */
   --fs-caption: 0.8125rem; /* 13 */
   --fs-body-sm: 0.875rem; /* 14 */
@@ -53,9 +59,12 @@
   --fs-card-title: 1.375rem; /* 22 */
   --fs-headline: 1.75rem; /* 28 */
   --fs-display: 2.5rem; /* 40 */
-  --fw-body: 500;
-  --fw-emphasis: 600;
-  --fw-display: 700;
+  --fw-body: 400;
+  --fw-emphasis: 500;
+  --fw-display: 600;
+  --tracking-tight: -0.03em;
+  --tracking-display: -0.02em;
+  --tracking-normal: 0;
 
   /* Spacing — 8px base. */
   --space-xxs: 4px;
@@ -66,19 +75,29 @@
   --space-xl: 32px;
   --space-xxl: 48px;
 
-  /* Radii. */
+  /* Radii — geometric, not bubbly (DESIGN.md §1). */
   --radius-sm: 6px;
   --radius-md: 8px;
   --radius-lg: 12px;
   --radius-xl: 16px;
   --radius-pill: 9999px;
 
+  /* Controls — 48px default, 44px minimum touch target (DESIGN.md §8). */
+  --control-height: 48px;
+  --touch-target: 44px;
+
+  /* Elevation — mostly flat; outlines first, shadow only for floating UI. */
+  --shadow-soft: 0 1px 0 rgba(0, 0, 0, 0.4);
+  --shadow-medium: 0 12px 32px rgba(0, 0, 0, 0.45);
+
   /* Motion — animate transform/opacity only. */
   --motion-fast: 120ms;
   --motion-base: 200ms;
+  --motion-slow: 280ms;
   --ease: cubic-bezier(0.2, 0, 0, 1);
 
-  /* Chrome. */
+  /* Chrome. Breakpoints (for reference; media queries can't read vars):
+   * sm 560 · md 960 · lg 1280 · xl 1680. */
   --appbar-h: 48px;
 }
 

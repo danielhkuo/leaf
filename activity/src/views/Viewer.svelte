@@ -4,6 +4,7 @@
   import DayViewer from '../lib/components/viewer/DayViewer.svelte';
   import Callout from '../lib/components/shared/Callout.svelte';
   import Skeleton from '../lib/components/shared/Skeleton.svelte';
+  import Button from '../lib/components/ui/Button.svelte';
   import { openExternalLink } from '../lib/sdk/actions';
   import { getApi, getGuildId, loadDaysIndex } from '../lib/stores/gallery.svelte';
   import type { Day, DaySummary, Series } from '../lib/types/api';
@@ -23,6 +24,17 @@
   let dayData = $state<Day | null>(null);
   let failed = $state(false);
   let index = $state<DaySummary[]>([]);
+
+  // Lock background scrolling for as long as the viewer is open; restore on
+  // close. The overlay is fixed, but the page behind it would otherwise still
+  // scroll under touch/wheel.
+  $effect(() => {
+    const previous = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = previous;
+    };
+  });
 
   const accent = $derived(accentVar(series.id));
   const days = $derived(index.map((r) => r.day));
@@ -101,7 +113,7 @@
   {:else if failed}
     <div class="state">
       <Callout title="Couldn’t load this day">It may have been removed.</Callout>
-      <button class="close" onclick={onClose}>Close</button>
+      <Button variant="primary" onclick={onClose}>Close</Button>
     </div>
   {:else}
     <div class="state"><Skeleton width="200px" height="16px" /></div>
@@ -114,6 +126,7 @@
     inset: 0;
     z-index: 10;
     background: var(--canvas);
+    overscroll-behavior: contain;
   }
   .state {
     position: absolute;
@@ -123,16 +136,5 @@
     place-content: center;
     justify-items: center;
     padding: var(--space-lg);
-  }
-  .close {
-    padding: 10px 18px;
-    color: var(--ink);
-    font: inherit;
-    font-size: var(--fs-body-sm);
-    font-weight: var(--fw-emphasis);
-    background: var(--surface-2);
-    border: 1px solid var(--hairline);
-    border-radius: var(--radius-md);
-    cursor: pointer;
   }
 </style>

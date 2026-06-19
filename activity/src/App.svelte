@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
 
+  import Button from './lib/components/ui/Button.svelte';
   import { bootSession, session } from './lib/stores/session.svelte';
   import Gallery from './views/Gallery.svelte';
 
@@ -23,7 +24,7 @@
         <span class="leaf" aria-hidden="true">🍂</span>
         <p>Couldn’t start the gallery.</p>
         <p class="muted small">{session.value.error}</p>
-        <button class="btn" onclick={() => void bootSession()}>Try again</button>
+        <Button variant="primary" onclick={() => void bootSession()}>Try again</Button>
       </div>
     {/if}
   </main>
@@ -52,20 +53,5 @@
   }
   .small {
     font-size: var(--fs-body-sm);
-  }
-  .btn {
-    margin-top: var(--space-xs);
-    padding: 10px 18px;
-    color: var(--on-accent-dark);
-    font: inherit;
-    font-size: var(--fs-body-sm);
-    font-weight: var(--fw-emphasis);
-    background: var(--accent);
-    border: 0;
-    border-radius: var(--radius-md);
-    cursor: pointer;
-  }
-  .btn:active {
-    transform: translateY(1px);
   }
 </style>

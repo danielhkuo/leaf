@@ -21,6 +21,6 @@ describe('accentToken', () => {
 
 describe('accentVar', () => {
   it('wraps the token in a CSS var() reference', () => {
-    expect(accentVar(0)).toBe('var(--accent-terraform)');
+    expect(accentVar(0)).toBe('var(--accent-indigo)');
   });
 });

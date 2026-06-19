@@ -33,6 +33,7 @@ export const daySchema = z.object({
 
 export const daySummarySchema = z.object({
   day: z.number(),
+  posted_at: z.number(),
   thumb_url: z.string().nullable(),
 });
 export const daySummaryListSchema = z.array(daySummarySchema);

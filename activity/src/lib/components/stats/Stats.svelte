@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { Stats } from '../../types/api';
+  import Card from '../ui/Card.svelte';
 
   interface Props {
     stats: Stats;
@@ -14,7 +15,7 @@
   ]);
 </script>
 
-<section class="stats" aria-label="Series statistics">
+<Card label="Series statistics">
   <p class="eyebrow">Stats</p>
   <dl class="grid">
     {#each items as item (item.label)}
@@ -24,15 +25,9 @@
       </div>
     {/each}
   </dl>
-</section>
+</Card>
 
 <style>
-  .stats {
-    padding: var(--space-md);
-    background: var(--surface-1);
-    border: 1px solid var(--hairline);
-    border-radius: var(--radius-lg);
-  }
   .eyebrow {
     margin: 0 0 var(--space-sm);
     color: var(--ink-subtle);
@@ -58,14 +53,14 @@
   dd {
     margin: 0;
     font-size: var(--fs-headline);
-    font-weight: var(--fw-emphasis);
+    font-weight: var(--fw-display);
     line-height: 1.1;
     font-variant-numeric: tabular-nums;
   }
   dd.accent {
     color: var(--accent);
   }
-  @media (min-width: 1024px) {
+  @media (min-width: 960px) {
     .grid {
       grid-template-columns: 1fr;
     }

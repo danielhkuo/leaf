@@ -20,7 +20,7 @@
     background: var(--surface-1);
     border: 1px solid var(--hairline);
     border-left: 2px solid var(--accent);
-    border-radius: var(--radius-lg);
+    border-radius: var(--radius-xl);
     color: var(--ink-muted);
   }
   .title {

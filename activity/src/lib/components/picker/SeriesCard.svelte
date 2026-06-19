@@ -29,17 +29,28 @@
     align-items: center;
     gap: var(--space-sm);
     width: 100%;
+    min-height: var(--control-height);
     padding: var(--space-md);
     text-align: left;
     background: var(--surface-1);
     border: 1px solid var(--hairline);
-    border-radius: var(--radius-lg);
+    border-radius: var(--radius-xl);
     color: var(--ink);
     font: inherit;
     cursor: pointer;
+    transition:
+      background var(--motion-fast) var(--ease),
+      border-color var(--motion-fast) var(--ease);
+  }
+  .card:hover {
+    background: var(--surface-2);
+  }
+  .card:focus-visible {
+    border-color: var(--accent, var(--card-accent));
+    outline: none;
   }
   .card:active {
-    background: var(--surface-2);
+    background: var(--surface-3);
   }
   .bar {
     align-self: stretch;

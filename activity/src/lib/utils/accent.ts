@@ -4,20 +4,20 @@
 // column. This is the spec's "per-product accent" device mapped to series.
 
 const PALETTE = [
-  '--accent-terraform',
-  '--accent-vault',
-  '--accent-consul',
-  '--accent-waypoint',
-  '--accent-vagrant',
-  '--accent-nomad',
-  '--accent-boundary',
+  '--accent-indigo',
+  '--accent-green',
+  '--accent-cyan',
+  '--accent-orange',
+  '--accent-pink',
+  '--accent-violet',
+  '--accent-lime',
 ] as const;
 
 /** The CSS custom-property name for a series' accent. */
 export function accentToken(seriesId: number): string {
   const n = PALETTE.length;
   const i = ((Math.trunc(seriesId) % n) + n) % n;
-  return PALETTE[i] ?? '--accent-nomad';
+  return PALETTE[i] ?? '--accent-green';
 }
 
 /** A `var(--accent-…)` reference for a series' accent. */

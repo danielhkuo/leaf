@@ -1,9 +1,10 @@
 <script lang="ts">
-  import Heatmap from '../lib/components/heatmap/Heatmap.svelte';
+  import Calendar from '../lib/components/calendar/Calendar.svelte';
   import Callout from '../lib/components/shared/Callout.svelte';
   import Skeleton from '../lib/components/shared/Skeleton.svelte';
   import StatsPanel from '../lib/components/stats/Stats.svelte';
-  import { getApi, getGuildId } from '../lib/stores/gallery.svelte';
+  import IconButton from '../lib/components/ui/IconButton.svelte';
+  import { getApi, getGuildId, loadDaysIndex } from '../lib/stores/gallery.svelte';
   import { nav } from '../lib/stores/nav.svelte';
   import type { DaySummary, Series, Stats } from '../lib/types/api';
   import { accentVar } from '../lib/utils/accent';
@@ -19,6 +20,8 @@
 
   let stats = $state<Stats | null>(null);
   let statsFailed = $state(false);
+  let index = $state<DaySummary[] | null>(null);
+  let indexFailed = $state(false);
 
   $effect(() => {
     const id = series.id;
@@ -38,9 +41,26 @@
     };
   });
 
-  function loadDays(from: number, to: number): Promise<DaySummary[]> {
-    return getApi().listDays(getGuildId(), series.id, { from, to });
-  }
+  // The full present-day index (day + posted_at + thumb), cached per series;
+  // feeds the calendar. Also primed for the viewer's gap-aware navigation.
+  $effect(() => {
+    const id = series.id;
+    const md = maxDay;
+    let cancelled = false;
+    index = null;
+    indexFailed = false;
+    loadDaysIndex(id, md)
+      .then((rows) => {
+        if (!cancelled) index = rows;
+      })
+      .catch(() => {
+        if (!cancelled) indexFailed = true;
+      });
+    return () => {
+      cancelled = true;
+    };
+  });
+
   function openDay(day: number): void {
     nav.push({ name: 'viewer', seriesId: series.id, day });
   }
@@ -49,7 +69,9 @@
 <div class="home" style="--accent:{accent}">
   <header class="bar">
     {#if canGoBack}
-      <button class="back" onclick={() => nav.back()} aria-label="Back to series list">←</button>
+      <IconButton ariaLabel="Back to series list" variant="solid" onclick={() => nav.back()}>
+        ←
+      </IconButton>
     {/if}
     <span class="emoji" aria-hidden="true">{series.emoji}</span>
     <h1>{series.name}</h1>
@@ -61,18 +83,24 @@
     </Callout>
   {:else}
     <div class="content">
-      <div class="grid-col">
-        <Heatmap {maxDay} startDay={series.start_day} load={loadDays} onOpenDay={openDay} />
-      </div>
       <aside class="side">
         {#if stats}
           <StatsPanel {stats} />
         {:else if statsFailed}
           <p class="muted">Stats unavailable.</p>
         {:else}
-          <Skeleton height="180px" radius="var(--radius-lg)" />
+          <Skeleton height="132px" radius="var(--radius-xl)" />
         {/if}
       </aside>
+      <main class="main">
+        {#if index}
+          <Calendar {index} onOpenDay={openDay} />
+        {:else if indexFailed}
+          <Callout title="Couldn’t load the calendar">Try reopening the gallery.</Callout>
+        {:else}
+          <Skeleton height="340px" radius="var(--radius-xl)" />
+        {/if}
+      </main>
     </div>
   {/if}
 </div>
@@ -96,41 +124,41 @@
     min-height: var(--appbar-h);
     background: var(--canvas);
   }
-  .back {
-    width: 36px;
-    height: 36px;
-    color: var(--ink);
-    font: inherit;
-    font-size: 1.25rem;
-    background: var(--surface-1);
-    border: 1px solid var(--hairline);
-    border-radius: var(--radius-md);
-    cursor: pointer;
-  }
   .emoji {
     font-size: 1.5rem;
   }
   h1 {
     margin: 0;
     font-size: var(--fs-card-title);
-    font-weight: var(--fw-emphasis);
+    font-weight: var(--fw-display);
+    letter-spacing: var(--tracking-display);
   }
   .content {
     display: grid;
     gap: var(--space-lg);
+    grid-template-areas: 'side' 'main';
+  }
+  .side {
+    grid-area: side;
+  }
+  .main {
+    grid-area: main;
+    min-width: 0; /* let the calendar grid shrink instead of overflowing */
   }
   .muted {
     color: var(--ink-muted);
     font-size: var(--fs-body-sm);
   }
-  @media (min-width: 1024px) {
+  /* Desktop (DESIGN.md --bp-md 960px): aligned two columns, sticky sidebar. */
+  @media (min-width: 960px) {
     .content {
       grid-template-columns: 1fr 16rem;
+      grid-template-areas: 'main side';
       align-items: start;
     }
     .side {
       position: sticky;
-      top: var(--appbar-h);
+      top: calc(var(--appbar-h) + var(--space-md));
     }
   }
 </style>

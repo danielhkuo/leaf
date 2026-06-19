@@ -198,8 +198,13 @@ async fn list_days<D: DiscordApi>(
     let signer = MediaSigner::new(&st.key, now_unix());
     let mut out = Vec::new();
     for day in st.posts.days_in_range(series.id, from, to).await? {
-        if let Some((_, media)) = st.posts.get(series.id, day).await? {
-            out.push(DaySummaryDto::build(day, media.first(), &signer));
+        if let Some((post, media)) = st.posts.get(series.id, day).await? {
+            out.push(DaySummaryDto::build(
+                day,
+                post.posted_at,
+                media.first(),
+                &signer,
+            ));
         }
     }
     Ok(Json(out))

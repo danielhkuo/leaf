@@ -115,11 +115,14 @@ impl DayDto {
 }
 
 /// A day's headline within a paginated list: the grid tile (first
-/// attachment's signed thumbnail) plus the day number.
+/// attachment's signed thumbnail), the day number, and the post date (so the
+/// gallery can place it on a real calendar).
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub struct DaySummaryDto {
     /// Day number.
     pub day: i64,
+    /// Original post time, unix seconds — positions the day on the calendar.
+    pub posted_at: i64,
     /// First attachment's signed thumbnail URL, if any.
     pub thumb_url: Option<String>,
 }
@@ -127,9 +130,15 @@ pub struct DaySummaryDto {
 impl DaySummaryDto {
     /// Builds a grid entry from the day's first attachment (if any).
     #[must_use]
-    pub fn build(day: i64, first: Option<&MediaAttachment>, signer: &MediaSigner<'_>) -> Self {
+    pub fn build(
+        day: i64,
+        posted_at: i64,
+        first: Option<&MediaAttachment>,
+        signer: &MediaSigner<'_>,
+    ) -> Self {
         Self {
             day,
+            posted_at,
             thumb_url: first.map(|m| signer.urls(&m.attachment_id).1),
         }
     }

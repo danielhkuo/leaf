@@ -2,7 +2,9 @@
   import type { Day } from '../../types/api';
   import { formatPostedAt } from '../../utils/datetime';
   import { clampIndex } from '../../utils/navigation';
-  import BlurImage from '../shared/BlurImage.svelte';
+  import Button from '../ui/Button.svelte';
+  import IconButton from '../ui/IconButton.svelte';
+  import ZoomableImage from './ZoomableImage.svelte';
 
   interface Props {
     day: Day;
@@ -46,22 +48,6 @@
     else if (e.key === 'ArrowLeft' && hasPrev) onPrev();
     else if (e.key === 'Escape') onClose();
   }
-
-  // Swipe via pointer events (no scroll math).
-  const SWIPE = 50;
-  let startX = 0;
-  let tracking = false;
-  function onPointerDown(e: PointerEvent): void {
-    tracking = true;
-    startX = e.clientX;
-  }
-  function onPointerUp(e: PointerEvent): void {
-    if (!tracking) return;
-    tracking = false;
-    const dx = e.clientX - startX;
-    if (dx <= -SWIPE && hasNext) onNext();
-    else if (dx >= SWIPE && hasPrev) onPrev();
-  }
 </script>
 
 <svelte:window onkeydown={onKeydown} />
@@ -74,8 +60,7 @@
   aria-label={`Day ${day.day}, ${seriesName}`}
   tabindex="-1"
 >
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="stage" onpointerdown={onPointerDown} onpointerup={onPointerUp}>
+  <div class="stage">
     {#if !current}
       <p class="note">No media for this day.</p>
     {:else if current.missing}
@@ -85,14 +70,24 @@
       <video class="media" src={current.url} poster={current.thumb_url} controls playsinline
       ></video>
     {:else}
-      <BlurImage src={current.url} placeholder={current.thumb_url} {alt} />
+      <ZoomableImage
+        src={current.url}
+        placeholder={current.thumb_url}
+        {alt}
+        onPrev={hasPrev ? onPrev : undefined}
+        onNext={hasNext ? onNext : undefined}
+      />
     {/if}
 
     {#if hasPrev}
-      <button class="edge left" aria-label="Previous day" onclick={onPrev}>‹</button>
+      <div class="edge left">
+        <IconButton ariaLabel="Previous day" variant="overlay" onclick={onPrev}>‹</IconButton>
+      </div>
     {/if}
     {#if hasNext}
-      <button class="edge right" aria-label="Next day" onclick={onNext}>›</button>
+      <div class="edge right">
+        <IconButton ariaLabel="Next day" variant="overlay" onclick={onNext}>›</IconButton>
+      </div>
     {/if}
   </div>
 
@@ -101,7 +96,7 @@
       <span class="eyebrow">Day {day.day}</span>
       <time>{formatPostedAt(day.posted_at)}</time>
     </div>
-    <button class="icon" aria-label="Close" onclick={onClose}>✕</button>
+    <IconButton ariaLabel="Close" variant="ghost" onclick={onClose}>✕</IconButton>
   </header>
 
   <div class="bottom">
@@ -124,9 +119,9 @@
     {/if}
 
     <div class="actions">
-      <button class="action" onclick={onJump}>Jump to message</button>
-      <button class="action" onclick={onRandom}>Random</button>
-      <button class="action primary" onclick={onClose}>Close</button>
+      <Button variant="secondary" onclick={onJump}>Jump to message</Button>
+      <Button variant="secondary" onclick={onRandom}>Random</Button>
+      <Button variant="primary" onclick={onClose}>Close</Button>
     </div>
   </div>
 </div>
@@ -135,8 +130,6 @@
   .viewer {
     position: absolute;
     inset: 0;
-    display: grid;
-    grid-template-rows: 1fr;
     background: var(--canvas);
     outline: none;
   }
@@ -146,7 +139,6 @@
     display: grid;
     place-items: center;
     padding: calc(var(--appbar-h) + var(--space-md)) var(--space-md) 96px;
-    touch-action: pan-y;
   }
   .media {
     max-width: 100%;
@@ -161,26 +153,13 @@
     position: absolute;
     top: 50%;
     transform: translateY(-50%);
-    display: grid;
-    place-items: center;
-    width: 44px;
-    height: 44px;
-    color: var(--ink);
-    font-size: 1.5rem;
-    line-height: 1;
-    background: rgb(0 0 0 / 35%);
-    border: 1px solid var(--hairline);
-    border-radius: var(--radius-pill);
-    cursor: pointer;
+    z-index: 1;
   }
   .edge.left {
     left: var(--space-sm);
   }
   .edge.right {
     right: var(--space-sm);
-  }
-  .edge:active {
-    background: rgb(0 0 0 / 55%);
   }
 
   .top {
@@ -210,19 +189,6 @@
   }
   time {
     font-size: var(--fs-caption);
-  }
-  .icon {
-    width: 36px;
-    height: 36px;
-    color: var(--ink);
-    font: inherit;
-    background: transparent;
-    border: 0;
-    border-radius: var(--radius-md);
-    cursor: pointer;
-  }
-  .icon:active {
-    background: var(--surface-2);
   }
 
   .bottom {
@@ -262,25 +228,8 @@
   }
   .actions {
     display: flex;
+    flex-wrap: wrap;
     gap: var(--space-xs);
-  }
-  .action {
-    padding: 10px 14px;
-    color: var(--ink);
-    font: inherit;
-    font-size: var(--fs-body-sm);
-    font-weight: var(--fw-emphasis);
-    background: var(--surface-2);
-    border: 1px solid var(--hairline);
-    border-radius: var(--radius-md);
-    cursor: pointer;
-  }
-  .action:active {
-    background: var(--surface-3);
-  }
-  .action.primary {
-    color: var(--on-accent-dark);
-    background: var(--accent);
-    border-color: transparent;
+    justify-content: center;
   }
 </style>
