@@ -127,6 +127,7 @@ async fn run_mode(
         store,
         key: leaf_server::api::auth::SessionKey::derive(&config.client_secret),
         discord: std::sync::Arc::new(discord),
+        membership: leaf_server::api::state::membership_cache(),
         redirect_uri: config.public_url.clone(),
         client_id: config.client_id.clone(),
     };

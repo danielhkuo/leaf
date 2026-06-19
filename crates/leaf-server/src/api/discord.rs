@@ -3,12 +3,20 @@
 //! Talks to the real Discord API. Membership uses the bot token (the bot is
 //! in the guild), so the user needs no extra OAuth scope beyond `identify`.
 
+use std::time::Duration;
+
 use serde::Deserialize;
 
 use crate::api::auth::DiscordApi;
 
 const API: &str = "https://discord.com/api/v10";
-const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const TIMEOUT: Duration = Duration::from_secs(10);
+/// How many times a rate-limited (429) member lookup is retried before giving
+/// up. With the server-side membership cache single-flighting the gallery's
+/// cold burst, this only matters for many *distinct* viewers at once.
+const MEMBER_LOOKUP_RETRIES: u8 = 2;
+/// Cap on how long a single `Retry-After` backoff will sleep.
+const MAX_RETRY_BACKOFF: Duration = Duration::from_secs(5);
 
 /// Talks to Discord with the application's credentials.
 #[derive(Clone)]
@@ -109,24 +117,34 @@ impl DiscordApi for LiveDiscord {
         guild_id: &str,
         user_id: &str,
     ) -> Result<Option<Vec<String>>, String> {
-        let resp = self
-            .http
-            .get(format!("{API}/guilds/{guild_id}/members/{user_id}"))
-            .header("Authorization", format!("Bot {}", self.bot_token))
-            .send()
-            .await
-            .map_err(|e| format!("member lookup failed: {e}"))?;
-        match resp.status() {
-            s if s.is_success() => {
-                let m: MemberResponse = resp
-                    .json()
-                    .await
-                    .map_err(|e| format!("bad member response: {e}"))?;
-                Ok(Some(m.roles))
+        let url = format!("{API}/guilds/{guild_id}/members/{user_id}");
+        let mut attempt = 0u8;
+        loop {
+            let resp = self
+                .http
+                .get(&url)
+                .header("Authorization", format!("Bot {}", self.bot_token))
+                .send()
+                .await
+                .map_err(|e| format!("member lookup failed: {e}"))?;
+            match resp.status() {
+                s if s.is_success() => {
+                    let m: MemberResponse = resp
+                        .json()
+                        .await
+                        .map_err(|e| format!("bad member response: {e}"))?;
+                    return Ok(Some(m.roles));
+                }
+                // 404 = the user is not a member of this guild.
+                reqwest::StatusCode::NOT_FOUND => return Ok(None),
+                // Rate-limited: honor Retry-After for a couple of attempts.
+                reqwest::StatusCode::TOO_MANY_REQUESTS if attempt < MEMBER_LOOKUP_RETRIES => {
+                    let wait = retry_after(&resp).min(MAX_RETRY_BACKOFF);
+                    attempt += 1;
+                    tokio::time::sleep(wait).await;
+                }
+                s => return Err(format!("member lookup returned {s}")),
             }
-            // 404 = the user is not a member of this guild.
-            reqwest::StatusCode::NOT_FOUND => Ok(None),
-            s => Err(format!("member lookup returned {s}")),
         }
     }
 
@@ -156,4 +174,17 @@ impl DiscordApi for LiveDiscord {
             .map(|g| g.id)
             .collect())
     }
+}
+
+/// Backoff for a 429 from Discord's `Retry-After` header (seconds, possibly
+/// fractional), defaulting to a conservative 1s when absent or unparseable.
+/// `try_from_secs_f64` keeps a negative/NaN header from panicking.
+fn retry_after(resp: &reqwest::Response) -> Duration {
+    const DEFAULT: Duration = Duration::from_secs(1);
+    resp.headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<f64>().ok())
+        .and_then(|secs| Duration::try_from_secs_f64(secs).ok())
+        .unwrap_or(DEFAULT)
 }

@@ -47,6 +47,7 @@ chrono-tz = "0.10"
 rand = "0.9"
 tempfile = "3"
 clap = { version = "4", features = ["derive"] }
+moka = { version = "0.12", features = ["future"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

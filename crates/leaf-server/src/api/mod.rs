@@ -8,7 +8,9 @@
 //!
 //! Admin-in-gallery (an admin viewing others' private series) is out of
 //! scope here — API viewers are treated as non-admin members; moderation
-//! stays in the bot. Membership caching remains a future optimization.
+//! stays in the bot. Membership lookups are cached with a short TTL (see
+//! [`state::membership_cache`]) so a burst of gallery tiles doesn't fan out
+//! into a burst of rate-limited Discord calls.
 
 pub mod admin;
 pub mod auth;
@@ -17,6 +19,8 @@ pub mod dto;
 pub mod error;
 pub mod media;
 pub mod state;
+
+use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
@@ -102,7 +106,18 @@ async fn member_roles<D: DiscordApi>(
     gid: &str,
     user_id: &str,
 ) -> Result<Vec<String>, ApiError> {
-    match st.discord.guild_member_roles(gid, user_id).await {
+    // `try_get_with` single-flights concurrent misses for the same key (the
+    // cold gallery burst becomes one Discord call) and never caches the
+    // error, so a transient failure is retried on the next request.
+    let discord = Arc::clone(&st.discord);
+    let (g, u) = (gid.to_owned(), user_id.to_owned());
+    let lookup = st
+        .membership
+        .try_get_with((g.clone(), u.clone()), async move {
+            discord.guild_member_roles(&g, &u).await
+        })
+        .await;
+    match lookup {
         Ok(Some(roles)) => Ok(roles),
         Ok(None) => Err(ApiError::Forbidden),
         Err(e) => {
@@ -235,6 +250,7 @@ mod tests {
     )]
 
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
@@ -256,6 +272,8 @@ mod tests {
         members: std::collections::HashMap<(String, String), Vec<String>>,
         /// user → guild ids they manage (Manage-Guild).
         manages: std::collections::HashMap<String, Vec<String>>,
+        /// Counts `guild_member_roles` calls, so a test can prove caching.
+        calls: Arc<AtomicUsize>,
     }
 
     impl DiscordApi for MockDiscord {
@@ -271,6 +289,7 @@ mod tests {
             guild_id: &str,
             user_id: &str,
         ) -> Result<Option<Vec<String>>, String> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
             Ok(self
                 .members
                 .get(&(guild_id.to_owned(), user_id.to_owned()))
@@ -289,9 +308,10 @@ mod tests {
     /// Bytes seeded at the `k-orig` object key for the media-stream test.
     const MEDIA_BYTES: &[u8] = b"\x89PNG\r\n\x1a\n not-a-real-image";
 
-    /// Builds a fully-seeded app + key. Members: creator (no roles), a plain
-    /// member, and a VIP member holding `ROLE`. Series of each visibility.
-    async fn app() -> (Router, SessionKey) {
+    /// Builds a fully-seeded app + key + the membership-lookup counter.
+    /// Members: creator (no roles), a plain member, and a VIP member holding
+    /// `ROLE`. Series of each visibility.
+    async fn app() -> (Router, SessionKey, Arc<AtomicUsize>) {
         let dir = tempfile::tempdir().unwrap();
         let pool = leaf_core::db::connect(&dir.path().join("t.db"))
             .await
@@ -365,6 +385,7 @@ mod tests {
         manages.insert(CREATOR.to_owned(), vec![GUILD.to_owned()]);
 
         let key = SessionKey::derive("test-secret");
+        let calls = Arc::new(AtomicUsize::new(0));
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         // Seed only the original (not the thumb), so the streaming test gets
         // bytes while the signature-gate test still 404s on the absent thumb.
@@ -381,11 +402,16 @@ mod tests {
             guilds: GuildSettingsRepo::new(pool),
             store,
             key: key.clone(),
-            discord: Arc::new(MockDiscord { members, manages }),
+            discord: Arc::new(MockDiscord {
+                members,
+                manages,
+                calls: Arc::clone(&calls),
+            }),
+            membership: crate::api::state::membership_cache(),
             redirect_uri: "https://leaf.test".to_owned(),
             client_id: "client-123".to_owned(),
         };
-        (router(state), key)
+        (router(state), key, calls)
     }
 
     async fn get(router: &Router, path: &str, bearer: Option<&str>) -> StatusCode {
@@ -407,7 +433,7 @@ mod tests {
 
     #[tokio::test]
     async fn unauthenticated_is_401_everywhere() {
-        let (app, _key) = app().await;
+        let (app, _key, _calls) = app().await;
         for path in [
             "/api/guilds/g1/series",
             "/api/guilds/g1/series/1/days",
@@ -429,7 +455,7 @@ mod tests {
 
     #[tokio::test]
     async fn non_member_is_forbidden() {
-        let (app, key) = app().await;
+        let (app, key, _calls) = app().await;
         let outsider = token_for(&key, "stranger");
         assert_eq!(
             get(&app, "/api/guilds/g1/series", Some(&outsider)).await,
@@ -444,8 +470,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn membership_lookups_are_cached() {
+        // Two requests by the same member resolve membership with a single
+        // Discord call — the cache answers the second. This is what stops a
+        // burst of gallery tiles from fanning out into rate-limited lookups.
+        let (app, key, calls) = app().await;
+        let member = token_for(&key, MEMBER);
+        for _ in 0..2 {
+            assert_eq!(
+                get(&app, "/api/guilds/g1/series", Some(&member)).await,
+                StatusCode::OK
+            );
+        }
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
     async fn list_hides_sprout_revoked_and_unentitled_private() {
-        let (app, key) = app().await;
+        let (app, key, _calls) = app().await;
         // Plain member sees only public (id 1). gated/private/sprout/revoked hidden.
         let member = token_for(&key, MEMBER);
         let resp = router_json(&app, "/api/guilds/g1/series", &member).await;
@@ -467,7 +509,7 @@ mod tests {
 
     #[tokio::test]
     async fn private_series_is_404_for_non_creator_member() {
-        let (app, key) = app().await;
+        let (app, key, _calls) = app().await;
         let member = token_for(&key, MEMBER);
         // Series 3 is creator-only → 404 for a plain member on every route.
         for path in [
@@ -490,7 +532,7 @@ mod tests {
 
     #[tokio::test]
     async fn cross_guild_series_id_is_404() {
-        let (app, key) = app().await;
+        let (app, key, _calls) = app().await;
         let member = token_for(&key, MEMBER);
         // Series 1 exists but not under guild "other".
         // (member isn't in "other", so this is Forbidden at the membership gate.)
@@ -502,7 +544,7 @@ mod tests {
 
     #[tokio::test]
     async fn day_and_media_signing_round_trip() {
-        let (app, key) = app().await;
+        let (app, key, _calls) = app().await;
         let member = token_for(&key, MEMBER);
         // Day 1 of the public series is visible and carries signed media.
         let body = router_json_value(&app, "/api/guilds/g1/series/1/days/1", &member).await;
@@ -517,7 +559,7 @@ mod tests {
 
     #[tokio::test]
     async fn media_requires_a_valid_signature() {
-        let (app, key) = app().await;
+        let (app, key, _calls) = app().await;
         // Unsigned / bad signature → 403.
         assert_eq!(
             get(&app, "/api/media/att1?exp=9999999999&sig=bad", None).await,
@@ -534,7 +576,7 @@ mod tests {
 
     #[tokio::test]
     async fn media_streams_the_original_with_immutable_cache_headers() {
-        let (app, key) = app().await;
+        let (app, key, _calls) = app().await;
         let exp = now_unix() + 60;
         // The original (no `thumb`) maps to the seeded `k-orig` object.
         let sig = key.sign_media("att1", exp);
@@ -572,7 +614,7 @@ mod tests {
 
     #[tokio::test]
     async fn token_exchange_mints_a_usable_session() {
-        let (app, _key) = app().await;
+        let (app, _key, _calls) = app().await;
         // Exchange a code for member1, then use the returned token.
         let resp = app
             .clone()
@@ -631,7 +673,7 @@ mod tests {
 
     #[tokio::test]
     async fn admin_routes_reject_missing_and_gallery_tokens() {
-        let (app, key) = app().await;
+        let (app, key, _calls) = app().await;
         assert_eq!(
             get(&app, "/api/admin/guilds", None).await,
             StatusCode::UNAUTHORIZED
@@ -646,7 +688,7 @@ mod tests {
 
     #[tokio::test]
     async fn admin_lists_managed_guilds_and_hides_others() {
-        let (app, key) = app().await;
+        let (app, key, _calls) = app().await;
         let tok = admin_token(&key, CREATOR, &[GUILD]);
         let guilds = router_json(&app, "/api/admin/guilds", &tok).await;
         assert_eq!(guilds.len(), 1);
@@ -661,7 +703,7 @@ mod tests {
 
     #[tokio::test]
     async fn admin_reads_guild_detail() {
-        let (app, key) = app().await;
+        let (app, key, _calls) = app().await;
         let tok = admin_token(&key, CREATOR, &[GUILD]);
         let detail = router_json_value(&app, "/api/admin/guilds/g1", &tok).await;
         assert_eq!(detail["guild_id"].as_str().unwrap(), GUILD);
@@ -671,7 +713,7 @@ mod tests {
 
     #[tokio::test]
     async fn admin_patches_settings() {
-        let (app, key) = app().await;
+        let (app, key, _calls) = app().await;
         let tok = admin_token(&key, CREATOR, &[GUILD]);
         let (status, v) = patch_json(
             &app,
@@ -688,7 +730,7 @@ mod tests {
 
     #[tokio::test]
     async fn admin_revokes_and_edits_series_privacy() {
-        let (app, key) = app().await;
+        let (app, key, _calls) = app().await;
         let tok = admin_token(&key, CREATOR, &[GUILD]);
         let (status, v) = patch_json(
             &app,
@@ -723,7 +765,7 @@ mod tests {
 
     #[tokio::test]
     async fn admin_cannot_reach_series_through_an_unmanaged_guild() {
-        let (app, key) = app().await;
+        let (app, key, _calls) = app().await;
         let tok = admin_token(&key, CREATOR, &[GUILD]);
         // Series 1 exists (in g1) but is referenced under an unmanaged guild.
         let (status, _) = patch_json(
@@ -738,7 +780,7 @@ mod tests {
 
     #[tokio::test]
     async fn admin_login_redirects_to_discord_consent() {
-        let (app, _key) = app().await;
+        let (app, _key, _calls) = app().await;
         let resp = app
             .clone()
             .oneshot(Request::get("/admin/login").body(Body::empty()).unwrap())
@@ -753,7 +795,7 @@ mod tests {
 
     #[tokio::test]
     async fn admin_callback_mints_a_scoped_token_or_refuses() {
-        let (app, key) = app().await;
+        let (app, key, _calls) = app().await;
         let state = key.sign_oauth_state(now_unix(), 600);
 
         // CREATOR manages GUILD → a token scoped to it.
