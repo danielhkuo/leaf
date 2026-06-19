@@ -8,6 +8,9 @@
     onOpenDay: (day: number) => void;
   }
   let { month, weekdays, onOpenDay }: Props = $props();
+
+  // Blank cells before the 1st, as a plain index list (keyed, nothing unused).
+  const pads = $derived([...Array(month.leading).keys()]);
 </script>
 
 <!-- `content-visibility` lets the browser skip layout/paint for off-screen
@@ -21,7 +24,7 @@
     {/each}
   </div>
   <div class="grid">
-    {#each Array.from({ length: month.leading }) as _pad, i (`pad-${i}`)}
+    {#each pads as i (i)}
       <span class="pad" aria-hidden="true"></span>
     {/each}
     {#each month.cells as cell (cell.date)}
