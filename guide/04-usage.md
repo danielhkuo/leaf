@@ -17,12 +17,10 @@ that's done, leaf refuses series creation in the server with a friendly message.
 3. **Timezone** (IANA) + **creation policy** (or accept the defaults).
 4. Optionally a **creator role** that gates who may create series.
 
-It's **re-runnable** and pre-fills from existing values, so it doubles as the
-editor. Granular edits are also available via **`/settings`**:
-
-- `/settings channel` — change the log/watched channels.
-- `/settings policy` — series-creation policy: allowed channels, required role,
-  max series per user, minimum account age, and **sprout probation** on/off.
+It's **re-runnable** and pre-fills from existing values, so it's also how you
+change the watched/log channels later. Everything else — timezone, creation
+policy, creator role, sprout probation — is edited in the **admin web panel**
+(below).
 
 ### Sprout probation
 
@@ -33,16 +31,18 @@ admin review needed.
 
 ### Revoking a series
 
-Admins hold **revoke** power (not approval power): `/series remove @user <name>`
-takes a series down (confirm flow). Default-allow, revoke-able.
+Admins hold **revoke** power (not approval power): use the **admin web panel** to
+take a series down (it stays stored but becomes hidden and read-only) or restore
+it. Default-allow, revoke-able.
 
 ### The admin web panel (click instead of type)
 
 Browse to **`https://leaf.example.com/admin`** and **Sign in with Discord**. You
-need **Manage Server** on a server that has leaf. The panel mirrors
-`/setup`/`/settings` and `/series` — edit guild settings (timezone, sprout,
-limits, creator role) and manage series (privacy, revoke/restore) from a browser.
-Same database rows as the commands; strictly optional.
+need **Manage Server** on a server that has leaf. This is where admins manage the
+server: guild settings (timezone, sprout, limits, creator role) and series
+(privacy, revoke/restore). Every field has an inline **ⓘ** that explains what it
+does with an example. First-time channel selection still happens in Discord with
+`/setup`.
 
 ## For creators
 
@@ -58,7 +58,8 @@ against the server policy:
 
 Policy checks run on submit; if one blocks you, the bot names exactly which
 (allowed channels, required role, max-per-user, min account/member age). Manage
-your series with `/series edit`, `/series list`, and (admins) `/series remove`.
+your series with `/series edit` and `/series list`. (Admins revoke series from
+the admin web panel.)
 
 **Privacy** options: **public** to the server, **role-gated** (a role you pick),
 or **creator-only**. Privacy is enforced everywhere — commands *and* gallery.

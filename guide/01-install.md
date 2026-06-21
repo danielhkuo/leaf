@@ -120,8 +120,8 @@ docker compose run --rm leaf --reconfigure
 ```
 
 (Per-guild/per-series settings — channels, policy, privacy — are **not** Tier-1;
-edit those any time via the bot's `/settings` and `/series` commands or the admin
-panel. See [04-usage.md](04-usage.md).)
+pick channels in Discord with `/setup`, and edit policy, timezone, creator role,
+and series privacy/revoke in the admin panel. See [04-usage.md](04-usage.md).)
 
 ## Data, backups, and updates
 

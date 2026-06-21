@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { AdminApi } from '../../lib/admin/client';
   import type { AdminGuildDetail, AdminSeries } from '../../lib/admin/schemas';
+  import InfoTip from '../../lib/components/ui/InfoTip.svelte';
 
   interface Props {
     api: AdminApi;
@@ -112,35 +113,83 @@
     <p class="eyebrow">Settings</p>
     <form class="settings" onsubmit={saveSettings}>
       <label>
-        <span>Timezone</span>
+        <span>
+          Timezone
+          <InfoTip
+            label="Timezone"
+            text="Time zone for daily reminders and the dates shown in the gallery. Use an IANA name like America/Chicago or Europe/London. Defaults to UTC."
+          />
+        </span>
         <input type="text" bind:value={form.timezone} placeholder="UTC" />
       </label>
       <label>
-        <span>Creator role id <em>(blank = anyone)</em></span>
+        <span>
+          Creator role id <em>(blank = anyone)</em>
+          <InfoTip
+            label="Creator role id"
+            text="Restrict who can start a series. With a role ID set, only members who hold that role can run /series create. Leave blank to let anyone create. (Enable Developer Mode in Discord, then right-click a role → Copy Role ID.)"
+          />
+        </span>
         <input type="text" bind:value={form.creator_role_id} />
       </label>
       <label>
-        <span>Log channel id</span>
+        <span>
+          Log channel id
+          <InfoTip
+            label="Log channel id"
+            text="Channel where leaf posts a short audit line when a series is created, archived, or revoked. Paste a channel ID, or leave blank to turn logging off."
+          />
+        </span>
         <input type="text" bind:value={form.log_channel_id} />
       </label>
       <label>
-        <span>Max series per user</span>
+        <span>
+          Max series per user
+          <InfoTip
+            label="Max series per user"
+            text="How many active series one member may own at once. Example: 3. Must be at least 1."
+          />
+        </span>
         <input type="number" min="0" bind:value={form.max_series_per_user} />
       </label>
       <label>
-        <span>Min account age (days)</span>
+        <span>
+          Min account age (days)
+          <InfoTip
+            label="Minimum account age"
+            text="Block members whose Discord account is younger than this many days from creating a series — a spam guard. Example: 30. Use 0 to disable."
+          />
+        </span>
         <input type="number" min="0" bind:value={form.min_account_age_days} />
       </label>
       <label>
-        <span>Min membership age (days)</span>
+        <span>
+          Min membership age (days)
+          <InfoTip
+            label="Minimum membership age"
+            text="Block members who joined this server fewer than this many days ago from creating a series. Example: 7. Use 0 to disable."
+          />
+        </span>
         <input type="number" min="0" bind:value={form.min_membership_age_days} />
       </label>
       <label class="check">
         <input type="checkbox" bind:checked={form.sprout_enabled} />
-        <span>Sprout probation for new series</span>
+        <span>
+          Sprout probation for new series
+          <InfoTip
+            label="Sprout probation"
+            text="When on, a new series stays hidden as a 🌱 sprout until it reaches the post threshold below, then it appears in the gallery automatically. When off, new series are visible immediately."
+          />
+        </span>
       </label>
       <label>
-        <span>Sprout threshold</span>
+        <span>
+          Sprout threshold
+          <InfoTip
+            label="Sprout threshold"
+            text="How many posts a sprout needs before it graduates to a normal, visible series. Example: 3. Only applies when sprout probation is on."
+          />
+        </span>
         <input type="number" min="0" bind:value={form.sprout_threshold} />
       </label>
       <div class="actions">
@@ -153,7 +202,13 @@
   </section>
 
   <section class="block">
-    <p class="eyebrow">Series</p>
+    <p class="eyebrow">
+      Series
+      <InfoTip
+        label="Series controls"
+        text="Privacy sets who sees a series in the gallery — Public (everyone in the server), Role-gated (only a chosen role), or Creator only (just the creator and admins). Revoke hides a series and makes it read-only; its archive is kept and you can Restore it later."
+      />
+    </p>
     {#if detail.series.length === 0}
       <p class="muted">No series yet.</p>
     {:else}

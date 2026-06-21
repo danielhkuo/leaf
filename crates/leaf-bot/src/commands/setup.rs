@@ -42,7 +42,7 @@ pub async fn setup(ctx: Context<'_>) -> Result<(), Error> {
                 .content(
                     "🍃 **leaf setup** — pick the channels, then Save.\n\
                      Policies (limits, sprout probation, timezone) keep their \
-                     current values; tune them with `/settings`.",
+                     current values; tune them in the admin panel.",
                 )
                 .ephemeral(true)
                 .components(components()),

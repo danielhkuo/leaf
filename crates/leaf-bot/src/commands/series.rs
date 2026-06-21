@@ -63,7 +63,7 @@ impl From<PrivacyChoice> for Privacy {
 #[poise::command(
     slash_command,
     guild_only,
-    subcommands("create", "edit", "list", "remove", "reminder")
+    subcommands("create", "edit", "list", "reminder")
 )]
 #[allow(
     clippy::unused_async,
@@ -310,63 +310,6 @@ async fn list(ctx: Context<'_>) -> Result<(), Error> {
             .ephemeral(true),
     )
     .await?;
-    Ok(())
-}
-
-/// Revoke a series (admin). It becomes hidden and read-only.
-#[poise::command(
-    slash_command,
-    guild_only,
-    required_permissions = "MANAGE_GUILD",
-    default_member_permissions = "MANAGE_GUILD"
-)]
-async fn remove(
-    ctx: Context<'_>,
-    #[description = "Series name"]
-    #[autocomplete = "autocomplete_any_series"]
-    name: String,
-) -> Result<(), Error> {
-    let Some(settings) = checks::setup_settings(&ctx).await? else {
-        return Ok(());
-    };
-    let Some(s) = ctx
-        .data()
-        .series
-        .get_by_name(&settings.guild_id, &name)
-        .await?
-    else {
-        ctx.send(
-            poise::CreateReply::default()
-                .content(format!("No series named **{name}** here."))
-                .ephemeral(true),
-        )
-        .await?;
-        return Ok(());
-    };
-
-    if !checks::confirm(
-        &ctx,
-        &format!(
-            "Revoke **{}** by <@{}>? Its archive stays stored but becomes \
-             hidden and read-only.",
-            s.name, s.creator_id
-        ),
-    )
-    .await?
-    {
-        return Ok(());
-    }
-
-    ctx.data()
-        .series
-        .set_state(s.id, SeriesState::Revoked)
-        .await?;
-    checks::log_line(
-        &ctx,
-        &settings,
-        &format!("🗑️ series **{}** revoked by {}", s.name, ctx.author().name),
-    )
-    .await;
     Ok(())
 }
 

@@ -88,10 +88,10 @@ leave its handler set to Discord-handled.)
 ## 6. Admin panel
 
 Browse to `https://leaf.example.com/admin` and **Sign in with Discord**. You
-need **Manage Server** on a server that has leaf. From there you can edit guild
+need **Manage Server** on a server that has leaf. From there you edit guild
 settings (timezone, sprout probation, limits, creator role) and manage series
-(privacy, revoke / restore). Everything here is also available via the bot's
-`/settings` and `/series` commands — the panel is the click-don't-type option.
+(privacy, revoke / restore); each field has an inline ⓘ explaining it. Channels
+are still picked in Discord with `/setup`.
 
 ## Updating
 
