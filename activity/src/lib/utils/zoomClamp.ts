@@ -26,12 +26,7 @@ export function panLimits(
   if (frameW <= 0 || frameH <= 0 || naturalW <= 0 || naturalH <= 0 || scale <= 1) {
     return { maxX: 0, maxY: 0 };
   }
-  const { width: renderedW, height: renderedH } = fitDimensions(
-    frameW,
-    frameH,
-    naturalW,
-    naturalH,
-  );
+  const { width: renderedW, height: renderedH } = fitDimensions(frameW, frameH, naturalW, naturalH);
   return {
     maxX: Math.max(0, (renderedW * scale - frameW) / 2),
     maxY: Math.max(0, (renderedH * scale - frameH) / 2),
