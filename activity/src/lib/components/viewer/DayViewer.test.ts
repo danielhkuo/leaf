@@ -95,4 +95,15 @@ describe('DayViewer', () => {
       expect(container.querySelectorAll('img.full')).toHaveLength(1);
     }
   });
+
+  it('orders header, stage, and footer for the grid layout', () => {
+    const { container } = render(DayViewer, { props: props() });
+    const viewer = container.querySelector('.viewer');
+    expect(viewer).not.toBeNull();
+    const children = viewer!.children;
+    expect(children[0]?.classList.contains('top')).toBe(true);
+    expect(children[1]?.classList.contains('stage')).toBe(true);
+    expect(children[2]?.classList.contains('bottom')).toBe(true);
+    expect(viewer!.querySelector('.stage .frame, .stage img.full')).not.toBeNull();
+  });
 });

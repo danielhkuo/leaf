@@ -5,6 +5,7 @@
   // pans and pinch / wheel / the +/- buttons / double-tap change the scale.
   import IconButton from '../ui/IconButton.svelte';
   import Spinner from '../ui/Spinner.svelte';
+  import { clampPan } from '../../utils/zoomClamp';
 
   interface Props {
     src: string;
@@ -28,6 +29,9 @@
   let gesturing = $state(false);
   let frameW = $state(0);
   let frameH = $state(0);
+  let naturalW = $state(0);
+  let naturalH = $state(0);
+  let frameEl: HTMLDivElement | undefined;
   const zoomed = $derived(scale > 1.001);
 
   const pointers = new Map<number, { x: number; y: number }>();
@@ -43,17 +47,37 @@
   $effect(() => {
     void src;
     loaded = false;
+    naturalW = 0;
+    naturalH = 0;
     scale = 1;
     tx = 0;
     ty = 0;
   });
 
   function clamp(): void {
-    const maxX = Math.max(0, (frameW * (scale - 1)) / 2);
-    const maxY = Math.max(0, (frameH * (scale - 1)) / 2);
-    tx = Math.min(maxX, Math.max(-maxX, tx));
-    ty = Math.min(maxY, Math.max(-maxY, ty));
+    ({ tx, ty } = clampPan(tx, ty, frameW, frameH, naturalW, naturalH, scale));
   }
+
+  // Re-clamp when the frame or image dimensions change (iframe resize, load).
+  $effect(() => {
+    frameW;
+    frameH;
+    naturalW;
+    naturalH;
+    scale;
+    if (scale > 1 && naturalW > 0 && naturalH > 0) clamp();
+  });
+
+  $effect(() => {
+    const el = frameEl;
+    if (!el) return;
+    const ro = new ResizeObserver(() => {
+      frameW = el.clientWidth;
+      frameH = el.clientHeight;
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  });
 
   function zoomTo(next: number): void {
     scale = Math.min(MAX, Math.max(1, next));
@@ -135,12 +159,20 @@
     e.preventDefault();
     zoomTo(scale - Math.sign(e.deltaY) * STEP * 0.5);
   }
+
+  function onImgLoad(e: Event): void {
+    const img = e.currentTarget as HTMLImageElement;
+    loaded = true;
+    naturalW = img.naturalWidth;
+    naturalH = img.naturalHeight;
+  }
 </script>
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
   class="frame"
   class:zoomed
+  bind:this={frameEl}
   bind:clientWidth={frameW}
   bind:clientHeight={frameH}
   onpointerdown={onPointerDown}
@@ -171,7 +203,7 @@
       {alt}
       decoding="async"
       draggable="false"
-      onload={() => (loaded = true)}
+      onload={onImgLoad}
     />
   </div>
 
@@ -199,20 +231,24 @@
     position: relative;
     width: 100%;
     height: 100%;
-    display: grid;
-    place-items: center;
+    min-height: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     overflow: hidden;
     touch-action: none;
   }
   .frame.zoomed {
     cursor: grab;
   }
+  .frame.zoomed:active {
+    cursor: grabbing;
+  }
   .pan {
-    grid-area: 1 / 1;
+    position: absolute;
+    inset: 0;
     display: grid;
     place-items: center;
-    width: 100%;
-    height: 100%;
     transform-origin: center center;
     will-change: transform;
   }
@@ -222,6 +258,9 @@
   .ph,
   .full {
     grid-area: 1 / 1;
+    display: block;
+    width: auto;
+    height: auto;
     max-width: 100%;
     max-height: 100%;
     object-fit: contain;
@@ -251,8 +290,8 @@
   }
   .zoom-controls {
     position: absolute;
+    top: var(--space-md);
     right: var(--space-md);
-    bottom: var(--space-md);
     display: flex;
     gap: var(--space-xs);
   }

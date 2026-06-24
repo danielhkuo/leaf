@@ -60,6 +60,14 @@
   aria-label={`Day ${day.day}, ${seriesName}`}
   tabindex="-1"
 >
+  <header class="top">
+    <div class="meta">
+      <span class="eyebrow">Day {day.day}</span>
+      <time>{formatPostedAt(day.posted_at)}</time>
+    </div>
+    <IconButton ariaLabel="Close" variant="ghost" onclick={onClose}>✕</IconButton>
+  </header>
+
   <div class="stage">
     {#if !current}
       <p class="note">No media for this day.</p>
@@ -90,14 +98,6 @@
       </div>
     {/if}
   </div>
-
-  <header class="top">
-    <div class="meta">
-      <span class="eyebrow">Day {day.day}</span>
-      <time>{formatPostedAt(day.posted_at)}</time>
-    </div>
-    <IconButton ariaLabel="Close" variant="ghost" onclick={onClose}>✕</IconButton>
-  </header>
 
   <div class="bottom">
     {#if dots.length > 1}
@@ -130,21 +130,36 @@
   .viewer {
     position: absolute;
     inset: 0;
+    display: grid;
+    grid-template-rows: auto 1fr auto;
+    min-height: 0;
     background: var(--canvas);
     outline: none;
   }
   .stage {
-    position: absolute;
-    inset: 0;
-    display: grid;
-    place-items: center;
-    padding: calc(var(--appbar-h) + var(--space-md)) var(--space-md) 96px;
+    position: relative;
+    display: flex;
+    align-items: stretch;
+    justify-content: stretch;
+    min-width: 0;
+    min-height: 0;
+    padding: 0 var(--space-md);
+  }
+  .stage :global(.frame) {
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
   }
   .media {
+    align-self: center;
+    justify-self: center;
     max-width: 100%;
     max-height: 100%;
+    margin: auto;
   }
   .note {
+    align-self: center;
+    margin: auto;
     color: var(--ink-muted);
     font-size: var(--fs-body-sm);
   }
@@ -163,10 +178,6 @@
   }
 
   .top {
-    position: absolute;
-    top: 0;
-    right: 0;
-    left: 0;
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -192,10 +203,6 @@
   }
 
   .bottom {
-    position: absolute;
-    right: 0;
-    bottom: 0;
-    left: 0;
     display: grid;
     gap: var(--space-sm);
     justify-items: center;
