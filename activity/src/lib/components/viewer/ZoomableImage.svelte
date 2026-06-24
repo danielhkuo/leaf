@@ -5,7 +5,7 @@
   // pans and pinch / wheel / the +/- buttons / double-tap change the scale.
   import IconButton from '../ui/IconButton.svelte';
   import Spinner from '../ui/Spinner.svelte';
-  import { clampPan } from '../../utils/zoomClamp';
+  import { clampPan, fitDimensions } from '../../utils/zoomClamp';
 
   interface Props {
     src: string;
@@ -32,7 +32,9 @@
   let naturalW = $state(0);
   let naturalH = $state(0);
   let frameEl: HTMLDivElement | undefined;
+  let fullImg: HTMLImageElement | undefined;
   const zoomed = $derived(scale > 1.001);
+  const display = $derived(fitDimensions(frameW, frameH, naturalW, naturalH));
 
   const pointers = new Map<number, { x: number; y: number }>();
   let startX = 0;
@@ -43,6 +45,13 @@
   let pinchScale = 1;
   let lastTapAt = 0;
 
+  function syncNatural(img: HTMLImageElement, markLoaded = false): void {
+    if (img.naturalWidth <= 0 || img.naturalHeight <= 0) return;
+    naturalW = img.naturalWidth;
+    naturalH = img.naturalHeight;
+    if (markLoaded) loaded = true;
+  }
+
   // Reset the fade and the zoom whenever the source changes (new day).
   $effect(() => {
     void src;
@@ -52,6 +61,12 @@
     scale = 1;
     tx = 0;
     ty = 0;
+  });
+
+  // Cached images may be complete before onload fires.
+  $effect(() => {
+    void src;
+    if (fullImg?.complete) syncNatural(fullImg, true);
   });
 
   function clamp(): void {
@@ -156,10 +171,12 @@
   }
 
   function onImgLoad(e: Event): void {
-    const img = e.currentTarget as HTMLImageElement;
-    loaded = true;
-    naturalW = img.naturalWidth;
-    naturalH = img.naturalHeight;
+    syncNatural(e.currentTarget as HTMLImageElement, true);
+  }
+
+  function onPlaceholderLoad(e: Event): void {
+    if (naturalW > 0) return;
+    syncNatural(e.currentTarget as HTMLImageElement, false);
   }
 </script>
 
@@ -178,8 +195,12 @@
 >
   <div
     class="pan"
+    class:fit={display.width > 0}
+    class:fallback={display.width <= 0}
     class:smooth={!gesturing}
-    style="transform:translate({tx}px,{ty}px) scale({scale})"
+    style:transform="translate({tx}px,{ty}px) scale({scale})"
+    style:width={display.width > 0 ? `${display.width}px` : null}
+    style:height={display.height > 0 ? `${display.height}px` : null}
   >
     {#if placeholder}
       <img
@@ -189,9 +210,11 @@
         alt=""
         aria-hidden="true"
         draggable="false"
+        onload={onPlaceholderLoad}
       />
     {/if}
     <img
+      bind:this={fullImg}
       class="full"
       class:loaded
       {src}
@@ -240,12 +263,24 @@
     cursor: grabbing;
   }
   .pan {
-    position: absolute;
-    inset: 0;
+    position: relative;
+    flex-shrink: 0;
     display: grid;
-    place-items: center;
     transform-origin: center center;
     will-change: transform;
+  }
+  .pan.fallback {
+    position: absolute;
+    inset: 0;
+    place-items: center;
+  }
+  .pan.fallback .ph,
+  .pan.fallback .full {
+    width: auto;
+    height: auto;
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: contain;
   }
   .pan.smooth {
     transition: transform var(--motion-base) var(--ease);
@@ -254,11 +289,8 @@
   .full {
     grid-area: 1 / 1;
     display: block;
-    width: auto;
-    height: auto;
-    max-width: 100%;
-    max-height: 100%;
-    object-fit: contain;
+    width: 100%;
+    height: 100%;
     user-select: none;
   }
   .ph {

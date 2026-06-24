@@ -1,6 +1,25 @@
 import { describe, expect, it } from 'vitest';
 
-import { clampPan, panLimits } from './zoomClamp';
+import { clampPan, fitDimensions, panLimits } from './zoomClamp';
+
+describe('fitDimensions', () => {
+  it('letterboxes a portrait photo in a landscape frame', () => {
+    // 800×1200 photo in 800×400 frame → height-limited to 400×600
+    const { width, height } = fitDimensions(800, 400, 800, 1200);
+    expect(width).toBeCloseTo(266.67, 1);
+    expect(height).toBe(400);
+  });
+
+  it('letterboxes a landscape photo in a portrait frame', () => {
+    const { width, height } = fitDimensions(400, 800, 1200, 800);
+    expect(width).toBe(400);
+    expect(height).toBeCloseTo(266.67, 1);
+  });
+
+  it('returns zero when inputs are missing', () => {
+    expect(fitDimensions(0, 400, 800, 1200)).toEqual({ width: 0, height: 0 });
+  });
+});
 
 describe('panLimits', () => {
   it('returns zero limits at zoom 1', () => {

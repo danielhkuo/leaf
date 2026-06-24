@@ -1,3 +1,20 @@
+/** Scale and pixel size to letterbox an image inside a frame. */
+export function fitDimensions(
+  frameW: number,
+  frameH: number,
+  naturalW: number,
+  naturalH: number,
+): { width: number; height: number } {
+  if (frameW <= 0 || frameH <= 0 || naturalW <= 0 || naturalH <= 0) {
+    return { width: 0, height: 0 };
+  }
+  const fitScale = Math.min(frameW / naturalW, frameH / naturalH, 1);
+  return {
+    width: naturalW * fitScale,
+    height: naturalH * fitScale,
+  };
+}
+
 /** Pan limits for a zoomed image letterboxed inside a frame. */
 export function panLimits(
   frameW: number,
@@ -9,9 +26,12 @@ export function panLimits(
   if (frameW <= 0 || frameH <= 0 || naturalW <= 0 || naturalH <= 0 || scale <= 1) {
     return { maxX: 0, maxY: 0 };
   }
-  const fitScale = Math.min(frameW / naturalW, frameH / naturalH, 1);
-  const renderedW = naturalW * fitScale;
-  const renderedH = naturalH * fitScale;
+  const { width: renderedW, height: renderedH } = fitDimensions(
+    frameW,
+    frameH,
+    naturalW,
+    naturalH,
+  );
   return {
     maxX: Math.max(0, (renderedW * scale - frameW) / 2),
     maxY: Math.max(0, (renderedH * scale - frameH) / 2),
