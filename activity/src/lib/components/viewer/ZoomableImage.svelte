@@ -60,12 +60,7 @@
 
   // Re-clamp when the frame or image dimensions change (iframe resize, load).
   $effect(() => {
-    frameW;
-    frameH;
-    naturalW;
-    naturalH;
-    scale;
-    if (scale > 1 && naturalW > 0 && naturalH > 0) clamp();
+    if (scale > 1 && naturalW > 0 && naturalH > 0 && frameW > 0 && frameH > 0) clamp();
   });
 
   $effect(() => {
