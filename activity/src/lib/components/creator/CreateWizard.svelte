@@ -41,7 +41,8 @@
     }
     if (i === 1 && !channelId) return 'Pick a channel to post in.';
     if (i === 3 && privacy === 'role_gated' && !privacyRoleId) return 'Choose a role to gate on.';
-    if (i === 4 && (!Number.isInteger(startDay) || startDay < 1)) return 'Start day must be 1 or more.';
+    if (i === 4 && (!Number.isInteger(startDay) || startDay < 1))
+      return 'Start day must be 1 or more.';
     return null;
   }
 
@@ -72,9 +73,7 @@
     });
   }
 
-  const channelName = $derived(
-    options.channels.find((c) => c.id === channelId)?.name ?? channelId,
-  );
+  const channelName = $derived(options.channels.find((c) => c.id === channelId)?.name ?? channelId);
   const roleName = $derived(options.roles.find((r) => r.id === privacyRoleId)?.name ?? '');
 </script>
 
@@ -144,19 +143,33 @@
     </label>
   {:else}
     <dl class="summary">
-      <div><dt>Name</dt><dd>{trimmedName}</dd></div>
-      <div><dt>Channel</dt><dd>#{channelName}</dd></div>
-      <div><dt>Cadence</dt><dd>{cadenceLabel(cadence)}</dd></div>
+      <div>
+        <dt>Name</dt>
+        <dd>{trimmedName}</dd>
+      </div>
+      <div>
+        <dt>Channel</dt>
+        <dd>#{channelName}</dd>
+      </div>
+      <div>
+        <dt>Cadence</dt>
+        <dd>{cadenceLabel(cadence)}</dd>
+      </div>
       <div>
         <dt>Privacy</dt>
-        <dd>{privacyLabel(privacy)}{#if privacy === 'role_gated' && roleName} · {roleName}{/if}</dd>
+        <dd>
+          {privacyLabel(privacy)}{#if privacy === 'role_gated' && roleName}
+            · {roleName}{/if}
+        </dd>
       </div>
-      <div><dt>Start day</dt><dd>{startDay}</dd></div>
+      <div>
+        <dt>Start day</dt>
+        <dd>{startDay}</dd>
+      </div>
     </dl>
     {#if options.sprout_enabled}
       <p class="muted">
-        New series start as a 🌱 sprout: archive {options.sprout_threshold} posts and it goes
-        public.
+        New series start as a 🌱 sprout: archive {options.sprout_threshold} posts and it goes public.
       </p>
     {/if}
   {/if}
