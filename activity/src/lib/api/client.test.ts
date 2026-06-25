@@ -121,7 +121,12 @@ describe('LeafApi creator endpoints', () => {
     const api = new LeafApi({ token: 't', fetch: fetchImpl });
 
     await expect(
-      api.createSeries('g1', { name: 'dup', channel_id: 'c1', cadence: 'daily', privacy: 'public' }),
+      api.createSeries('g1', {
+        name: 'dup',
+        channel_id: 'c1',
+        cadence: 'daily',
+        privacy: 'public',
+      }),
     ).rejects.toMatchObject({ status: 409, code: 'name_taken' });
   });
 

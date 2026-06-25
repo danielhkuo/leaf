@@ -180,6 +180,11 @@ export class LeafApi {
     seriesId: number,
     patch: UpdateSeriesInput,
   ): Promise<SeriesSettings> {
-    return this.#send('PATCH', `/guilds/${guildId}/series/${seriesId}`, patch, seriesSettingsSchema);
+    return this.#send(
+      'PATCH',
+      `/guilds/${guildId}/series/${seriesId}`,
+      patch,
+      seriesSettingsSchema,
+    );
   }
 }
