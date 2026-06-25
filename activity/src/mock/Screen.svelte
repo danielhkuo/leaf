@@ -56,7 +56,12 @@
     onCreate={noop}
   />
 {:else if id === 'picker-blocked'}
-  <SeriesPicker {series} onSelect={noop} eligibility={eligibilityBlocked} eligibilityStatus="ready" />
+  <SeriesPicker
+    {series}
+    onSelect={noop}
+    eligibility={eligibilityBlocked}
+    eligibilityStatus="ready"
+  />
 {:else if id === 'home'}
   <MockHome />
 {:else if id === 'home-empty'}
