@@ -387,10 +387,7 @@ async fn series_eligibility<D: DiscordApi>(
             }],
         }));
     };
-    let live = st
-        .series
-        .count_live_by_creator(&gid, &user.user_id)
-        .await?;
+    let live = st.series.count_live_by_creator(&gid, &user.user_id).await?;
     let ctx = series_ops::build_creation_context(
         now_unix(),
         series_ops::account_created_unix(&user.user_id),
@@ -452,7 +449,9 @@ async fn series_options<D: DiscordApi>(
         .iter()
         .map(|id| NamedIdDto {
             id: id.clone(),
-            name: names.get(id.as_str()).map_or_else(|| id.clone(), |n| (*n).to_owned()),
+            name: names
+                .get(id.as_str())
+                .map_or_else(|| id.clone(), |n| (*n).to_owned()),
         })
         .collect();
 
@@ -547,10 +546,7 @@ async fn create_series<D: DiscordApi>(
         start_day: req.start_day,
     };
 
-    let live = st
-        .series
-        .count_live_by_creator(&gid, &user.user_id)
-        .await?;
+    let live = st.series.count_live_by_creator(&gid, &user.user_id).await?;
     let ctx = series_ops::build_creation_context(
         now_unix(),
         series_ops::account_created_unix(&user.user_id),
@@ -751,10 +747,9 @@ async fn update_series_route<D: DiscordApi>(
         reminder_dm: req.reminder_dm,
     };
 
-    let updated =
-        series_ops::update_series(&st.series, &settings, series, &user.user_id, &input)
-            .await
-            .map_err(update_error_to_api)?;
+    let updated = series_ops::update_series(&st.series, &settings, series, &user.user_id, &input)
+        .await
+        .map_err(update_error_to_api)?;
     Ok(Json(SeriesSettingsDto::from_series(&updated)))
 }
 
@@ -1443,7 +1438,10 @@ mod tests {
         // A guild without `/setup`: blocked with guild_not_setup.
         let v = router_json_value(&app, "/api/guilds/gns/series/eligibility", &member).await;
         assert!(!v["can_create"].as_bool().unwrap());
-        assert_eq!(v["violations"][0]["code"].as_str().unwrap(), "guild_not_setup");
+        assert_eq!(
+            v["violations"][0]["code"].as_str().unwrap(),
+            "guild_not_setup"
+        );
 
         // A guild requiring a creator role the member lacks.
         let v = router_json_value(&app, "/api/guilds/g3/series/eligibility", &member).await;

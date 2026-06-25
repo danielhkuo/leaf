@@ -556,7 +556,9 @@ mod tests {
         };
         assert!(matches!(
             apply_update(&settings(), &mut s, &input),
-            Err(UpdateError::Validation(ValidationError::ReminderTimeRequired))
+            Err(UpdateError::Validation(
+                ValidationError::ReminderTimeRequired
+            ))
         ));
     }
 
@@ -569,7 +571,9 @@ mod tests {
         };
         assert!(matches!(
             apply_update(&settings(), &mut s, &input),
-            Err(UpdateError::Validation(ValidationError::InvalidReminderTime(_)))
+            Err(UpdateError::Validation(
+                ValidationError::InvalidReminderTime(_)
+            ))
         ));
     }
 
