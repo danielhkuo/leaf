@@ -49,7 +49,9 @@
     const list = gallery.series;
     const [only] = list;
     if (list.length === 1 && only) {
-      nav.reset({ name: 'home', seriesId: only.id });
+      // Keep the picker beneath home so Back reaches "Start a series".
+      nav.reset({ name: 'picker' });
+      nav.push({ name: 'home', seriesId: only.id });
       return;
     }
     // Seed the picker beneath any remembered series so the back button always

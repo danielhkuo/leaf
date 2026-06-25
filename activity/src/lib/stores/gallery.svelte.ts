@@ -3,7 +3,7 @@
 
 import { LeafApi } from '../api/client';
 import type { Session } from '../sdk/handshake';
-import type { DaySummary, Series } from '../types/api';
+import type { DaySummary, Eligibility, Series } from '../types/api';
 
 let api: LeafApi | null = null;
 let guildId = '';
@@ -12,9 +12,18 @@ interface GalleryState {
   status: 'loading' | 'ready' | 'error';
   series: Series[];
   error: string;
+  /** Whether the viewer may start a series; loaded with the series list. */
+  eligibility: Eligibility | null;
+  eligibilityStatus: 'loading' | 'ready' | 'failed';
 }
 
-export const gallery = $state<GalleryState>({ status: 'loading', series: [], error: '' });
+export const gallery = $state<GalleryState>({
+  status: 'loading',
+  series: [],
+  error: '',
+  eligibility: null,
+  eligibilityStatus: 'loading',
+});
 
 /** The authed API client. Throws if used before {@link initGallery}. */
 export function getApi(): LeafApi {
@@ -37,8 +46,20 @@ export async function initGallery(session: Session): Promise<void> {
   }
   guildId = session.guildId;
   api = new LeafApi({ token: session.token });
+  gallery.eligibilityStatus = 'loading';
+  gallery.eligibility = null;
   try {
-    gallery.series = await api.listSeries(guildId);
+    const [series, eligibility] = await Promise.all([
+      api.listSeries(guildId),
+      api.getEligibility(guildId).catch(() => null),
+    ]);
+    gallery.series = series;
+    if (eligibility) {
+      gallery.eligibility = eligibility;
+      gallery.eligibilityStatus = 'ready';
+    } else {
+      gallery.eligibilityStatus = 'failed';
+    }
     gallery.status = 'ready';
   } catch (e) {
     gallery.status = 'error';

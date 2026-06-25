@@ -50,6 +50,7 @@ describe('SeriesPicker', () => {
         series: [],
         onSelect: vi.fn(),
         eligibility: { can_create: true, violations: [] },
+        eligibilityStatus: 'ready',
         onCreate,
       },
     });
@@ -66,6 +67,7 @@ describe('SeriesPicker', () => {
           can_create: false,
           violations: [{ code: 'missing_creator_role', message: 'You need the creator role.' }],
         },
+        eligibilityStatus: 'ready',
       },
     });
     expect(screen.getByText('You need the creator role.')).toBeInTheDocument();

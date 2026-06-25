@@ -10,6 +10,8 @@
     onSelect: (series: Series) => void;
     /** Whether the viewer can start a series here; `null` while unknown. */
     eligibility?: Eligibility | null;
+    /** Load state for {@link eligibility}. */
+    eligibilityStatus?: 'loading' | 'ready' | 'failed';
     /** Whether the viewer owns at least one series shown here. */
     ownsSeries?: boolean;
     onCreate?: () => void;
@@ -19,6 +21,7 @@
     series,
     onSelect,
     eligibility = null,
+    eligibilityStatus = 'loading',
     ownsSeries = false,
     onCreate,
     onManage,
@@ -26,6 +29,8 @@
 
   const canCreate = $derived(eligibility?.can_create ?? false);
   const blockers = $derived(eligibility && !eligibility.can_create ? eligibility.violations : []);
+  /** Show the CTA when allowed, or when the check failed (create screen re-validates). */
+  const showCreate = $derived(canCreate || eligibilityStatus === 'failed');
 </script>
 
 <div class="picker">
@@ -52,8 +57,10 @@
     </ul>
   {/if}
 
-  {#if canCreate && onCreate}
-    <Button variant="primary" full onclick={onCreate}>Start a series</Button>
+  {#if showCreate && onCreate}
+    <Button variant="primary" full disabled={eligibilityStatus === 'loading'} onclick={onCreate}>
+      {eligibilityStatus === 'loading' ? 'Checking…' : 'Start a series'}
+    </Button>
   {:else if blockers.length > 0}
     <ViolationCallout violations={blockers} />
   {/if}

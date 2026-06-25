@@ -4,7 +4,8 @@
   import Skeleton from '../lib/components/shared/Skeleton.svelte';
   import StatsPanel from '../lib/components/stats/Stats.svelte';
   import IconButton from '../lib/components/ui/IconButton.svelte';
-  import { getApi, getGuildId, loadDaysIndex } from '../lib/stores/gallery.svelte';
+  import Button from '../lib/components/ui/Button.svelte';
+  import { gallery, getApi, getGuildId, loadDaysIndex } from '../lib/stores/gallery.svelte';
   import { nav } from '../lib/stores/nav.svelte';
   import type { DaySummary, Series, Stats } from '../lib/types/api';
   import { accentVar } from '../lib/utils/accent';
@@ -19,6 +20,8 @@
   const accent = $derived(accentVar(series.id));
   const maxDay = $derived(series.max_day ?? 0);
   const isOwner = $derived(series.creator_id === userId);
+  const canCreate = $derived(gallery.eligibility?.can_create ?? false);
+  const showCreate = $derived(canCreate || gallery.eligibilityStatus === 'failed');
 
   let stats = $state<Stats | null>(null);
   let statsFailed = $state(false);
@@ -77,8 +80,13 @@
     {/if}
     <span class="emoji" aria-hidden="true">{series.emoji}</span>
     <h1>{series.name}</h1>
+    <span class="spacer"></span>
+    {#if showCreate}
+      <Button variant="secondary" onclick={() => nav.push({ name: 'createSeries' })}>
+        Start a series
+      </Button>
+    {/if}
     {#if isOwner}
-      <span class="spacer"></span>
       <IconButton
         ariaLabel="Series settings"
         variant="solid"
