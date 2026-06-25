@@ -34,11 +34,11 @@
     align-items: center;
     justify-content: center;
     min-height: var(--control-height);
-    padding: 0 22px;
+    padding: 0 26px;
     color: var(--ink);
     font: inherit;
-    font-size: var(--fs-body-sm);
-    font-weight: var(--fw-emphasis);
+    font-size: var(--fs-body);
+    font-weight: var(--fw-display);
     white-space: nowrap;
     background: transparent;
     border: 1px solid transparent;
@@ -69,16 +69,17 @@
     color: var(--inverse-ink);
     background: var(--inverse-canvas);
     border-color: var(--inverse-canvas);
+    box-shadow: var(--shadow-soft);
   }
   .primary:hover {
-    opacity: 0.88;
+    filter: brightness(1.04);
   }
 
   .secondary {
-    border-color: var(--hairline-strong);
+    border-color: var(--border-strong);
   }
   .secondary:hover {
-    background: var(--surface-2);
+    background: var(--surface-3);
   }
 
   .ghost {

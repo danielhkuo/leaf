@@ -170,6 +170,7 @@
     background: var(--surface-1);
     border: 1px solid var(--hairline);
     border-radius: var(--radius-xl);
+    box-shadow: var(--shadow-card);
   }
   .two {
     display: grid;

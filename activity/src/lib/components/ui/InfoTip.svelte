@@ -68,8 +68,8 @@
     letter-spacing: 0;
     text-transform: none;
     white-space: normal;
-    background: var(--surface-3);
-    border: 1px solid var(--hairline-strong);
+    background: var(--surface-1);
+    border: 1px solid var(--hairline);
     border-radius: var(--radius-md);
     box-shadow: var(--shadow-medium);
     opacity: 0;

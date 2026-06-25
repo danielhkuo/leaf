@@ -35,6 +35,7 @@
     background: var(--surface-1);
     border: 1px solid var(--hairline);
     border-radius: var(--radius-xl);
+    box-shadow: var(--shadow-card);
     color: var(--ink);
     font: inherit;
     cursor: pointer;

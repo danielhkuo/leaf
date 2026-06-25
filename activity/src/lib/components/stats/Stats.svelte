@@ -58,7 +58,9 @@
     font-variant-numeric: tabular-nums;
   }
   dd.accent {
-    color: var(--accent);
+    /* Darken the pastel per-series accent toward ink so the highlighted
+     * stat stays legible as colored text on a white card. */
+    color: color-mix(in oklab, var(--accent), var(--ink) 38%);
   }
   @media (min-width: 960px) {
     .grid {

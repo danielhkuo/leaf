@@ -9,9 +9,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use axum::extract::State;
-use axum::http::StatusCode;
-use axum::response::{Html, Redirect};
+use axum::extract::{Path, State};
+use axum::http::{StatusCode, header};
+use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use leaf_core::config::{R2Config, Tier1Config};
@@ -112,6 +112,7 @@ pub fn setup_mode<V: CredentialValidator>(config_path: PathBuf, validator: V) ->
     let router = Router::new()
         .route("/", get(|| async { Redirect::temporary("/setup") }))
         .route("/setup", get(page))
+        .route("/setup/fonts/{file}", get(font))
         .route("/setup/api/verify-code", post(verify_code::<V>))
         .route("/setup/api/submit", post(submit::<V>))
         .with_state(app);
@@ -126,6 +127,29 @@ pub fn setup_mode<V: CredentialValidator>(config_path: PathBuf, validator: V) ->
 
 async fn page() -> Html<&'static str> {
     Html(include_str!("setup_page.html"))
+}
+
+/// Self-hosted display + body fonts (OFL, vendored under `src/fonts/`) that the
+/// setup page references, so the bootstrap UI matches the gallery's look while
+/// staying fully offline. Embedded in the binary; served by exact filename.
+const FRAUNCES_WOFF2: &[u8] = include_bytes!("fonts/fraunces-latin-wght.woff2");
+const DM_SANS_WOFF2: &[u8] = include_bytes!("fonts/dm-sans-latin-wght.woff2");
+
+/// Serves a vendored woff2 by exact name (no path traversal); 404 otherwise.
+async fn font(Path(file): Path<String>) -> Response {
+    let body: &'static [u8] = match file.as_str() {
+        "fraunces-latin-wght.woff2" => FRAUNCES_WOFF2,
+        "dm-sans-latin-wght.woff2" => DM_SANS_WOFF2,
+        _ => return StatusCode::NOT_FOUND.into_response(),
+    };
+    (
+        [
+            (header::CONTENT_TYPE, "font/woff2"),
+            (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+        ],
+        body,
+    )
+        .into_response()
 }
 
 /// The submit payload (field names mirror the form).

@@ -1,55 +1,77 @@
-/* leaf gallery — design tokens.
+/* leaf gallery — design tokens (Ko-fi "Warm Playful").
  *
- * Adapted from docs/DESIGN.md (Figma's design system) onto a dark base: a
- * black/white structural frame, bright categorical accents, crisp 1px
- * outlines instead of heavy shadows, geometric (not bubbly) radii, and pill
- * controls. Components consume these custom properties; they never hard-code
- * values. The [data-theme] seam is reserved for a future light theme. */
+ * A warm, creator-first system: a cream page, white cards that float on a soft
+ * shadow, a single bright sky-blue call-to-action, and friendly editorial
+ * headlines (Fraunces) over a clean sans (DM Sans). Components consume these
+ * custom properties; they never hard-code values. Adapted from
+ * docs/ko-fi.com-design.md. Cream-only — there is no dark variant. */
+
+/* Self-hosted fonts (OFL, vendored under lib/fonts/ — see the *-OFL.txt files).
+ * Variable weight-axis subsets, latin only; `swap` so text paints immediately
+ * and Vite fingerprints each woff2 as a cached, post-paint asset. */
+@font-face {
+  font-family: 'DM Sans';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 1000;
+  src: url('./lib/fonts/dm-sans-latin-wght.woff2') format('woff2-variations');
+}
+@font-face {
+  font-family: 'Fraunces';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 900;
+  src: url('./lib/fonts/fraunces-latin-wght.woff2') format('woff2-variations');
+}
 
 :root {
-  color-scheme: dark;
+  color-scheme: light;
 
-  /* Surfaces — depth from outline + contrast, never haze (DESIGN.md §6). */
-  --canvas: #000000;
-  --surface-1: #0d0d0f;
-  --surface-2: #18181b;
-  --surface-3: #27272b;
-  --hairline: rgba(255, 255, 255, 0.12);
-  --hairline-strong: rgba(255, 255, 255, 0.22);
-  --hairline-soft: rgba(255, 255, 255, 0.07);
+  /* Surfaces — warm cream base; white cards float on a soft shadow, with
+   * outlines and color contrast carrying the rest of the hierarchy. */
+  --canvas: #f4efe7; /* cream page */
+  --surface-1: #ffffff; /* cards / content panels */
+  --surface-2: #fbf8f1; /* subtle fills, input ground */
+  --surface-3: #efe8da; /* hover / pressed cream, chips */
+  --hairline: rgba(32, 32, 32, 0.12);
+  --hairline-strong: rgba(32, 32, 32, 0.22);
+  --hairline-soft: rgba(32, 32, 32, 0.06);
+  --border-strong: #202020; /* Ko-fi framed-card / chip outline */
 
-  /* Ink. */
-  --ink: #ffffff;
-  --ink-muted: #c4c4cc;
-  --ink-subtle: #8a8a93;
-  --on-accent-dark: #000000; /* text over bright accents */
-  --inverse-canvas: #ffffff; /* white primary-button ground (DESIGN.md primary) */
-  --inverse-ink: #000000; /* text on inverse-canvas */
+  /* Ink — charcoal; softer than pure black but crisp on cream. */
+  --ink: #202020;
+  --ink-muted: #5c574e;
+  --ink-subtle: #8a8378;
+  --on-accent-dark: #202020; /* dark text over bright/pastel accent fills */
+  --inverse-canvas: #72a4f2; /* blue primary-button ground (Ko-fi CTA) */
+  --inverse-ink: #202020; /* dark text on the blue CTA */
 
-  /* Links & semantics (Figma palette, brightened for a black ground). */
-  --link: #6f6cff;
-  --visited: #c4baff;
-  --success: #24cb71;
-  --warning: #ff7237;
-  --error: #ff3737;
+  /* Links & semantics — tuned to stay legible on cream. */
+  --link: #3b6fb0;
+  --visited: #6e5fb0;
+  --success: #2e9e6b;
+  --warning: #e08a3c;
+  --error: #e4572e;
 
   /* Categorical accent palette — one identity color assigned per series
-   * (see utils/accent.ts). Bright and legible on black. */
-  --accent-indigo: #5b57ff;
-  --accent-green: #24cb71;
-  --accent-cyan: #00b6ff;
-  --accent-orange: #ff7237;
-  --accent-pink: #ff5c8a;
-  --accent-violet: #a07bff;
-  --accent-lime: #b5e848;
+   * (see utils/accent.ts). Ko-fi pastels: distinct as identity hues, legible
+   * as a thin outline on cream, and dark-text-friendly when used as a fill. */
+  --accent-indigo: #72a4f2; /* Ko-fi blue */
+  --accent-green: #5fb98e; /* mint */
+  --accent-cyan: #5fc4d6; /* teal */
+  --accent-orange: #f2a66b; /* peach */
+  --accent-pink: #f58fb8; /* pink */
+  --accent-violet: #a99bef; /* lavender */
+  --accent-lime: #f08c7a; /* coral */
 
   /* leaf brand anchor (🍃), and the live per-series accent (set at runtime). */
   --brand: var(--accent-green);
   --accent: var(--brand);
 
-  /* Type — system-ui (figmaSans is licensed; system stack is the fallback per
-   * the dependency discipline). Weights 400/500/600. */
-  --font: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+  /* Type — DM Sans for functional UI, Fraunces for editorial headlines
+   * (self-hosted; system serif/sans fallbacks). Weights 400/500/600. */
+  --font: 'DM Sans', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --font-display: 'Fraunces', Georgia, 'Iowan Old Style', 'Times New Roman', serif;
   --font-mono: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, monospace;
   --fs-eyebrow: 0.75rem; /* 12 */
   --fs-caption: 0.8125rem; /* 13 */
@@ -57,16 +79,16 @@
   --fs-body: 1rem; /* 16 */
   --fs-subhead: 1.25rem; /* 20 */
   --fs-card-title: 1.375rem; /* 22 */
-  --fs-headline: 1.75rem; /* 28 */
-  --fs-display: 2.5rem; /* 40 */
+  --fs-headline: 1.875rem; /* 30 — nudged up for the display feel */
+  --fs-display: 2.75rem; /* 44 */
   --fw-body: 400;
   --fw-emphasis: 500;
   --fw-display: 600;
-  --tracking-tight: -0.03em;
-  --tracking-display: -0.02em;
+  --tracking-tight: -0.02em;
+  --tracking-display: -0.01em;
   --tracking-normal: 0;
 
-  /* Spacing — 8px base. */
+  /* Spacing — 8px base (Ko-fi's stepped rhythm sits on top of this). */
   --space-xxs: 4px;
   --space-xs: 8px;
   --space-sm: 12px;
@@ -75,20 +97,23 @@
   --space-xl: 32px;
   --space-xxl: 48px;
 
-  /* Radii — geometric, not bubbly (DESIGN.md §1). */
-  --radius-sm: 6px;
-  --radius-md: 8px;
-  --radius-lg: 12px;
-  --radius-xl: 16px;
+  /* Radii — rounded and friendly (Ko-fi rounded.lg = 24 on cards & buttons). */
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 24px;
   --radius-pill: 9999px;
 
-  /* Controls — 48px default, 44px minimum touch target (DESIGN.md §8). */
+  /* Controls — 48px default, 44px minimum touch target. */
   --control-height: 48px;
   --touch-target: 44px;
 
-  /* Elevation — mostly flat; outlines first, shadow only for floating UI. */
-  --shadow-soft: 0 1px 0 rgba(0, 0, 0, 0.4);
-  --shadow-medium: 0 12px 32px rgba(0, 0, 0, 0.45);
+  /* Elevation — white cards float on a soft shadow (the Ko-fi reference look);
+   * deeper shadow for popovers/floating UI. */
+  --shadow-soft: 0 1px 2px rgba(32, 32, 32, 0.05);
+  --shadow-card:
+    0 2px 4px rgba(32, 32, 32, 0.05), 0 14px 30px rgba(32, 32, 32, 0.1);
+  --shadow-medium: 0 18px 40px rgba(32, 32, 32, 0.16);
 
   /* Motion — animate transform/opacity only. */
   --motion-fast: 120ms;
@@ -130,21 +155,29 @@ a:visited {
   color: var(--visited);
 }
 
-/* Shared form controls (DESIGN.md §4): one input style across creator forms
- * and the admin panel, so spacing/focus never drift between screens. */
+/* Editorial headlines use Fraunces; components keep their own size/weight. */
+h1,
+h2 {
+  font-family: var(--font-display);
+}
+
+/* Shared form controls (Ko-fi input): white ground, soft outline, rounded —
+ * one input style across creator forms and the admin panel so spacing/focus
+ * never drift between screens. */
 .control {
   width: 100%;
   min-height: var(--control-height);
-  padding: 10px 12px;
+  padding: 12px 14px;
   color: var(--ink);
   font: inherit;
   background: var(--surface-2);
   border: 1px solid var(--hairline);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-lg);
 }
 .control:focus {
   outline: 2px solid var(--link);
   outline-offset: -1px;
+  border-color: transparent;
 }
 textarea.control {
   min-height: calc(var(--control-height) * 1.6);

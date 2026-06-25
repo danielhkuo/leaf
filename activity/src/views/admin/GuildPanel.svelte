@@ -247,10 +247,11 @@
 <style>
   .block {
     margin-top: var(--space-lg);
-    padding: var(--space-md);
+    padding: var(--space-lg);
     background: var(--surface-1);
     border: 1px solid var(--hairline);
-    border-radius: var(--radius-lg);
+    border-radius: var(--radius-xl);
+    box-shadow: var(--shadow-card);
   }
   .eyebrow {
     margin: 0 0 var(--space-sm);
@@ -297,12 +298,12 @@
   input[type='text'],
   input[type='number'],
   select {
-    padding: 10px 12px;
+    padding: 12px 14px;
     color: var(--ink);
     font: inherit;
     background: var(--surface-2);
     border: 1px solid var(--hairline);
-    border-radius: var(--radius-md);
+    border-radius: var(--radius-lg);
   }
   input:focus,
   select:focus {
@@ -330,9 +331,9 @@
     grid-template-columns: 1fr auto auto;
     gap: var(--space-sm);
     align-items: center;
-    padding: var(--space-sm);
+    padding: var(--space-sm) var(--space-md);
     background: var(--surface-2);
-    border-radius: var(--radius-md);
+    border-radius: var(--radius-lg);
   }
   .row.revoked {
     opacity: 0.6;
@@ -346,36 +347,38 @@
     font-weight: var(--fw-emphasis);
   }
   .primary {
-    padding: 10px 18px;
-    color: var(--on-accent-dark);
+    padding: 12px 22px;
+    color: var(--inverse-ink);
     font: inherit;
-    font-weight: var(--fw-emphasis);
-    background: var(--brand);
+    font-weight: var(--fw-display);
+    background: var(--inverse-canvas);
     border: 0;
-    border-radius: var(--radius-md);
+    border-radius: var(--radius-pill);
+    box-shadow: var(--shadow-soft);
     cursor: pointer;
   }
   .primary:disabled {
     opacity: 0.6;
   }
   .ghost {
-    padding: 8px 12px;
+    padding: 8px 14px;
     color: var(--ink);
     font: inherit;
     font-size: var(--fs-body-sm);
+    font-weight: var(--fw-emphasis);
     background: var(--surface-3);
     border: 0;
-    border-radius: var(--radius-md);
+    border-radius: var(--radius-pill);
     cursor: pointer;
   }
   .danger {
-    padding: 8px 12px;
+    padding: 8px 14px;
     color: var(--error);
     font: inherit;
     font-size: var(--fs-body-sm);
     background: transparent;
     border: 1px solid var(--error);
-    border-radius: var(--radius-md);
+    border-radius: var(--radius-pill);
     cursor: pointer;
   }
   @media (min-width: 640px) {

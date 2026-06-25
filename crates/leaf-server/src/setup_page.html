@@ -5,45 +5,44 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>leaf · setup</title>
 <style>
-  :root {
-    color-scheme: light dark;
-    --accent: #34c759;
-    --accent-deep: #248a3d;
-    --bg: #f5f5f7;
-    --tint: rgba(52, 199, 89, 0.10);
-    --card: rgba(255, 255, 255, 0.78);
-    --field: #ffffff;
-    --line: rgba(0, 0, 0, 0.10);
-    --text: #1d1d1f;
-    --dim: #6e6e73;
-    --err: #ff3b30;
-    --shadow: 0 1px 2px rgba(0,0,0,.04), 0 12px 32px rgba(0,0,0,.08);
-    --link: #248a3d;
+  /* Self-hosted fonts (OFL), served offline from the binary at /setup/fonts. */
+  @font-face {
+    font-family: 'DM Sans';
+    font-style: normal; font-display: swap; font-weight: 100 1000;
+    src: url('/setup/fonts/dm-sans-latin-wght.woff2') format('woff2-variations');
   }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --accent: #30d158;
-      --accent-deep: #30d158;
-      --bg: #000000;
-      --tint: rgba(48, 209, 88, 0.10);
-      --card: rgba(28, 28, 30, 0.78);
-      --field: #1c1c1e;
-      --line: rgba(255, 255, 255, 0.12);
-      --text: #f5f5f7;
-      --dim: #98989d;
-      --err: #ff453a;
-      --shadow: 0 1px 2px rgba(0,0,0,.4), 0 12px 32px rgba(0,0,0,.5);
-      --link: #30d158;
-    }
+  @font-face {
+    font-family: 'Fraunces';
+    font-style: normal; font-display: swap; font-weight: 100 900;
+    src: url('/setup/fonts/fraunces-latin-wght.woff2') format('woff2-variations');
+  }
+  /* Ko-fi "Warm Playful" — cream page, white floating cards, one blue CTA.
+   * Cream-only (no dark variant), mirroring the gallery's app.css tokens. */
+  :root {
+    color-scheme: light;
+    --accent: #72a4f2;      /* Ko-fi blue CTA */
+    --accent-ink: #202020;  /* dark text on the blue CTA */
+    --ok: #2e9e6b;          /* success affordances */
+    --bg: #f4efe7;          /* warm cream page */
+    --card: #ffffff;        /* white floating panels */
+    --field: #fbf8f1;       /* input ground */
+    --line: rgba(32, 32, 32, 0.12);
+    --text: #202020;
+    --dim: #5c574e;
+    --err: #e4572e;
+    --shadow: 0 2px 4px rgba(32,32,32,.05), 0 14px 30px rgba(32,32,32,.10);
+    --link: #3b6fb0;
+    --radius: 24px;
+    --radius-field: 14px;
   }
   * { box-sizing: border-box; margin: 0; }
   html, body { min-height: 100%; }
   body {
     background:
-      radial-gradient(60rem 36rem at 50% -12rem, var(--tint), transparent 65%),
+      radial-gradient(60rem 34rem at 50% -16rem, rgba(114,164,242,.12), transparent 62%),
       var(--bg);
     color: var(--text);
-    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+    font: 16px/1.5 'DM Sans', system-ui, -apple-system, "Segoe UI", sans-serif;
     -webkit-font-smoothing: antialiased;
     display: grid; place-items: start center;
     padding: clamp(1.5rem, 5vh, 4rem) 1.25rem 4rem;
@@ -55,30 +54,27 @@
   .glyph {
     width: 64px; height: 64px; margin: 0 auto .9rem;
     display: grid; place-items: center; font-size: 30px;
-    border-radius: 18px;
-    background: linear-gradient(145deg, var(--tint), transparent),
-                color-mix(in srgb, var(--accent) 14%, var(--field));
-    border: 0.5px solid var(--line);
+    border-radius: 20px;
+    background: var(--card);
+    border: 1px solid var(--line);
     box-shadow: var(--shadow);
   }
-  h1 { font-size: 1.7rem; font-weight: 700; letter-spacing: -0.022em; }
+  h1 { font-family: 'Fraunces', Georgia, "Times New Roman", serif; font-size: 2rem; font-weight: 600; letter-spacing: -0.01em; }
   .sub { color: var(--dim); font-size: .95rem; margin-top: .35rem; }
 
   /* ---- cards ---- */
   .card {
     background: var(--card);
-    -webkit-backdrop-filter: blur(22px) saturate(180%);
-    backdrop-filter: blur(22px) saturate(180%);
-    border: 0.5px solid var(--line);
-    border-radius: 18px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
     box-shadow: var(--shadow);
-    padding: 1.4rem 1.4rem 1.5rem;
+    padding: 1.5rem 1.5rem 1.6rem;
     margin-bottom: 1rem;
   }
   .card h2 {
-    font-size: .8rem; font-weight: 600; color: var(--dim);
-    text-transform: uppercase; letter-spacing: .07em;
-    margin-bottom: 1rem;
+    font-family: 'Fraunces', Georgia, "Times New Roman", serif;
+    font-size: 1.15rem; font-weight: 600; color: var(--text);
+    letter-spacing: 0; margin-bottom: 1rem;
   }
 
   /* ---- setup code boxes ---- */
@@ -94,7 +90,7 @@
     text-transform: uppercase;
     color: var(--text);
     background: var(--field);
-    border: 0.5px solid var(--line);
+    border: 1px solid var(--line);
     border-radius: 12px;
     caret-color: var(--accent);
     transition: border-color .15s, box-shadow .15s, transform .15s;
@@ -115,7 +111,7 @@
     text-align: center; color: var(--err); font-size: .85rem;
     min-height: 1.2rem; margin-top: .55rem; font-weight: 500;
   }
-  .gate-ok { display: none; text-align: center; color: var(--accent-deep); font-weight: 600; }
+  .gate-ok { display: none; text-align: center; color: var(--ok); font-weight: 600; }
   .gate-ok .check { font-size: 1.1rem; margin-right: .3rem; }
 
   @keyframes shake {
@@ -145,11 +141,11 @@
     text-transform: uppercase; letter-spacing: .06em;
   }
   input[type="text"], input[type="password"], input[type="url"] {
-    width: 100%; height: 2.75rem; padding: 0 .85rem;
+    width: 100%; height: 2.85rem; padding: 0 .95rem;
     font: inherit; color: var(--text);
     background: var(--field);
-    border: 0.5px solid var(--line);
-    border-radius: 11px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-field);
     transition: border-color .15s, box-shadow .15s;
   }
   input:focus {
@@ -164,14 +160,15 @@
   .ferr:empty { display: none; }
 
   button[type="submit"] {
-    width: 100%; height: 3.1rem; margin-top: .4rem;
-    border: 0; border-radius: 13px;
-    background: var(--accent); color: #fff;
-    font: 600 1rem/1 inherit; font-family: inherit;
+    width: 100%; height: 3.25rem; margin-top: .4rem;
+    border: 0; border-radius: var(--radius);
+    background: var(--accent); color: var(--accent-ink);
+    font: 600 1.05rem/1 inherit; font-family: inherit;
+    box-shadow: var(--shadow);
     cursor: pointer;
     transition: filter .15s, transform .1s;
   }
-  button[type="submit"]:hover { filter: brightness(1.06); }
+  button[type="submit"]:hover { filter: brightness(1.04); }
   button[type="submit"]:active { transform: scale(.985); }
   button[type="submit"]:disabled { opacity: .55; cursor: wait; transform: none; }
 
@@ -182,8 +179,8 @@
     width: 72px; height: 72px; margin: 0 auto 1.1rem;
     display: grid; place-items: center;
     border-radius: 50%;
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
-    color: var(--accent-deep); font-size: 2rem; font-weight: 700;
+    background: color-mix(in srgb, var(--ok) 18%, transparent);
+    color: var(--ok); font-size: 2rem; font-weight: 700;
   }
 
   footer { text-align: center; color: var(--dim); font-size: .75rem; margin-top: 1.5rem; }

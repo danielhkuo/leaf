@@ -126,7 +126,9 @@
     border-bottom: 1px solid var(--hairline);
   }
   .brand {
-    font-weight: var(--fw-emphasis);
+    font-family: var(--font-display);
+    font-size: var(--fs-subhead);
+    font-weight: var(--fw-display);
   }
   .right {
     display: flex;
@@ -143,7 +145,8 @@
     padding: var(--space-xl);
     background: var(--surface-1);
     border: 1px solid var(--hairline);
-    border-radius: var(--radius-lg);
+    border-radius: var(--radius-xl);
+    box-shadow: var(--shadow-card);
   }
   .center {
     display: grid;
@@ -169,30 +172,33 @@
     text-align: left;
     background: var(--surface-1);
     border: 1px solid var(--hairline);
-    border-radius: var(--radius-lg);
+    border-radius: var(--radius-xl);
+    box-shadow: var(--shadow-soft);
     cursor: pointer;
   }
   .guild:active {
     background: var(--surface-2);
   }
   .primary {
-    padding: 10px 18px;
-    color: var(--on-accent-dark);
+    padding: 12px 22px;
+    color: var(--inverse-ink);
     font: inherit;
-    font-weight: var(--fw-emphasis);
-    background: var(--brand);
+    font-weight: var(--fw-display);
+    background: var(--inverse-canvas);
     border: 0;
-    border-radius: var(--radius-md);
+    border-radius: var(--radius-pill);
+    box-shadow: var(--shadow-soft);
     cursor: pointer;
   }
   .ghost {
-    padding: 8px 12px;
+    padding: 8px 14px;
     color: var(--ink);
     font: inherit;
     font-size: var(--fs-body-sm);
+    font-weight: var(--fw-emphasis);
     background: var(--surface-2);
     border: 1px solid var(--hairline);
-    border-radius: var(--radius-md);
+    border-radius: var(--radius-pill);
     cursor: pointer;
   }
 </style>

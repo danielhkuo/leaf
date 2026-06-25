@@ -26,6 +26,14 @@ point a **dev** Discord application at that tunnel. There is no localhost-only
 way to see the authed gallery — the SDK handshake only completes inside the
 Discord client.
 
+> **Just want to look at the screens?** You don't need any of the tunnel /
+> Discord setup below. With the dev server running (`npm run dev`), open
+> **<http://localhost:5173/mock.html>** — a gallery of every screen rendered
+> with fixture data and no SDK, network, or auth. Pick a screen in the sidebar;
+> toggle **Phone / Wide** to preview responsive layouts (each screen renders in
+> a real device-width iframe). Dev-only — it never ships in `dist/`. Source:
+> [`src/mock/`](src/mock/).
+
 > Run `cargo` commands from the repo root and `npm` commands from `activity/`.
 
 ### What you need (and where each value goes)
