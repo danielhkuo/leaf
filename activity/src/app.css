@@ -130,6 +130,36 @@ a:visited {
   color: var(--visited);
 }
 
+/* Shared form controls (DESIGN.md §4): one input style across creator forms
+ * and the admin panel, so spacing/focus never drift between screens. */
+.control {
+  width: 100%;
+  min-height: var(--control-height);
+  padding: 10px 12px;
+  color: var(--ink);
+  font: inherit;
+  background: var(--surface-2);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-md);
+}
+.control:focus {
+  outline: 2px solid var(--link);
+  outline-offset: -1px;
+}
+textarea.control {
+  min-height: calc(var(--control-height) * 1.6);
+  resize: vertical;
+}
+.field {
+  display: grid;
+  gap: 6px;
+  font-size: var(--fs-body-sm);
+}
+.field > .field-label {
+  color: var(--ink-muted);
+  font-weight: var(--fw-emphasis);
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

@@ -56,7 +56,7 @@ pub async fn archive_menu(ctx: Context<'_>, msg: serenity::Message) -> Result<()
     if mine.is_empty() {
         ctx.send(
             poise::CreateReply::default()
-                .content("🌱 You don't have a series yet — `/series create` plants one.")
+                .content("🌱 You don't have a series yet — open the leaf Activity to start one.")
                 .ephemeral(true),
         )
         .await?;

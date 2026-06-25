@@ -23,8 +23,8 @@ Read in this order — each step produces credentials the next one needs:
    (Cloudflare Tunnel) and create the **R2 bucket + API keys**.
 4. Back to **[01-install.md § First-run setup](01-install.md#first-run-setup)** —
    paste everything into the setup page; leaf validates it and starts.
-5. **[04-usage.md](04-usage.md)** — using leaf in Discord: `/setup`, creating a
-   Series, archiving posts, and browsing the gallery.
+5. **[04-usage.md](04-usage.md)** — using leaf in Discord: `/setup`, series
+   management in the Activity gallery, archiving posts, and browsing.
 
 Reference, read when you need them:
 

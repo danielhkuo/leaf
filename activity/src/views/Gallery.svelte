@@ -5,7 +5,8 @@
   import Skeleton from '../lib/components/shared/Skeleton.svelte';
   import type { Session } from '../lib/sdk/handshake';
   import { gallery, initGallery, lastSeries } from '../lib/stores/gallery.svelte';
-  import { nav } from '../lib/stores/nav.svelte';
+  import { nav, type View } from '../lib/stores/nav.svelte';
+  import type { CreateSeries, MySeries, SeriesSettings } from './creator/entry';
   import Home from './Home.svelte';
   import Picker from './Picker.svelte';
   import Viewer from './Viewer.svelte';
@@ -14,6 +15,29 @@
     session: Session;
   }
   let { session }: Props = $props();
+
+  const userId = $derived(session.user.id);
+
+  // Creator views are a separate chunk, imported on first navigation so they
+  // cost gallery-only users nothing (PERF.md budget). `null` until loaded.
+  interface CreatorViews {
+    CreateSeries: typeof CreateSeries;
+    MySeries: typeof MySeries;
+    SeriesSettings: typeof SeriesSettings;
+  }
+  let creator = $state<CreatorViews | null>(null);
+
+  function isCreatorView(name: View['name']): boolean {
+    return name === 'createSeries' || name === 'mySeries' || name === 'seriesSettings';
+  }
+
+  $effect(() => {
+    if (isCreatorView(view.name) && !creator) {
+      void import('./creator/entry').then((m) => {
+        creator = m;
+      });
+    }
+  });
 
   onMount(() => {
     void start();
@@ -50,9 +74,21 @@
 {:else if gallery.status === 'error'}
   <div class="boot"><Callout title="Couldn’t load the gallery">{gallery.error}</Callout></div>
 {:else if view.name === 'picker'}
-  <Picker />
+  <Picker {userId} />
+{:else if isCreatorView(view.name)}
+  {#if creator}
+    {#if view.name === 'createSeries'}
+      <creator.CreateSeries />
+    {:else if view.name === 'mySeries'}
+      <creator.MySeries />
+    {:else if view.name === 'seriesSettings'}
+      <creator.SeriesSettings seriesId={view.seriesId} />
+    {/if}
+  {:else}
+    <div class="boot"><Skeleton width="240px" height="20px" /></div>
+  {/if}
 {:else if activeSeries}
-  <Home series={activeSeries} canGoBack={nav.canGoBack} />
+  <Home series={activeSeries} {userId} canGoBack={nav.canGoBack} />
   {#if view.name === 'viewer'}
     <Viewer series={activeSeries} day={view.day} onClose={() => nav.back()} />
   {/if}

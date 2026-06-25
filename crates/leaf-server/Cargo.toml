@@ -20,6 +20,7 @@ tower-http.workspace = true
 reqwest.workspace = true
 object_store.workspace = true
 bytes.workspace = true
+chrono.workspace = true
 rand.workspace = true
 hmac.workspace = true
 sha2.workspace = true

@@ -13,7 +13,7 @@ use crate::{Context, Data, Error};
 
 pub mod archive;
 pub mod query;
-pub mod series;
+pub mod series_lookup;
 pub mod setup;
 pub mod transfer;
 pub mod wrapped;
@@ -24,7 +24,6 @@ pub fn all() -> Vec<poise::Command<Data, Error>> {
     vec![
         ping(),
         setup::setup(),
-        series::series(),
         archive::archive_menu(),
         query::search(),
         query::status(),

@@ -127,7 +127,7 @@
           Creator role id <em>(blank = anyone)</em>
           <InfoTip
             label="Creator role id"
-            text="Restrict who can start a series. With a role ID set, only members who hold that role can run /series create. Leave blank to let anyone create. (Enable Developer Mode in Discord, then right-click a role → Copy Role ID.)"
+            text="Restrict who can start a series. With a role ID set, only members who hold that role can create a series in the gallery. Leave blank to let anyone create. (Enable Developer Mode in Discord, then right-click a role → Copy Role ID.)"
           />
         </span>
         <input type="text" bind:value={form.creator_role_id} />

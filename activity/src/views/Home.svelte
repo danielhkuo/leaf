@@ -11,12 +11,14 @@
 
   interface Props {
     series: Series;
+    userId: string;
     canGoBack: boolean;
   }
-  let { series, canGoBack }: Props = $props();
+  let { series, userId, canGoBack }: Props = $props();
 
   const accent = $derived(accentVar(series.id));
   const maxDay = $derived(series.max_day ?? 0);
+  const isOwner = $derived(series.creator_id === userId);
 
   let stats = $state<Stats | null>(null);
   let statsFailed = $state(false);
@@ -75,6 +77,16 @@
     {/if}
     <span class="emoji" aria-hidden="true">{series.emoji}</span>
     <h1>{series.name}</h1>
+    {#if isOwner}
+      <span class="spacer"></span>
+      <IconButton
+        ariaLabel="Series settings"
+        variant="solid"
+        onclick={() => nav.push({ name: 'seriesSettings', seriesId: series.id })}
+      >
+        ⚙
+      </IconButton>
+    {/if}
   </header>
 
   {#if maxDay === 0}
@@ -126,6 +138,9 @@
   }
   .emoji {
     font-size: 1.5rem;
+  }
+  .spacer {
+    flex: 1;
   }
   h1 {
     margin: 0;

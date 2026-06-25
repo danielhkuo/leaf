@@ -199,7 +199,7 @@ pub struct Series {
     pub created_at: i64,
 }
 
-/// Fields required to create a series (the `/series create` payload).
+/// Fields required to create a series.
 #[derive(Debug, Clone)]
 pub struct NewSeries {
     /// Guild snowflake.

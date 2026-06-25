@@ -23,6 +23,10 @@ pub enum ApiError {
     BadRequest,
     /// Upstream (Discord/R2) or internal failure.
     Internal,
+    /// A specific failure carrying its own status and machine code (used by
+    /// the creator API, where the client distinguishes e.g. `name_taken`
+    /// from `invalid_channel`).
+    Coded(StatusCode, &'static str),
 }
 
 impl ApiError {
@@ -33,6 +37,7 @@ impl ApiError {
             Self::NotFound => (StatusCode::NOT_FOUND, "not_found"),
             Self::BadRequest => (StatusCode::BAD_REQUEST, "bad_request"),
             Self::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
+            Self::Coded(status, code) => (status, code),
         }
     }
 }

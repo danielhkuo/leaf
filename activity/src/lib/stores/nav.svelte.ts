@@ -5,7 +5,10 @@
 export type View =
   | { name: 'picker' }
   | { name: 'home'; seriesId: number }
-  | { name: 'viewer'; seriesId: number; day: number };
+  | { name: 'viewer'; seriesId: number; day: number }
+  | { name: 'createSeries' }
+  | { name: 'mySeries' }
+  | { name: 'seriesSettings'; seriesId: number };
 
 const PICKER: View = { name: 'picker' };
 

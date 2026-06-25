@@ -93,4 +93,4 @@ with dev-scoped resources.
 | `crates/leaf-migrate` | the migration CLI ([05-migration.md](05-migration.md)) |
 | `activity/` | the Svelte 5 gallery |
 | `migrations/` | sqlx migrations |
-| `docs/` | **local-only** (gitignored): PLAN expansion, code standards |
+| `docs/` | **local-only** (gitignored): PLAN, code standards, design specs ([app-series-management.md](../docs/design/app-series-management.md)) |

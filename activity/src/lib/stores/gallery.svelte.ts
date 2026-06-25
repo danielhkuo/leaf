@@ -46,6 +46,20 @@ export async function initGallery(session: Session): Promise<void> {
   }
 }
 
+/**
+ * Re-fetches the visible series list (after a create or edit) so the picker
+ * and home reflect the change. Best-effort: a failure keeps the stale list
+ * rather than blanking the gallery.
+ */
+export async function refreshSeries(): Promise<void> {
+  if (!api) return;
+  try {
+    gallery.series = await api.listSeries(guildId);
+  } catch {
+    /* keep the existing list on a transient failure */
+  }
+}
+
 /** Matches the API's MAX_WINDOW cap on a single `/days` range. */
 const DAY_WINDOW = 366;
 const indexCache = new Map<number, DaySummary[]>();

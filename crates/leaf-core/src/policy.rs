@@ -5,7 +5,7 @@
 
 use crate::domain::{GuildSettings, Privacy, Series, SeriesState};
 
-/// Facts about the would-be creator at `/series create` time.
+/// Facts about the would-be creator at series-creation time.
 #[derive(Debug, Clone)]
 pub struct CreationContext {
     /// Current unix time.
