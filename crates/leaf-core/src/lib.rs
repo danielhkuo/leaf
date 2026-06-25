@@ -11,6 +11,7 @@ pub mod milestone;
 pub mod parser;
 pub mod policy;
 pub mod reminder;
+pub mod series_ops;
 pub mod stats;
 pub mod transfer;
 pub mod wrapped;

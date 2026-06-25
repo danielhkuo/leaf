@@ -51,3 +51,67 @@ export const exchangeSchema = z.object({
   access_token: z.string(),
   expires_in: z.number(),
 });
+
+// --- creator series management ---
+
+export const violationSchema = z.object({
+  code: z.string(),
+  message: z.string(),
+});
+
+export const eligibilitySchema = z.object({
+  can_create: z.boolean(),
+  violations: z.array(violationSchema),
+});
+
+export const namedIdSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+});
+
+export const seriesOptionsSchema = z.object({
+  channels: z.array(namedIdSchema),
+  roles: z.array(namedIdSchema),
+  cadences: z.array(z.string()),
+  privacy_modes: z.array(z.string()),
+  guild_timezone: z.string(),
+  sprout_enabled: z.boolean(),
+  sprout_threshold: z.number(),
+});
+
+export const createdSeriesSchema = z.object({
+  id: z.number(),
+  name: z.string(),
+  state: z.string(),
+  emoji: z.string(),
+});
+
+export const mySeriesSchema = z.object({
+  id: z.number(),
+  name: z.string(),
+  emoji: z.string(),
+  state: z.string(),
+  cadence: z.string(),
+  channel_id: z.string().nullable(),
+  channel_name: z.string().nullable(),
+  archived_days: z.number(),
+  reminder_enabled: z.boolean(),
+});
+export const mySeriesListSchema = z.array(mySeriesSchema);
+
+export const seriesSettingsSchema = z.object({
+  id: z.number(),
+  name: z.string(),
+  description: z.string(),
+  emoji: z.string(),
+  cadence: z.string(),
+  privacy: z.string(),
+  privacy_role_id: z.string().nullable(),
+  channel_id: z.string().nullable(),
+  detection_mode: z.string(),
+  state: z.string(),
+  reminder_enabled: z.boolean(),
+  reminder_time: z.string().nullable(),
+  reminder_timezone: z.string().nullable(),
+  reminder_dm: z.boolean(),
+});

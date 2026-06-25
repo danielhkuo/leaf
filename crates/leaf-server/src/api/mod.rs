@@ -20,17 +20,22 @@ pub mod error;
 pub mod media;
 pub mod state;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
-use axum::routing::{get, post};
+use axum::http::StatusCode;
+use axum::routing::{get, patch, post};
 use axum::{Router, response::IntoResponse};
-use leaf_core::domain::Series;
-use leaf_core::policy::{Viewer, can_view};
+use leaf_core::domain::{Cadence, DetectionMode, Privacy, Series};
+use leaf_core::policy::{PolicyViolation, Viewer, can_view};
+use leaf_core::series_ops::{
+    self, CreateError, CreateSeriesInput, UpdateError, UpdateSeriesInput, ValidationError,
+};
 use serde::{Deserialize, Serialize};
 
-use auth::{DiscordApi, MediaSigner, SESSION_TTL_SECS, now_unix};
+use auth::{DiscordApi, GuildMember, MediaSigner, SESSION_TTL_SECS, now_unix};
 use dto::{DayDto, DaySummaryDto, SeriesDto, StatsDto};
 use error::ApiError;
 use state::{ApiState, AuthUser};
@@ -44,13 +49,30 @@ const MAX_WINDOW: i64 = 366;
 pub fn router<D: DiscordApi>(state: ApiState<D>) -> Router {
     Router::new()
         .route("/api/token", post(token::<D>))
-        .route("/api/guilds/{gid}/series", get(list_series::<D>))
+        .route(
+            "/api/guilds/{gid}/series",
+            get(list_series::<D>).post(create_series::<D>),
+        )
+        .route(
+            "/api/guilds/{gid}/series/eligibility",
+            get(series_eligibility::<D>),
+        )
+        .route("/api/guilds/{gid}/series/options", get(series_options::<D>))
+        .route("/api/guilds/{gid}/series/mine", get(list_my_series::<D>))
         .route("/api/guilds/{gid}/series/{sid}/days", get(list_days::<D>))
         .route(
             "/api/guilds/{gid}/series/{sid}/days/{day}",
             get(get_day::<D>),
         )
         .route("/api/guilds/{gid}/series/{sid}/stats", get(get_stats::<D>))
+        .route(
+            "/api/guilds/{gid}/series/{sid}/settings",
+            get(get_series_settings::<D>),
+        )
+        .route(
+            "/api/guilds/{gid}/series/{sid}",
+            patch(update_series_route::<D>),
+        )
         .route("/api/media/{attachment_id}", get(media::media::<D>))
         .merge(admin::router::<D>())
         .with_state(state)
@@ -99,13 +121,14 @@ async fn token<D: DiscordApi>(
     }))
 }
 
-/// Resolves the caller's role ids in a guild, or `Forbidden` if not a
-/// member. The single membership gate for the guild-scoped routes.
-async fn member_roles<D: DiscordApi>(
+/// Resolves the caller's membership in a guild (roles + join time), or
+/// `Forbidden` if not a member. The single membership gate for the
+/// guild-scoped routes.
+async fn member<D: DiscordApi>(
     st: &ApiState<D>,
     gid: &str,
     user_id: &str,
-) -> Result<Vec<String>, ApiError> {
+) -> Result<GuildMember, ApiError> {
     // `try_get_with` single-flights concurrent misses for the same key (the
     // cold gallery burst becomes one Discord call) and never caches the
     // error, so a transient failure is retried on the next request.
@@ -114,17 +137,44 @@ async fn member_roles<D: DiscordApi>(
     let lookup = st
         .membership
         .try_get_with((g.clone(), u.clone()), async move {
-            discord.guild_member_roles(&g, &u).await
+            discord.guild_member(&g, &u).await
         })
         .await;
     match lookup {
-        Ok(Some(roles)) => Ok(roles),
+        Ok(Some(m)) => Ok(m),
         Ok(None) => Err(ApiError::Forbidden),
         Err(e) => {
             tracing::error!(error = %e, "guild membership lookup failed");
             Err(ApiError::Internal)
         }
     }
+}
+
+/// Just the caller's role ids — the membership gate for read routes.
+async fn member_roles<D: DiscordApi>(
+    st: &ApiState<D>,
+    gid: &str,
+    user_id: &str,
+) -> Result<Vec<String>, ApiError> {
+    Ok(member(st, gid, user_id).await?.roles)
+}
+
+/// The guild's channels (id → name), cached for the creator pickers.
+async fn guild_channels<D: DiscordApi>(
+    st: &ApiState<D>,
+    gid: &str,
+) -> Result<Arc<Vec<auth::GuildChannel>>, ApiError> {
+    let discord = Arc::clone(&st.discord);
+    let g = gid.to_owned();
+    st.channels
+        .try_get_with(g.clone(), async move {
+            discord.guild_channels(&g).await.map(Arc::new)
+        })
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "guild channel lookup failed");
+            ApiError::Internal
+        })
 }
 
 /// Membership + load + visibility, returning a viewable series. Anything
@@ -239,6 +289,475 @@ async fn get_stats<D: DiscordApi>(
     ))
 }
 
+// --- creator series management -------------------------------------------
+//
+// Unlike the read routes (membership + `can_view`), these are owner-scoped
+// mutations and an eligibility check. Every one re-runs the same
+// `series_ops`/`policy` rules the bot runs — hiding a button is not a gate.
+
+/// A single eligibility/creation blocker with a stable code and a message.
+#[derive(Serialize)]
+struct ViolationDto {
+    code: &'static str,
+    message: String,
+}
+
+/// Whether the caller may start a series here, and why not if they can't.
+#[derive(Serialize)]
+struct EligibilityDto {
+    can_create: bool,
+    violations: Vec<ViolationDto>,
+}
+
+/// Stable machine code for a creation-policy violation (matches the design's
+/// eligibility/create error codes).
+const fn policy_code(v: &PolicyViolation) -> &'static str {
+    match v {
+        PolicyViolation::MaxSeries(_) => "max_series",
+        PolicyViolation::AccountTooNew(_) => "account_too_new",
+        PolicyViolation::MembershipTooNew(_) => "membership_too_new",
+        PolicyViolation::MissingCreatorRole => "missing_creator_role",
+        PolicyViolation::ChannelNotWatched => "invalid_channel",
+    }
+}
+
+/// Stable machine code for a field validation error.
+const fn validation_code(e: &ValidationError) -> &'static str {
+    match e {
+        ValidationError::NameLength => "invalid_name",
+        ValidationError::DescriptionTooLong => "invalid_description",
+        ValidationError::EmojiTooLong => "invalid_emoji",
+        ValidationError::StartDayTooLow => "invalid_start_day",
+        ValidationError::MissingPrivacyRole => "missing_privacy_role",
+        ValidationError::InvalidReminderTime(_) => "invalid_reminder_time",
+        ValidationError::InvalidTimezone(_) => "invalid_timezone",
+        ValidationError::ReminderTimeRequired => "reminder_time_required",
+        ValidationError::ReminderOnFreeform => "reminder_on_freeform",
+    }
+}
+
+fn create_error_to_api(e: CreateError) -> ApiError {
+    match e {
+        CreateError::Policy(PolicyViolation::ChannelNotWatched) => {
+            ApiError::Coded(StatusCode::BAD_REQUEST, "invalid_channel")
+        }
+        CreateError::Policy(v) => ApiError::Coded(StatusCode::FORBIDDEN, policy_code(&v)),
+        CreateError::Validation(v) => ApiError::Coded(StatusCode::BAD_REQUEST, validation_code(&v)),
+        CreateError::NameTaken => ApiError::Coded(StatusCode::CONFLICT, "name_taken"),
+        CreateError::Db(e) => e.into(),
+    }
+}
+
+fn update_error_to_api(e: UpdateError) -> ApiError {
+    match e {
+        // Hide the series from non-owners (indistinguishable from missing).
+        UpdateError::Forbidden(_) => ApiError::NotFound,
+        UpdateError::Policy(PolicyViolation::ChannelNotWatched) => {
+            ApiError::Coded(StatusCode::BAD_REQUEST, "invalid_channel")
+        }
+        UpdateError::Policy(v) => ApiError::Coded(StatusCode::FORBIDDEN, policy_code(&v)),
+        UpdateError::Validation(v) => ApiError::Coded(StatusCode::BAD_REQUEST, validation_code(&v)),
+        UpdateError::Revoked => ApiError::Coded(StatusCode::FORBIDDEN, "revoked"),
+        UpdateError::NameTaken => ApiError::Coded(StatusCode::CONFLICT, "name_taken"),
+        UpdateError::Db(e) => e.into(),
+    }
+}
+
+/// Loads the guild's settings only when `/setup` is complete.
+async fn setup_settings<D: DiscordApi>(
+    st: &ApiState<D>,
+    gid: &str,
+) -> Result<Option<leaf_core::domain::GuildSettings>, ApiError> {
+    Ok(st.guilds.get(gid).await?.filter(|s| s.setup_complete))
+}
+
+/// `GET /api/guilds/{gid}/series/eligibility` — may this user start a series?
+async fn series_eligibility<D: DiscordApi>(
+    State(st): State<ApiState<D>>,
+    Path(gid): Path<String>,
+    user: AuthUser,
+) -> Result<Json<EligibilityDto>, ApiError> {
+    let m = member(&st, &gid, &user.user_id).await?;
+    let Some(settings) = setup_settings(&st, &gid).await? else {
+        return Ok(Json(EligibilityDto {
+            can_create: false,
+            violations: vec![ViolationDto {
+                code: "guild_not_setup",
+                message: "leaf isn't set up in this server yet".to_owned(),
+            }],
+        }));
+    };
+    let live = st
+        .series
+        .count_live_by_creator(&gid, &user.user_id)
+        .await?;
+    let ctx = series_ops::build_creation_context(
+        now_unix(),
+        series_ops::account_created_unix(&user.user_id),
+        m.joined_at,
+        live,
+        &m.roles,
+        &settings,
+    );
+    let violations = match leaf_core::policy::check_creation(&settings, &ctx) {
+        Ok(()) => Vec::new(),
+        Err(v) => vec![ViolationDto {
+            code: policy_code(&v),
+            message: v.to_string(),
+        }],
+    };
+    Ok(Json(EligibilityDto {
+        can_create: violations.is_empty(),
+        violations,
+    }))
+}
+
+#[derive(Serialize)]
+struct NamedIdDto {
+    id: String,
+    name: String,
+}
+
+/// Form metadata for the create wizard and settings screen.
+#[derive(Serialize)]
+struct OptionsDto {
+    channels: Vec<NamedIdDto>,
+    roles: Vec<NamedIdDto>,
+    cadences: Vec<&'static str>,
+    privacy_modes: Vec<&'static str>,
+    guild_timezone: String,
+    sprout_enabled: bool,
+    sprout_threshold: i64,
+}
+
+/// `GET /api/guilds/{gid}/series/options` — channels, roles, and enum choices.
+async fn series_options<D: DiscordApi>(
+    State(st): State<ApiState<D>>,
+    Path(gid): Path<String>,
+    user: AuthUser,
+) -> Result<Json<OptionsDto>, ApiError> {
+    member(&st, &gid, &user.user_id).await?;
+    let settings = setup_settings(&st, &gid)
+        .await?
+        .ok_or(ApiError::Coded(StatusCode::FORBIDDEN, "guild_not_setup"))?;
+
+    // Watched channels, labelled by Discord names where available.
+    let all = guild_channels(&st, &gid).await?;
+    let names: HashMap<&str, &str> = all
+        .iter()
+        .map(|c| (c.id.as_str(), c.name.as_str()))
+        .collect();
+    let channels = settings
+        .watched_channels
+        .iter()
+        .map(|id| NamedIdDto {
+            id: id.clone(),
+            name: names.get(id.as_str()).map_or_else(|| id.clone(), |n| (*n).to_owned()),
+        })
+        .collect();
+
+    let roles = st
+        .discord
+        .guild_roles(&gid)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "guild role lookup failed");
+            ApiError::Internal
+        })?
+        .into_iter()
+        .map(|r| NamedIdDto {
+            id: r.id,
+            name: r.name,
+        })
+        .collect();
+
+    Ok(Json(OptionsDto {
+        channels,
+        roles,
+        cadences: vec![
+            Cadence::Daily.as_str(),
+            Cadence::Weekdays.as_str(),
+            Cadence::Weekly.as_str(),
+            Cadence::Freeform.as_str(),
+        ],
+        privacy_modes: vec![
+            Privacy::Public.as_str(),
+            Privacy::RoleGated.as_str(),
+            Privacy::CreatorOnly.as_str(),
+        ],
+        guild_timezone: settings.timezone,
+        sprout_enabled: settings.sprout_enabled,
+        sprout_threshold: settings.sprout_threshold,
+    }))
+}
+
+const fn default_start_day() -> i64 {
+    1
+}
+
+#[derive(Deserialize)]
+struct CreateSeriesRequest {
+    name: String,
+    #[serde(default)]
+    description: String,
+    channel_id: String,
+    cadence: String,
+    privacy: String,
+    #[serde(default)]
+    privacy_role_id: Option<String>,
+    #[serde(default = "default_start_day")]
+    start_day: i64,
+}
+
+#[derive(Serialize)]
+struct CreatedSeriesDto {
+    id: i64,
+    name: String,
+    state: String,
+    emoji: String,
+}
+
+/// `POST /api/guilds/{gid}/series` — create a series (re-runs policy).
+async fn create_series<D: DiscordApi>(
+    State(st): State<ApiState<D>>,
+    Path(gid): Path<String>,
+    user: AuthUser,
+    Json(req): Json<CreateSeriesRequest>,
+) -> Result<(StatusCode, Json<CreatedSeriesDto>), ApiError> {
+    let m = member(&st, &gid, &user.user_id).await?;
+    let settings = setup_settings(&st, &gid)
+        .await?
+        .ok_or(ApiError::Coded(StatusCode::FORBIDDEN, "guild_not_setup"))?;
+
+    let cadence = req
+        .cadence
+        .parse::<Cadence>()
+        .map_err(|_| ApiError::BadRequest)?;
+    let privacy = req
+        .privacy
+        .parse::<Privacy>()
+        .map_err(|_| ApiError::BadRequest)?;
+    let input = CreateSeriesInput {
+        name: req.name,
+        description: req.description,
+        channel_id: req.channel_id,
+        cadence,
+        privacy,
+        privacy_role_id: req.privacy_role_id.filter(|s| !s.is_empty()),
+        start_day: req.start_day,
+    };
+
+    let live = st
+        .series
+        .count_live_by_creator(&gid, &user.user_id)
+        .await?;
+    let ctx = series_ops::build_creation_context(
+        now_unix(),
+        series_ops::account_created_unix(&user.user_id),
+        m.joined_at,
+        live,
+        &m.roles,
+        &settings,
+    );
+    let created = series_ops::create_series(
+        &st.series,
+        &settings,
+        &ctx,
+        &user.user_id,
+        &input,
+        now_unix(),
+    )
+    .await
+    .map_err(create_error_to_api)?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(CreatedSeriesDto {
+            id: created.id,
+            name: created.name,
+            state: created.state.as_str().to_owned(),
+            emoji: created.emoji,
+        }),
+    ))
+}
+
+/// A series the caller owns, for the "my series" dashboard.
+#[derive(Serialize)]
+struct MySeriesDto {
+    id: i64,
+    name: String,
+    emoji: String,
+    state: String,
+    cadence: String,
+    channel_id: Option<String>,
+    channel_name: Option<String>,
+    archived_days: i64,
+    reminder_enabled: bool,
+}
+
+/// `GET /api/guilds/{gid}/series/mine` — the caller's own series.
+async fn list_my_series<D: DiscordApi>(
+    State(st): State<ApiState<D>>,
+    Path(gid): Path<String>,
+    user: AuthUser,
+) -> Result<Json<Vec<MySeriesDto>>, ApiError> {
+    member(&st, &gid, &user.user_id).await?;
+    let mine = st.series.list_by_creator(&gid, &user.user_id).await?;
+
+    // Channel names are best-effort: a Discord hiccup leaves them unlabelled
+    // rather than failing the whole dashboard.
+    let names: HashMap<String, String> = guild_channels(&st, &gid).await.map_or_else(
+        |_| HashMap::new(),
+        |chs| chs.iter().map(|c| (c.id.clone(), c.name.clone())).collect(),
+    );
+
+    let mut out = Vec::with_capacity(mine.len());
+    for s in mine {
+        let archived_days = st.posts.count(s.id).await?;
+        let channel_id = s.channels.first().cloned();
+        let channel_name = channel_id.as_ref().and_then(|id| names.get(id).cloned());
+        out.push(MySeriesDto {
+            id: s.id,
+            name: s.name,
+            emoji: s.emoji,
+            state: s.state.as_str().to_owned(),
+            cadence: s.cadence.as_str().to_owned(),
+            channel_id,
+            channel_name,
+            archived_days,
+            reminder_enabled: s.reminder_enabled,
+        });
+    }
+    Ok(Json(out))
+}
+
+/// Every editable field of a series, for the settings screen.
+#[derive(Serialize)]
+struct SeriesSettingsDto {
+    id: i64,
+    name: String,
+    description: String,
+    emoji: String,
+    cadence: String,
+    privacy: String,
+    privacy_role_id: Option<String>,
+    channel_id: Option<String>,
+    detection_mode: String,
+    state: String,
+    reminder_enabled: bool,
+    reminder_time: Option<String>,
+    reminder_timezone: Option<String>,
+    reminder_dm: bool,
+}
+
+impl SeriesSettingsDto {
+    fn from_series(s: &Series) -> Self {
+        Self {
+            id: s.id,
+            name: s.name.clone(),
+            description: s.description.clone(),
+            emoji: s.emoji.clone(),
+            cadence: s.cadence.as_str().to_owned(),
+            privacy: s.privacy.as_str().to_owned(),
+            privacy_role_id: s.privacy_role_id.clone(),
+            channel_id: s.channels.first().cloned(),
+            detection_mode: s.detection_mode.as_str().to_owned(),
+            state: s.state.as_str().to_owned(),
+            reminder_enabled: s.reminder_enabled,
+            reminder_time: s.reminder_time.clone(),
+            reminder_timezone: s.reminder_timezone.clone(),
+            reminder_dm: s.reminder_dm,
+        }
+    }
+}
+
+/// `GET /api/guilds/{gid}/series/{sid}/settings` — full editable fields
+/// (owner only; hidden as 404 from everyone else).
+async fn get_series_settings<D: DiscordApi>(
+    State(st): State<ApiState<D>>,
+    Path((gid, sid)): Path<(String, i64)>,
+    user: AuthUser,
+) -> Result<Json<SeriesSettingsDto>, ApiError> {
+    member(&st, &gid, &user.user_id).await?;
+    let series = st.series.get(sid).await?.ok_or(ApiError::NotFound)?;
+    if series.guild_id != gid {
+        return Err(ApiError::NotFound);
+    }
+    series_ops::assert_owner(&series, &user.user_id).map_err(|_| ApiError::NotFound)?;
+    Ok(Json(SeriesSettingsDto::from_series(&series)))
+}
+
+#[derive(Deserialize)]
+struct UpdateSeriesRequest {
+    description: Option<String>,
+    emoji: Option<String>,
+    cadence: Option<String>,
+    privacy: Option<String>,
+    privacy_role_id: Option<String>,
+    channel_id: Option<String>,
+    detection_mode: Option<String>,
+    reminder_enabled: Option<bool>,
+    reminder_time: Option<String>,
+    reminder_timezone: Option<String>,
+    reminder_dm: Option<bool>,
+}
+
+/// `PATCH /api/guilds/{gid}/series/{sid}` — owner-only partial update.
+async fn update_series_route<D: DiscordApi>(
+    State(st): State<ApiState<D>>,
+    Path((gid, sid)): Path<(String, i64)>,
+    user: AuthUser,
+    Json(req): Json<UpdateSeriesRequest>,
+) -> Result<Json<SeriesSettingsDto>, ApiError> {
+    member(&st, &gid, &user.user_id).await?;
+    let settings = setup_settings(&st, &gid)
+        .await?
+        .ok_or(ApiError::Coded(StatusCode::FORBIDDEN, "guild_not_setup"))?;
+    let series = st.series.get(sid).await?.ok_or(ApiError::NotFound)?;
+    if series.guild_id != gid {
+        return Err(ApiError::NotFound);
+    }
+
+    let cadence = req
+        .cadence
+        .as_deref()
+        .map(str::parse::<Cadence>)
+        .transpose()
+        .map_err(|_| ApiError::BadRequest)?;
+    let privacy = req
+        .privacy
+        .as_deref()
+        .map(str::parse::<Privacy>)
+        .transpose()
+        .map_err(|_| ApiError::BadRequest)?;
+    let detection_mode = req
+        .detection_mode
+        .as_deref()
+        .map(str::parse::<DetectionMode>)
+        .transpose()
+        .map_err(|_| ApiError::BadRequest)?;
+
+    let input = UpdateSeriesInput {
+        description: req.description,
+        emoji: req.emoji,
+        cadence,
+        privacy,
+        privacy_role_id: req.privacy_role_id.filter(|s| !s.is_empty()),
+        channel_id: req.channel_id,
+        detection_mode,
+        reminder_enabled: req.reminder_enabled,
+        reminder_time: req.reminder_time,
+        reminder_timezone: req.reminder_timezone,
+        reminder_dm: req.reminder_dm,
+    };
+
+    let updated =
+        series_ops::update_series(&st.series, &settings, series, &user.user_id, &input)
+            .await
+            .map_err(update_error_to_api)?;
+    Ok(Json(SeriesSettingsDto::from_series(&updated)))
+}
+
 /// Maps a thrown `ApiError` into a response (so handlers can `?`).
 impl From<ApiError> for axum::response::Response {
     fn from(e: ApiError) -> Self {
@@ -289,16 +808,37 @@ mod tests {
         async fn current_user_id(&self, access_token: &str) -> Result<String, String> {
             Ok(access_token.trim_start_matches("access-for-").to_owned())
         }
-        async fn guild_member_roles(
+        async fn guild_member(
             &self,
             guild_id: &str,
             user_id: &str,
-        ) -> Result<Option<Vec<String>>, String> {
+        ) -> Result<Option<auth::GuildMember>, String> {
             self.calls.fetch_add(1, Ordering::Relaxed);
             Ok(self
                 .members
                 .get(&(guild_id.to_owned(), user_id.to_owned()))
-                .cloned())
+                .map(|roles| auth::GuildMember {
+                    roles: roles.clone(),
+                    joined_at: None,
+                }))
+        }
+        async fn guild_channels(&self, _guild_id: &str) -> Result<Vec<auth::GuildChannel>, String> {
+            Ok(vec![
+                auth::GuildChannel {
+                    id: "c1".to_owned(),
+                    name: "daily-photos".to_owned(),
+                },
+                auth::GuildChannel {
+                    id: "c2".to_owned(),
+                    name: "sketches".to_owned(),
+                },
+            ])
+        }
+        async fn guild_roles(&self, _guild_id: &str) -> Result<Vec<auth::GuildRole>, String> {
+            Ok(vec![auth::GuildRole {
+                id: ROLE.to_owned(),
+                name: "VIP".to_owned(),
+            }])
         }
         async fn managed_guild_ids(&self, access_token: &str) -> Result<Vec<String>, String> {
             let user = access_token.trim_start_matches("access-for-");
@@ -316,6 +856,7 @@ mod tests {
     /// Builds a fully-seeded app + key + the membership-lookup counter.
     /// Members: creator (no roles), a plain member, and a VIP member holding
     /// `ROLE`. Series of each visibility.
+    #[allow(clippy::too_many_lines, reason = "test fixture seeds many rows")]
     async fn app() -> (Router, SessionKey, Arc<AtomicUsize>) {
         let dir = tempfile::tempdir().unwrap();
         let pool = leaf_core::db::connect(&dir.path().join("t.db"))
@@ -324,10 +865,22 @@ mod tests {
         // Keep the temp DB file alive for the rest of the test process.
         std::mem::forget(dir);
 
-        GuildSettingsRepo::new(pool.clone())
-            .ensure_exists(GUILD)
-            .await
-            .unwrap();
+        let guilds_repo = GuildSettingsRepo::new(pool.clone());
+        guilds_repo.ensure_exists(GUILD).await.unwrap();
+        // GUILD is fully set up with two watched channels and open creation.
+        let mut gs = leaf_core::domain::GuildSettings::defaults_for(GUILD);
+        gs.setup_complete = true;
+        gs.watched_channels = vec!["c1".to_owned(), "c2".to_owned()];
+        gs.timezone = "America/Chicago".to_owned();
+        gs.max_series_per_user = 10;
+        guilds_repo.upsert(&gs).await.unwrap();
+        // "g3" is set up but requires a creator role the plain member lacks.
+        guilds_repo.ensure_exists("g3").await.unwrap();
+        let mut g3 = leaf_core::domain::GuildSettings::defaults_for("g3");
+        g3.setup_complete = true;
+        g3.watched_channels = vec!["c1".to_owned()];
+        g3.creator_role_id = Some("role-needed".to_owned());
+        guilds_repo.upsert(&g3).await.unwrap();
         let series_repo = SeriesRepo::new(pool.clone());
         let posts = PostRepo::new(pool.clone());
 
@@ -384,6 +937,10 @@ mod tests {
         members.insert((GUILD.to_owned(), CREATOR.to_owned()), vec![]);
         members.insert((GUILD.to_owned(), MEMBER.to_owned()), vec![]);
         members.insert((GUILD.to_owned(), "vip".to_owned()), vec![ROLE.to_owned()]);
+        // For eligibility tests: a member of a not-set-up guild, and a member
+        // of a guild that requires a creator role they lack.
+        members.insert(("gns".to_owned(), MEMBER.to_owned()), vec![]);
+        members.insert(("g3".to_owned(), MEMBER.to_owned()), vec![]);
 
         // CREATOR manages the guild; MEMBER manages nothing.
         let mut manages = std::collections::HashMap::new();
@@ -413,6 +970,7 @@ mod tests {
                 calls: Arc::clone(&calls),
             }),
             membership: crate::api::state::membership_cache(),
+            channels: crate::api::state::channels_cache(),
             redirect_uri: "https://leaf.test".to_owned(),
             client_id: "client-123".to_owned(),
         };
@@ -843,6 +1401,201 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // --- creator series management ---
+
+    async fn post_json(
+        router: &Router,
+        path: &str,
+        bearer: &str,
+        body: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        let resp = router
+            .clone()
+            .oneshot(
+                Request::post(path)
+                    .header("Authorization", format!("Bearer {bearer}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_owned()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let v = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, v)
+    }
+
+    #[tokio::test]
+    async fn eligibility_reflects_membership_and_policy() {
+        let (app, key, _calls) = app().await;
+        let member = token_for(&key, MEMBER);
+
+        // A set-up guild with open creation: allowed.
+        let v = router_json_value(&app, "/api/guilds/g1/series/eligibility", &member).await;
+        assert!(v["can_create"].as_bool().unwrap());
+        assert!(v["violations"].as_array().unwrap().is_empty());
+
+        // A guild without `/setup`: blocked with guild_not_setup.
+        let v = router_json_value(&app, "/api/guilds/gns/series/eligibility", &member).await;
+        assert!(!v["can_create"].as_bool().unwrap());
+        assert_eq!(v["violations"][0]["code"].as_str().unwrap(), "guild_not_setup");
+
+        // A guild requiring a creator role the member lacks.
+        let v = router_json_value(&app, "/api/guilds/g3/series/eligibility", &member).await;
+        assert!(!v["can_create"].as_bool().unwrap());
+        assert_eq!(
+            v["violations"][0]["code"].as_str().unwrap(),
+            "missing_creator_role"
+        );
+
+        // A non-member is refused before any policy runs.
+        let stranger = token_for(&key, "stranger");
+        assert_eq!(
+            get(&app, "/api/guilds/g1/series/eligibility", Some(&stranger)).await,
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    #[tokio::test]
+    async fn options_lists_watched_channels_and_roles() {
+        let (app, key, _calls) = app().await;
+        let member = token_for(&key, MEMBER);
+        let v = router_json_value(&app, "/api/guilds/g1/series/options", &member).await;
+        let channels = v["channels"].as_array().unwrap();
+        assert_eq!(channels.len(), 2);
+        assert_eq!(channels[0]["id"].as_str().unwrap(), "c1");
+        assert_eq!(channels[0]["name"].as_str().unwrap(), "daily-photos");
+        assert_eq!(v["roles"][0]["name"].as_str().unwrap(), "VIP");
+        assert_eq!(v["cadences"].as_array().unwrap().len(), 4);
+        assert_eq!(v["guild_timezone"].as_str().unwrap(), "America/Chicago");
+    }
+
+    #[tokio::test]
+    async fn create_enforces_policy_and_uniqueness() {
+        let (app, key, _calls) = app().await;
+        let member = token_for(&key, MEMBER);
+
+        // A valid create succeeds and starts active (sprout disabled).
+        let (status, v) = post_json(
+            &app,
+            "/api/guilds/g1/series",
+            &member,
+            r#"{"name":"Member Daily","channel_id":"c1","cadence":"daily","privacy":"public"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(v["state"].as_str().unwrap(), "active");
+
+        // It now shows in the member's own series.
+        let mine = router_json(&app, "/api/guilds/g1/series/mine", &member).await;
+        assert_eq!(mine.len(), 1);
+        assert_eq!(mine[0]["name"].as_str().unwrap(), "Member Daily");
+        assert_eq!(mine[0]["channel_name"].as_str().unwrap(), "daily-photos");
+
+        // A duplicate name (CREATOR already owns "public") is a 409.
+        let (status, v) = post_json(
+            &app,
+            "/api/guilds/g1/series",
+            &member,
+            r#"{"name":"public","channel_id":"c1","cadence":"daily","privacy":"public"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(v["error"].as_str().unwrap(), "name_taken");
+
+        // An unwatched channel is a 400 invalid_channel.
+        let (status, v) = post_json(
+            &app,
+            "/api/guilds/g1/series",
+            &member,
+            r#"{"name":"Stray","channel_id":"nope","cadence":"daily","privacy":"public"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(v["error"].as_str().unwrap(), "invalid_channel");
+
+        // A too-short name is a 400 invalid_name.
+        let (status, v) = post_json(
+            &app,
+            "/api/guilds/g1/series",
+            &member,
+            r#"{"name":"x","channel_id":"c1","cadence":"daily","privacy":"public"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(v["error"].as_str().unwrap(), "invalid_name");
+    }
+
+    #[tokio::test]
+    async fn settings_and_patch_are_owner_only() {
+        let (app, key, _calls) = app().await;
+        let creator = token_for(&key, CREATOR);
+        let member = token_for(&key, MEMBER);
+
+        // The creator reads full settings for their series.
+        let v = router_json_value(&app, "/api/guilds/g1/series/1/settings", &creator).await;
+        assert_eq!(v["name"].as_str().unwrap(), "public");
+        assert_eq!(v["channel_id"].as_str().unwrap(), "c1");
+
+        // A non-owner cannot even see settings exist (404).
+        assert_eq!(
+            get(&app, "/api/guilds/g1/series/1/settings", Some(&member)).await,
+            StatusCode::NOT_FOUND
+        );
+
+        // The creator patches the description.
+        let (status, v) = patch_json(
+            &app,
+            "/api/guilds/g1/series/1",
+            &creator,
+            r#"{"description":"now with words"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(v["description"].as_str().unwrap(), "now with words");
+
+        // A non-owner PATCH is hidden as 404.
+        let (status, _) = patch_json(
+            &app,
+            "/api/guilds/g1/series/1",
+            &member,
+            r#"{"description":"hijack"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn patch_rejects_revoked_and_freeform_reminder() {
+        let (app, key, _calls) = app().await;
+        let creator = token_for(&key, CREATOR);
+
+        // Series 5 is revoked → 403 revoked.
+        let (status, v) = patch_json(
+            &app,
+            "/api/guilds/g1/series/5",
+            &creator,
+            r#"{"description":"x"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(v["error"].as_str().unwrap(), "revoked");
+
+        // Turning a series freeform and enabling reminders is rejected.
+        let (status, v) = patch_json(
+            &app,
+            "/api/guilds/g1/series/1",
+            &creator,
+            r#"{"cadence":"freeform","reminder_enabled":true,"reminder_time":"10:00"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(v["error"].as_str().unwrap(), "reminder_on_freeform");
     }
 
     // --- helpers that return parsed JSON ---

@@ -9,12 +9,16 @@ use axum::http::request::Parts;
 use leaf_core::db::{GuildSettingsRepo, PostRepo, SeriesRepo};
 use object_store::ObjectStore;
 
-use crate::api::auth::{DiscordApi, SessionKey, now_unix};
+use crate::api::auth::{DiscordApi, GuildChannel, GuildMember, SessionKey, now_unix};
 use crate::api::error::ApiError;
 
 /// Guild-membership cache: `(guild_id, user_id)` → Discord's answer
 /// (`None` = not a member). See [`membership_cache`].
-pub type MembershipCache = moka::future::Cache<(String, String), Option<Vec<String>>>;
+pub type MembershipCache = moka::future::Cache<(String, String), Option<GuildMember>>;
+
+/// Guild-channel cache: `guild_id` → the bot-visible channel list. See
+/// [`channels_cache`].
+pub type ChannelsCache = moka::future::Cache<String, Arc<Vec<GuildChannel>>>;
 
 /// How long a membership lookup is trusted before re-checking with Discord.
 /// Short enough that a removed member loses gallery access promptly; long
@@ -24,12 +28,28 @@ const MEMBERSHIP_TTL: Duration = Duration::from_mins(1);
 /// Cap on cached `(guild, user)` pairs — bounds memory for a public archive.
 const MEMBERSHIP_CACHE_CAPACITY: u64 = 10_000;
 
+/// How long a guild's channel list is trusted; channels change rarely and
+/// the picker only needs names, so a few minutes of staleness is fine.
+const CHANNELS_TTL: Duration = Duration::from_mins(5);
+
+/// Cap on cached guild channel lists.
+const CHANNELS_CACHE_CAPACITY: u64 = 1_000;
+
 /// Builds the membership cache with leaf's standard TTL and capacity.
 #[must_use]
 pub fn membership_cache() -> MembershipCache {
     moka::future::Cache::builder()
         .time_to_live(MEMBERSHIP_TTL)
         .max_capacity(MEMBERSHIP_CACHE_CAPACITY)
+        .build()
+}
+
+/// Builds the guild-channel cache.
+#[must_use]
+pub fn channels_cache() -> ChannelsCache {
+    moka::future::Cache::builder()
+        .time_to_live(CHANNELS_TTL)
+        .max_capacity(CHANNELS_CACHE_CAPACITY)
         .build()
 }
 
@@ -54,6 +74,8 @@ pub struct ApiState<D> {
     /// member-lookups that trips Discord's per-route rate limit (429 →
     /// "couldn't load these days"). See [`membership_cache`].
     pub membership: MembershipCache,
+    /// Short-TTL cache in front of `guild_channels`, for the creator pickers.
+    pub channels: ChannelsCache,
     /// Default OAuth redirect URI for code exchange (the public origin).
     pub redirect_uri: String,
     /// OAuth client id (public) — builds the admin login URL.
@@ -72,6 +94,7 @@ impl<D> Clone for ApiState<D> {
             key: self.key.clone(),
             discord: Arc::clone(&self.discord),
             membership: self.membership.clone(),
+            channels: self.channels.clone(),
             redirect_uri: self.redirect_uri.clone(),
             client_id: self.client_id.clone(),
         }

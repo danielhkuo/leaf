@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::api::auth::DiscordApi;
+use crate::api::auth::{DiscordApi, GuildChannel, GuildMember, GuildRole};
 
 const API: &str = "https://discord.com/api/v10";
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -56,6 +56,31 @@ struct UserResponse {
 #[derive(Deserialize)]
 struct MemberResponse {
     roles: Vec<String>,
+    /// ISO-8601 join timestamp; absent for some lazily-loaded members.
+    #[serde(default)]
+    joined_at: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ChannelResponse {
+    id: String,
+    #[serde(default)]
+    name: String,
+}
+
+#[derive(Deserialize)]
+struct RoleResponse {
+    id: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    managed: bool,
+}
+
+/// Parses Discord's RFC-3339 `joined_at` into unix seconds.
+fn parse_joined_at(raw: Option<String>) -> Option<i64> {
+    raw.and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
+        .map(|dt| dt.timestamp())
 }
 
 /// Discord's Manage-Guild permission bit.
@@ -112,11 +137,11 @@ impl DiscordApi for LiveDiscord {
         Ok(user.id)
     }
 
-    async fn guild_member_roles(
+    async fn guild_member(
         &self,
         guild_id: &str,
         user_id: &str,
-    ) -> Result<Option<Vec<String>>, String> {
+    ) -> Result<Option<GuildMember>, String> {
         let url = format!("{API}/guilds/{guild_id}/members/{user_id}");
         let mut attempt = 0u8;
         loop {
@@ -133,7 +158,10 @@ impl DiscordApi for LiveDiscord {
                         .json()
                         .await
                         .map_err(|e| format!("bad member response: {e}"))?;
-                    return Ok(Some(m.roles));
+                    return Ok(Some(GuildMember {
+                        roles: m.roles,
+                        joined_at: parse_joined_at(m.joined_at),
+                    }));
                 }
                 // 404 = the user is not a member of this guild.
                 reqwest::StatusCode::NOT_FOUND => return Ok(None),
@@ -146,6 +174,57 @@ impl DiscordApi for LiveDiscord {
                 s => return Err(format!("member lookup returned {s}")),
             }
         }
+    }
+
+    async fn guild_channels(&self, guild_id: &str) -> Result<Vec<GuildChannel>, String> {
+        let resp = self
+            .http
+            .get(format!("{API}/guilds/{guild_id}/channels"))
+            .header("Authorization", format!("Bot {}", self.bot_token))
+            .send()
+            .await
+            .map_err(|e| format!("channel list failed: {e}"))?;
+        if !resp.status().is_success() {
+            return Err(format!("channel list returned {}", resp.status()));
+        }
+        let channels: Vec<ChannelResponse> = resp
+            .json()
+            .await
+            .map_err(|e| format!("bad channel list response: {e}"))?;
+        Ok(channels
+            .into_iter()
+            .map(|c| GuildChannel {
+                id: c.id,
+                name: c.name,
+            })
+            .collect())
+    }
+
+    async fn guild_roles(&self, guild_id: &str) -> Result<Vec<GuildRole>, String> {
+        let resp = self
+            .http
+            .get(format!("{API}/guilds/{guild_id}/roles"))
+            .header("Authorization", format!("Bot {}", self.bot_token))
+            .send()
+            .await
+            .map_err(|e| format!("role list failed: {e}"))?;
+        if !resp.status().is_success() {
+            return Err(format!("role list returned {}", resp.status()));
+        }
+        let roles: Vec<RoleResponse> = resp
+            .json()
+            .await
+            .map_err(|e| format!("bad role list response: {e}"))?;
+        // Drop `@everyone` (its id equals the guild id) and managed roles
+        // (bot/integration roles a human can't assign as a gate).
+        Ok(roles
+            .into_iter()
+            .filter(|r| r.id != guild_id && !r.managed)
+            .map(|r| GuildRole {
+                id: r.id,
+                name: r.name,
+            })
+            .collect())
     }
 
     async fn managed_guild_ids(&self, access_token: &str) -> Result<Vec<String>, String> {

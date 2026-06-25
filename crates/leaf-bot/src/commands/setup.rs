@@ -152,7 +152,7 @@ fn summary(watched: &[String], log_channel: Option<&str>) -> String {
     let log_text = log_channel.map_or_else(|| "none".to_owned(), |c| format!("<#{c}>"));
     format!(
         "🍃 **leaf is set up.**\nWatched: {}\nLog channel: {log_text}\n\
-         Anyone can now plant a series with `/series create`.",
+         Anyone can now start a series — open the leaf Activity to create one.",
         mentions.join(" ")
     )
 }

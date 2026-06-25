@@ -286,6 +286,36 @@ pub fn now_unix() -> i64 {
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
 }
 
+/// A guild member as the API needs them: role ids plus when they joined
+/// (for the membership-age policy). From the bot member lookup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuildMember {
+    /// The member's role snowflakes.
+    pub roles: Vec<String>,
+    /// When they joined the guild, unix seconds, if Discord reported it.
+    pub joined_at: Option<i64>,
+}
+
+/// A guild channel the bot can see (id + display name), for the creator
+/// pickers. Only the watched subset is surfaced to creators.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuildChannel {
+    /// Channel snowflake.
+    pub id: String,
+    /// Channel name (without the leading `#`).
+    pub name: String,
+}
+
+/// A guild role the bot can see (id + name), for the role-gated privacy
+/// picker. `@everyone` and managed (integration) roles are filtered out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuildRole {
+    /// Role snowflake.
+    pub id: String,
+    /// Role name.
+    pub name: String,
+}
+
 /// The Discord calls the API needs. Behind a trait so routes test offline.
 pub trait DiscordApi: Send + Sync + 'static {
     /// Exchanges an OAuth `code` for the user's access token.
@@ -301,14 +331,28 @@ pub trait DiscordApi: Send + Sync + 'static {
         access_token: &str,
     ) -> impl Future<Output = Result<String, String>> + Send;
 
-    /// The user's role ids in a guild, or `None` if they are not a member.
-    /// Uses the bot token (the bot is in the guild), so no extra OAuth
-    /// scope is required of the user.
-    fn guild_member_roles(
+    /// The caller's membership in a guild (roles + join time), or `None` if
+    /// they are not a member. Uses the bot token (the bot is in the guild),
+    /// so no extra OAuth scope is required of the user.
+    fn guild_member(
         &self,
         guild_id: &str,
         user_id: &str,
-    ) -> impl Future<Output = Result<Option<Vec<String>>, String>> + Send;
+    ) -> impl Future<Output = Result<Option<GuildMember>, String>> + Send;
+
+    /// The guild's channels (id + name), via the bot token. Used to label the
+    /// creator's watched-channel picker.
+    fn guild_channels(
+        &self,
+        guild_id: &str,
+    ) -> impl Future<Output = Result<Vec<GuildChannel>, String>> + Send;
+
+    /// The guild's assignable roles (id + name), via the bot token. Used by
+    /// the role-gated privacy picker.
+    fn guild_roles(
+        &self,
+        guild_id: &str,
+    ) -> impl Future<Output = Result<Vec<GuildRole>, String>> + Send;
 
     /// Guild ids the access-token's user can manage (owner or Manage-Guild),
     /// via `/users/@me/guilds`. Gates the admin panel; needs the `guilds`

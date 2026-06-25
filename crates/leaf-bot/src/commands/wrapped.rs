@@ -13,7 +13,7 @@ use crate::{Context, Error, checks};
 pub async fn wrapped(
     ctx: Context<'_>,
     #[description = "Series name"]
-    #[autocomplete = "crate::commands::series::autocomplete_any_series"]
+    #[autocomplete = "crate::commands::series_lookup::autocomplete_any_series"]
     series: String,
     #[description = "Year (default: this year)"]
     #[min = 2000]

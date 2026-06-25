@@ -8,7 +8,7 @@ use leaf_core::domain::{NewMediaAttachment, Post};
 use leaf_core::transfer::{self, TransferPost};
 use poise::serenity_prelude as serenity;
 
-use crate::commands::series::autocomplete_any_series;
+use crate::commands::series_lookup::autocomplete_any_series;
 use crate::{Context, Error, checks};
 
 /// Import files larger than this are refused (matches v2's guard).
@@ -112,7 +112,7 @@ pub async fn import(
         ctx.send(
             poise::CreateReply::default()
                 .content(format!(
-                    "No series named **{series}** here — `/series create` it first."
+                    "No series named **{series}** here — create it in the leaf Activity first."
                 ))
                 .ephemeral(true),
         )

@@ -46,23 +46,52 @@ does with an example. First-time channel selection still happens in Discord with
 
 ## For creators
 
-### Create a Series — `/series create`
+Creators use **two surfaces**:
 
-A **Series** is your ongoing archive (PLAN.md § The Series concept). **`/series
-create` is the application** — the guided flow *is* the form, auto-approved
-against the server policy:
+- **Activity gallery** — start a series, change settings, reminders, see your
+  series list.
+- **Discord chat** — archive posts (context menu), optional passive capture, and
+  query/delete/export commands.
 
-1. Name, description, watched channel(s) (a subset of the server's allowed set).
-2. Cadence (daily / weekdays / weekly / freeform), privacy, start day.
-3. Reminder preference and reaction emoji (default 🍃).
+Launch the gallery from the **app launcher** or the **Entry Point command** (see
+[02-discord.md § Entry Point](02-discord.md#5-entry-point-launch-command-recommended)).
 
-Policy checks run on submit; if one blocks you, the bot names exactly which
-(allowed channels, required role, max-per-user, min account/member age). Manage
-your series with `/series edit` and `/series list`. (Admins revoke series from
-the admin web panel.)
+### Start a series — in the gallery
+
+A **Series** is your ongoing archive (PLAN.md § The Series concept). Open the
+leaf Activity and choose **Start a series** when the server allows it.
+
+The wizard collects:
+
+1. **Name** and **description**
+2. **Channel** — one of the server's watched channels
+3. **Cadence** — daily / weekdays / weekly / freeform
+4. **Privacy** — public, role-gated (pick a role), or creator-only
+5. **Start day** (default 1)
+
+Policy checks run on submit. If one blocks you, the app explains why (watched
+channels, required creator role, max series per user, min account or membership
+age). There is no separate approval step.
+
+After creation, post in your channel and archive with the context menu (below).
+If sprout probation is on, the series stays hidden in the public gallery until
+it reaches the configured post count.
+
+### Manage your series — in the gallery
+
+- **Manage my series** — list of series you own (name, emoji, day count, sprout
+  state, channel, cadence). Open any series to edit settings.
+- **Series settings** (from the list or a ⚙ control on your series calendar) —
+  description, reaction emoji, cadence, privacy, channel, passive mode, and
+  reminders.
+- **Reminders** — enable in settings: time of day (24h `HH:MM`), DM or channel
+  ping, optional timezone override. Disabled for **freeform** cadence. The bot
+  delivers reminders on schedule; you do not configure them in chat.
+
+Admins revoke series from the **admin web panel**, not from the gallery.
 
 **Privacy** options: **public** to the server, **role-gated** (a role you pick),
-or **creator-only**. Privacy is enforced everywhere — commands *and* gallery.
+or **creator-only**. Privacy is enforced everywhere — gallery and chat commands.
 
 ### Archive a post — the 🍃 context menu
 
@@ -81,11 +110,12 @@ in the modal — no separate command needed.
 
 ### Passive mode (optional, per series)
 
-For zero-friction capture, enable passive mode on a series (`/series edit`). leaf
-then watches that series' channel(s) for **your** media posts and sends **you**
-an ephemeral "Day 43? [✅] [✏️ Set day] [✗]". Confirm within 10 minutes or it's
-silently dropped. It's in-memory only — a bot restart during the window drops
-the pending post (recover it with the context menu). Off by default.
+For zero-friction capture, turn on **passive mode** in that series' **settings**
+in the gallery. leaf then watches the series channel for **your** media posts
+and sends **you** an ephemeral "Day 43? [✅] [✏️ Set day] [✗]". Confirm within
+10 minutes or it's silently dropped. It's in-memory only — a bot restart during
+the window drops the pending post (recover it with the context menu). Off by
+default.
 
 ### Query & manage from chat
 
@@ -104,16 +134,18 @@ series stay invisible to non-entitled callers in **every** command above.
 
 ## For viewers — the gallery
 
-The gallery is the **only** way to browse a series (the bot captures; the
-embedded app views). Launch it from the **app launcher** or the **Entry Point
-command** (see [02-discord.md § Entry Point](02-discord.md#5-entry-point-launch-command-recommended)) —
+The gallery is how you **browse** a series and, if you create one, **manage** it
+(the bot captures in chat; the embedded app views and configures). Launch it from
+the **app launcher** or the **Entry Point command** (see
+[02-discord.md § Entry Point](02-discord.md#5-entry-point-launch-command-recommended)) —
 prefer these over the voice-channel Activities shelf so no "Game Invitation"
 cards appear.
 
 Inside the gallery:
 
 - **Series picker** (skipped if the server has one series; remembers your last
-  choice).
+  choice). **Start a series** when you're allowed to create one.
+- **Manage my series** — your owned series and settings (creators).
 - **Calendar heatmap** — the whole archive at a glance; missing days visible.
 - **Day viewer** — tap a day for the full image/video, caption, timestamp, day
   number; prev/next, keyboard arrows, swipe, a random-day jump, and **"jump to

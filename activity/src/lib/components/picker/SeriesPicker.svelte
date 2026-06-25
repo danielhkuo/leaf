@@ -1,20 +1,48 @@
 <script lang="ts">
-  import type { Series } from '../../types/api';
+  import type { Eligibility, Series } from '../../types/api';
+  import Button from '../ui/Button.svelte';
+  import ViolationCallout from '../creator/ViolationCallout.svelte';
   import Callout from '../shared/Callout.svelte';
   import SeriesCard from './SeriesCard.svelte';
 
   interface Props {
     series: Series[];
     onSelect: (series: Series) => void;
+    /** Whether the viewer can start a series here; `null` while unknown. */
+    eligibility?: Eligibility | null;
+    /** Whether the viewer owns at least one series shown here. */
+    ownsSeries?: boolean;
+    onCreate?: () => void;
+    onManage?: () => void;
   }
-  let { series, onSelect }: Props = $props();
+  let {
+    series,
+    onSelect,
+    eligibility = null,
+    ownsSeries = false,
+    onCreate,
+    onManage,
+  }: Props = $props();
+
+  const canCreate = $derived(eligibility?.can_create ?? false);
+  const blockers = $derived(eligibility && !eligibility.can_create ? eligibility.violations : []);
 </script>
 
 <div class="picker">
-  <p class="eyebrow">Series</p>
+  <header class="head">
+    <p class="eyebrow">Series</p>
+    {#if ownsSeries && onManage}
+      <button class="link" onclick={onManage}>Manage my series</button>
+    {/if}
+  </header>
+
   {#if series.length === 0}
     <Callout title="No series here yet">
-      Start one with <code>/series create</code> and your archive shows up here.
+      {#if canCreate}
+        Start the first one — it shows up here as you post.
+      {:else}
+        Series created in this server show up here.
+      {/if}
     </Callout>
   {:else}
     <ul class="list">
@@ -22,6 +50,12 @@
         <li><SeriesCard series={s} {onSelect} /></li>
       {/each}
     </ul>
+  {/if}
+
+  {#if canCreate && onCreate}
+    <Button variant="primary" full onclick={onCreate}>Start a series</Button>
+  {:else if blockers.length > 0}
+    <ViolationCallout violations={blockers} />
   {/if}
 </div>
 
@@ -34,6 +68,11 @@
     margin: 0 auto;
     padding: var(--space-lg);
   }
+  .head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+  }
   .eyebrow {
     margin: 0;
     color: var(--ink-subtle);
@@ -42,17 +81,23 @@
     letter-spacing: 0.6px;
     text-transform: uppercase;
   }
+  .link {
+    padding: 0;
+    color: var(--link);
+    font: inherit;
+    font-size: var(--fs-body-sm);
+    background: none;
+    border: 0;
+    cursor: pointer;
+  }
+  .link:hover {
+    text-decoration: underline;
+  }
   .list {
     display: grid;
     gap: var(--space-sm);
     margin: 0;
     padding: 0;
     list-style: none;
-  }
-  code {
-    padding: 1px 6px;
-    font-size: 0.9em;
-    background: var(--surface-2);
-    border-radius: var(--radius-sm);
   }
 </style>

@@ -6,7 +6,7 @@ use leaf_core::domain::{Series, SeriesState};
 use leaf_core::policy::{self, Viewer};
 use poise::serenity_prelude as serenity;
 
-use crate::commands::series::{autocomplete_any_series, owned_series};
+use crate::commands::series_lookup::{autocomplete_any_series, owned_series};
 use crate::{Context, Error, checks};
 
 /// Builds the viewer facts for the invoker.

@@ -79,6 +79,80 @@ describe('LeafApi', () => {
   });
 });
 
+describe('LeafApi creator endpoints', () => {
+  it('parses eligibility with violations', async () => {
+    const fetchImpl = fetchMock(() =>
+      jsonResponse({
+        can_create: false,
+        violations: [{ code: 'max_series', message: 'too many' }],
+      }),
+    );
+    const api = new LeafApi({ token: 't', baseUrl: '/api', fetch: fetchImpl });
+
+    const out = await api.getEligibility('g1');
+
+    expect(out.can_create).toBe(false);
+    expect(out.violations[0]?.code).toBe('max_series');
+    expect(fetchImpl.mock.calls[0]?.[0]).toBe('/api/guilds/g1/series/eligibility');
+  });
+
+  it('posts a create payload and parses the created series', async () => {
+    const fetchImpl = fetchMock(() =>
+      jsonResponse({ id: 9, name: 'New', state: 'active', emoji: '🍃' }, 201),
+    );
+    const api = new LeafApi({ token: 't', baseUrl: '/api', fetch: fetchImpl });
+
+    const out = await api.createSeries('g1', {
+      name: 'New',
+      channel_id: 'c1',
+      cadence: 'daily',
+      privacy: 'public',
+    });
+
+    expect(out.id).toBe(9);
+    const [url, init] = fetchImpl.mock.calls[0]!;
+    expect(url).toBe('/api/guilds/g1/series');
+    expect(init?.method).toBe('POST');
+    expect(JSON.parse(init?.body as string)).toMatchObject({ name: 'New', channel_id: 'c1' });
+  });
+
+  it('surfaces the server error code on a failed create', async () => {
+    const fetchImpl = fetchMock(() => jsonResponse({ error: 'name_taken' }, 409));
+    const api = new LeafApi({ token: 't', fetch: fetchImpl });
+
+    await expect(
+      api.createSeries('g1', { name: 'dup', channel_id: 'c1', cadence: 'daily', privacy: 'public' }),
+    ).rejects.toMatchObject({ status: 409, code: 'name_taken' });
+  });
+
+  it('patches a series and parses the updated settings', async () => {
+    const fetchImpl = fetchMock(() =>
+      jsonResponse({
+        id: 1,
+        name: 'S',
+        description: 'updated',
+        emoji: '🍃',
+        cadence: 'daily',
+        privacy: 'public',
+        privacy_role_id: null,
+        channel_id: 'c1',
+        detection_mode: 'context_menu',
+        state: 'active',
+        reminder_enabled: false,
+        reminder_time: null,
+        reminder_timezone: null,
+        reminder_dm: true,
+      }),
+    );
+    const api = new LeafApi({ token: 't', baseUrl: '/api', fetch: fetchImpl });
+
+    const out = await api.patchSeries('g1', 1, { description: 'updated' });
+
+    expect(out.description).toBe('updated');
+    expect(fetchImpl.mock.calls[0]?.[1]?.method).toBe('PATCH');
+  });
+});
+
 describe('exchangeToken', () => {
   it('posts the code and validates the token response', async () => {
     const fetchImpl = fetchMock(() =>

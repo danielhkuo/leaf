@@ -203,7 +203,7 @@ impl SeriesRepo {
         Ok(n)
     }
 
-    /// Updates the mutable fields of an existing series (`/series edit`).
+    /// Updates the mutable fields of an existing series.
     pub async fn update(&self, s: &Series) -> DbResult<()> {
         let channels = to_json_ids(&s.channels)?;
         let cadence = s.cadence.as_str();
