@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT series_id, day FROM posts WHERE message_id = ?",
+  "query": "SELECT series_id, day FROM posts WHERE message_id = ?\n               ORDER BY series_id, day",
   "describe": {
     "columns": [
       {
@@ -22,5 +22,5 @@
       false
     ]
   },
-  "hash": "3c1523f8bf515b2ca521993cd55ffea7a20e40056b894f65b72a8e0ec6a5808c"
+  "hash": "55adfeacc67022782843de7aaa67257cb7361d7cab2a7c2a982fe7818ec82cd8"
 }

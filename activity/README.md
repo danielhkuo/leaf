@@ -1,9 +1,10 @@
 # leaf activity (embedded app)
 
 The gallery: a Vite + Svelte 5 SPA that runs inside Discord's activity iframe
-and talks to `leaf-server` over the REST API. See
-`docs/svelte-guidelines.md` for code standards and the UI/UX plan for the
-screen design.
+and talks to `leaf-server` over the REST API. The same bundle also holds the
+admin panel (`/admin`, a browser page) and the "leaf is running" page a browser
+gets at `/`. Code standards are in `docs/svelte-guidelines.md` (a local-only
+file; `docs/` is gitignored).
 
 ## Scripts
 
@@ -28,23 +29,28 @@ Discord client.
 
 > **Just want to look at the screens?** You don't need any of the tunnel /
 > Discord setup below. With the dev server running (`npm run dev`), open
-> **<http://localhost:5173/mock.html>** — a gallery of every screen rendered
-> with fixture data and no SDK, network, or auth. Pick a screen in the sidebar;
-> toggle **Phone / Wide** to preview responsive layouts (each screen renders in
-> a real device-width iframe). Dev-only — it never ships in `dist/`. Source:
-> [`src/mock/`](src/mock/).
+> **<http://localhost:5173/mock.html>**: every screen (23 of them), with fixture
+> data and no SDK, network, or auth. Pick a screen in the sidebar. The width
+> buttons (**320 / 375 / 430 / Wide**) render it in an iframe of that width,
+> and **Long text** fills names and captions with worst-case strings. The
+> gallery and creator screens are the real views over a mock API, so taps,
+> navigation and saves work (state lasts until reload); the boot screens and
+> the admin page's header are copies. `mock.html?embed=1&screen=<id>[&long=1]`
+> opens one screen on its own; the ids are in
+> [`src/mock/screens.ts`](src/mock/screens.ts). Dev-only: it never ships in
+> `dist/`. Source: [`src/mock/`](src/mock/).
 
 > Run `cargo` commands from the repo root and `npm` commands from `activity/`.
 
 ### What you need (and where each value goes)
 
-| Value                       | Where to get it                             | Where it goes                                                        |
-| --------------------------- | ------------------------------------------- | -------------------------------------------------------------------- |
-| **Application (Client) ID** | Dev Portal → your app → General Information | `activity/.env` (`VITE_DISCORD_CLIENT_ID`) **and** leaf-server setup |
-| **Client Secret**           | Dev Portal → OAuth2 → Reset Secret          | leaf-server setup only — never the frontend                          |
-| **Bot Token**               | Dev Portal → Bot → Reset Token              | leaf-server setup                                                    |
-| **R2 bucket + keys**        | Cloudflare dashboard → R2                   | leaf-server setup                                                    |
-| **Public URL**              | your tunnel hostname (step 2)               | leaf-server setup (`public_url`)                                     |
+| Value                       | Where to get it                             | Where it goes                                                                    |
+| --------------------------- | ------------------------------------------- | -------------------------------------------------------------------------------- |
+| **Application (Client) ID** | Dev Portal → your app → General Information | leaf-server setup (the gallery reads it from its `<id>.discordsays.com` address) |
+| **Client Secret**           | Dev Portal → OAuth2 → Reset Secret          | leaf-server setup only — never the frontend                                      |
+| **Bot Token**               | Dev Portal → Bot → Reset Token              | leaf-server setup                                                                |
+| **R2 bucket + keys**        | Cloudflare dashboard → R2                   | leaf-server setup                                                                |
+| **Public URL**              | your tunnel hostname (step 2)               | leaf-server setup (`public_url`)                                                 |
 
 ### 1. Create a dev Discord application
 
@@ -53,20 +59,22 @@ e.g. "leaf (dev)"; keep it separate from any production app so URL mappings and
 redirects don't collide). Then, in the left sidebar:
 
 - **General Information** → copy the **Application ID**.
-- **Bot** → **Reset Token** and copy it. Scroll to **Privileged Gateway
-  Intents** and turn on **Message Content Intent**.
+- **Bot** → **Reset Token** and copy it. Leave the **Privileged Gateway
+  Intents** off; the bot connects without them.
 - **OAuth2** → copy the **Client Secret** (Reset Secret if blank). Under
   **Redirects**, **Add** your tunnel URL from step 2, e.g.
-  `https://leaf-dev.example.com`. **Save Changes**.
-- **Activities** → enable it, then under **URL Mappings** add **Prefix** `/`
-  → **Target** = your tunnel host **without** the scheme, e.g.
-  `leaf-dev.example.com`. **Save**.
+  `https://leaf-dev.example.com`, and the same with `/admin/callback` if you
+  want the admin panel. **Save Changes**.
+- **Activities** → enable it; under **Supported Platforms** tick **iOS** and
+  **Android** if you test on a phone (they are off by default); under **URL
+  Mappings** add **Prefix** `/` → **Target** = your tunnel host **without** the
+  scheme, e.g. `leaf-dev.example.com`. **Save**.
 
 Invite the app to a test server: **OAuth2 → URL Generator**, tick **`bot`** and
 **`applications.commands`**, open the generated URL, and add it to a server you
 can test in. (The bot must be a member so leaf-server can check who may view a
-series. The activity's own `identify`/`guilds` scopes are requested at runtime
-by the SDK, not here.)
+series. The gallery's own `identify` scope is requested at runtime by the SDK,
+not here.)
 
 ### 2. Set up the tunnel (stable hostname)
 
@@ -99,11 +107,19 @@ mapping, the OAuth redirect, and `public_url` every run.
 
 ### 3. Configure leaf-server (one-time)
 
-leaf-server stores its secrets in `/data/leaf.conf` via a small web setup flow.
+leaf-server stores its secrets in `leaf.conf` in its data directory, written by
+a small web setup flow. With `cargo run` from the repo root that directory is
+`./data` (`DATA_DIR` changes it); in Docker it is `/data`.
 
 ```sh
+export DEV_GUILD_ID=<your test server id>   # optional: see guide/01-install.md
 cargo run --bin leaf
 ```
+
+`DEV_GUILD_ID` makes the bot register its commands in that one server (it must
+be a member) instead of globally, which keeps a dev bot's commands apart.
+Without it the commands are registered globally, as in production. If you use
+it, keep it exported for every `cargo run` below.
 
 With no config it starts in **setup mode** and prints a `/setup` URL and a
 one-time **setup code** to the terminal. Open `http://localhost:3777/setup`,
@@ -111,16 +127,18 @@ enter the code, then fill in the **Application ID**, **Client Secret**, **Bot
 Token**, **R2** bucket/keys, and **Public URL** = `https://leaf-dev.example.com`.
 Saving validates the values and flips leaf-server into run mode.
 
-Already configured from a previous phase? Update just the public URL with
-`cargo run --bin leaf -- --reconfigure`.
+Already configured? Change the public URL with
+`cargo run --bin leaf -- --reconfigure`. The form starts empty, so every value
+has to be entered again.
 
-### 4. Configure the frontend
+### 4. Install the frontend
 
 ```sh
 cd activity
-cp .env.example .env        # set VITE_DISCORD_CLIENT_ID=<Application ID>
 npm install
 ```
+
+No `.env` is needed. `.env.example` lists the two optional overrides.
 
 ### 5. Run it (three terminals)
 
@@ -135,24 +153,40 @@ unknown hosts since 5.4). Quick-tunnel users can omit it.
 
 ### 6. Launch in Discord
 
-In your test server, join a **voice channel**, open the **Activities** launcher
-(the rocket icon), and pick your app. You should land on the series picker /
-heatmap; tapping a day opens the Phase-17 viewer stub.
+In your test server, in a text channel: on desktop click the **Apps** button in
+the message box and pick your app; on a phone tap **+** next to the message
+box, then **Apps**, then your app. `/gallery` and the **Open gallery** buttons
+on the bot's messages open it too. You land on the series list, or on a series
+(the one a button or `/gallery series:` named, the one that uses this channel,
+the one you opened last, or the only one there is).
 
 ### Troubleshooting
 
-- **"Connecting to Discord…" then an error in a normal browser** — expected; the
-  handshake only works inside the Discord client.
+- **A page saying "leaf is running" in a normal browser** — expected. Without
+  Discord's launch parameters the app shows that page instead of the gallery;
+  the handshake only works inside the Discord client.
+- **The bot is offline or has no commands** — `curl localhost:3777/api/status`
+  says whether the gateway is `online`, `starting` or in `error` (with the
+  reason), and carries a `notice` when the bot is online but Discord refused
+  its command list. The terminal running `cargo run` has the detail. With
+  `DEV_GUILD_ID` set, the bot must be in that server for its commands to
+  register (guide/07-troubleshooting.md, "Bot offline").
 - **"Blocked request. This host is not allowed."** — set `LEAF_DEV_HOST` to your
   tunnel host (see step 5).
 - **Token exchange fails (400)** — the **URL Mapping** target, the **OAuth2
   Redirect**, and leaf-server's **Public URL** must all name the same origin.
-- **Empty / "not a member"** — confirm the bot is in the test server and the
-  series is visible to your account.
-- HMR may not survive the proxy round-trip; a manual reload always works.
+- **"Couldn't load the gallery"** — with "leaf's bot isn't in this server",
+  invite the dev bot to the test server and let it connect once (leaf-server
+  learns of a server when the bot is online in it). With "You don't have access
+  to this", your account isn't a member of that server.
+- **"No series here yet"** although one exists — it isn't visible to your
+  account (private, role-limited, someone else's sprout, or revoked).
+- HMR may not survive the proxy round-trip; close the Activity and open it
+  again (reloading only the iframe hangs the handshake).
 
 ## Build
 
-`vite build` emits `dist/`, which leaf-server serves from `STATIC_DIR`.
-Production deployment (reverse proxy, the production Discord app) is wired in
-Phase 18 and documented then — not here yet.
+`vite build` emits `dist/`, which leaf-server serves from `STATIC_DIR`
+(`activity/dist` when unset). The Docker image does this build itself, with no
+build arguments. Production deployment is covered in
+[../DEPLOY.md](../DEPLOY.md) and [../guide/](../guide/README.md).

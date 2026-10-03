@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT p.day AS \"day!: i64\" FROM posts p\n               WHERE p.series_id = ?\n               ORDER BY EXISTS (\n                            SELECT 1 FROM media_attachments m\n                            WHERE m.series_id = p.series_id AND m.day = p.day\n                              AND m.media_missing = 0\n                        ) DESC,\n                        RANDOM()\n               LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "day!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "870e8cec9558820ead7fcd9030255c0a89c4a6677e434651e5a63efa2c59897e"
+}

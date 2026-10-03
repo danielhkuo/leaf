@@ -42,7 +42,11 @@ async fn main() -> anyhow::Result<()> {
             if existing.is_some() {
                 info!("--reconfigure: entering setup mode over existing config");
             }
-            run_setup_mode(config_path.clone(), bind).await?;
+            if run_setup_mode(config_path.clone(), bind).await? == SetupEnd::Stopped {
+                // An ordinary stop before setup was finished: nothing failed.
+                info!("stopped before setup was completed; nothing was changed");
+                return Ok(());
+            }
             Tier1Config::load(&config_path)?
                 .context("setup completed but config failed to load back")?
         }
@@ -51,8 +55,18 @@ async fn main() -> anyhow::Result<()> {
     run_mode(&data_dir, bind, config).await
 }
 
-/// Serves the setup flow until configuration is written, then returns.
-async fn run_setup_mode(config_path: PathBuf, bind: SocketAddr) -> anyhow::Result<()> {
+/// How setup mode ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SetupEnd {
+    /// The configuration was written: run mode is next.
+    Configured,
+    /// leaf was told to stop first (Ctrl-C, `docker stop`).
+    Stopped,
+}
+
+/// Serves the setup flow until configuration is written or leaf is told to
+/// stop, and says which.
+async fn run_setup_mode(config_path: PathBuf, bind: SocketAddr) -> anyhow::Result<SetupEnd> {
     let validator = leaf_server::validate::LiveValidator::new().context("building HTTP client")?;
     let setup = leaf_server::setup::setup_mode(config_path, validator);
 
@@ -68,6 +82,7 @@ async fn run_setup_mode(config_path: PathBuf, bind: SocketAddr) -> anyhow::Resul
         .with_context(|| format!("binding {bind}"))?;
 
     let mut done = setup.done_rx.clone();
+    let finished = setup.done_rx.clone();
     axum::serve(listener, setup.router)
         .with_graceful_shutdown(async move {
             // Completes when setup succeeds (or the process is told to stop).
@@ -85,12 +100,19 @@ async fn run_setup_mode(config_path: PathBuf, bind: SocketAddr) -> anyhow::Resul
         })
         .await
         .context("setup server failed")?;
-    Ok(())
+    // Read after the server has drained: a submit that was being answered
+    // when the stop arrived still counts.
+    Ok(if *finished.borrow() {
+        SetupEnd::Configured
+    } else {
+        SetupEnd::Stopped
+    })
 }
 
 /// Normal operation: database, HTTP server, and the gateway bot. A gateway
-/// failure (e.g. token revoked after setup) is logged loudly but does not
-/// take the HTTP server down; a server failure ends the process.
+/// failure (e.g. token revoked after setup) is logged loudly, shown on
+/// `GET /api/status` and retried when it may pass, but does not take the
+/// HTTP server down; a server failure ends the process.
 async fn run_mode(
     data_dir: &std::path::Path,
     bind: SocketAddr,
@@ -135,22 +157,18 @@ async fn run_mode(
 
     let bot_cfg = leaf_bot::BotConfig {
         token: config.discord_token.clone(),
-        dev_guild: std::env::var("DEV_GUILD_ID")
-            .ok()
-            .and_then(|v| v.parse().ok()),
+        dev_guild: dev_guild_id(),
+        public_url: Some(config.public_url.clone()),
     };
-    let bot_pool = pool.clone();
-    let bot_shutdown = shutdown_rx.clone();
-    let bot = tokio::spawn(async move {
-        if let Err(e) = leaf_bot::run(bot_cfg, bot_pool, media, bot_shutdown).await {
-            // Loud but non-fatal: the HTTP server (and setup-mode recovery
-            // via --reconfigure) must stay reachable on a dead gateway.
-            tracing::error!(
-                error = format!("{e:#}"),
-                "gateway exited with error; server continues"
-            );
-        }
-    });
+    // The bot connects, and reconnects, on its own task: the HTTP server
+    // (and setup-mode recovery via --reconfigure) must stay reachable on a
+    // dead gateway. Where the connection stands is on `GET /api/status`.
+    let bot = tokio::spawn(leaf_bot::supervise(
+        bot_cfg,
+        pool.clone(),
+        media,
+        shutdown_rx.clone(),
+    ));
 
     let listener = tokio::net::TcpListener::bind(bind)
         .await
@@ -177,6 +195,21 @@ async fn run_mode(
     pool.close().await;
     info!("shut down cleanly");
     Ok(())
+}
+
+/// `DEV_GUILD_ID`, when set to a guild id. A value that is not one is
+/// reported instead of silently registering commands globally.
+fn dev_guild_id() -> Option<u64> {
+    let raw = std::env::var("DEV_GUILD_ID").ok()?;
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let parsed = raw.parse::<u64>().ok().filter(|id| *id != 0);
+    if parsed.is_none() {
+        tracing::warn!("DEV_GUILD_ID is not a server id; registering commands globally");
+    }
+    parsed
 }
 
 /// Resolves on SIGINT (Ctrl-C) or SIGTERM (docker stop).

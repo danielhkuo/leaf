@@ -5,6 +5,10 @@
 //! OAuth cannot protect this page because the bot is, by definition, not
 //! configured yet. After `MAX_ATTEMPTS` wrong codes the flow locks until
 //! the process restarts.
+//!
+//! A submit reports every problem it can find in one answer, each on the
+//! field it concerns: every empty or malformed field, then whatever Discord
+//! and R2 say about the credentials of each section that is complete.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -23,6 +27,24 @@ pub const MAX_ATTEMPTS: u32 = 10;
 
 /// Alphabet for setup codes: unambiguous uppercase + digits (no 0/O/1/I).
 const CODE_ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+
+/// Bot permissions the invite link asks for: View Channels (1 << 10), Send
+/// Messages (1 << 11), Embed Links (1 << 14), Attach Files (1 << 15), Add
+/// Reactions (1 << 6) and Read Message History (1 << 16), as in
+/// guide/02-discord.md § 4.
+const INVITE_PERMISSIONS: u64 =
+    (1 << 10) | (1 << 11) | (1 << 14) | (1 << 15) | (1 << 6) | (1 << 16);
+
+/// Shown when the application ID is not a Discord id. The page's own check
+/// uses the same sentence.
+const CLIENT_ID_NOT_A_NUMBER: &str = "The application ID is a long number, such as \
+    1234567890123456789. Copy it from OAuth2 → Client information.";
+const PUBLIC_URL_INVALID: &str =
+    "This isn't a web address. Enter it like https://leaf.example.com.";
+const PUBLIC_URL_NOT_HTTPS: &str = "Discord needs an HTTPS address (https://…). Plain http:// \
+    only works for localhost.";
+const ENDPOINT_NOT_HTTPS: &str = "Enter the endpoint starting with https://, such as \
+    https://<account-id>.r2.cloudflarestorage.com.";
 
 /// Generates a setup code of the form `XXXX-XXXX`.
 #[must_use]
@@ -48,17 +70,22 @@ fn normalize_code(raw: &str) -> String {
 
 /// Validates credentials against the live services. Implemented for real
 /// by [`crate::validate::LiveValidator`]; tests substitute mocks.
+///
+/// Both methods report problems on the field they concern (see [`Field`]),
+/// as sentences ready for the page, and finish within about 30 seconds.
 pub trait CredentialValidator: Send + Sync + 'static {
-    /// Checks the bot token and the OAuth client id/secret pair.
+    /// Checks the bot token, that it belongs to the application `client_id`,
+    /// and the OAuth client id/secret pair. Returns every problem found;
+    /// empty means all three are good.
     fn validate_discord(
         &self,
         token: &str,
         client_id: &str,
         client_secret: &str,
-    ) -> impl Future<Output = Result<(), String>> + Send;
+    ) -> impl Future<Output = Vec<FieldError>> + Send;
 
     /// Checks the R2 credentials with a canary put/get/delete.
-    fn validate_r2(&self, r2: &R2Config) -> impl Future<Output = Result<(), String>> + Send;
+    fn validate_r2(&self, r2: &R2Config) -> impl Future<Output = Result<(), FieldError>> + Send;
 }
 
 struct Shared {
@@ -125,8 +152,12 @@ pub fn setup_mode<V: CredentialValidator>(config_path: PathBuf, validator: V) ->
     }
 }
 
-async fn page() -> Html<&'static str> {
-    Html(include_str!("setup_page.html"))
+/// The page holds no data: never let a stale copy outlive an upgrade.
+async fn page() -> impl IntoResponse {
+    (
+        [(header::CACHE_CONTROL, "no-store")],
+        Html(include_str!("setup_page.html")),
+    )
 }
 
 /// Self-hosted display + body fonts (OFL, vendored under `src/fonts/`) that the
@@ -175,13 +206,67 @@ pub struct SubmitRequest {
     pub r2_secret_access_key: String,
 }
 
+/// Where the page shows an error. Serialized as the input's `name`, which is
+/// also its error slot's `data-for`; the order is the page's, top to bottom.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Field {
+    /// The one-time code (shown at the code boxes).
+    SetupCode,
+    /// Bot token.
+    DiscordToken,
+    /// Application (client) id.
+    ClientId,
+    /// OAuth client secret.
+    ClientSecret,
+    /// Public URL.
+    PublicUrl,
+    /// R2 S3 endpoint.
+    R2Endpoint,
+    /// R2 bucket.
+    R2Bucket,
+    /// R2 access key id.
+    R2AccessKeyId,
+    /// R2 secret access key.
+    R2SecretAccessKey,
+    /// Not about one field (Discord or R2 unreachable, the config could not
+    /// be written): shown next to the submit button.
+    Form,
+}
+
+impl Field {
+    const fn is_discord(self) -> bool {
+        matches!(
+            self,
+            Self::DiscordToken | Self::ClientId | Self::ClientSecret
+        )
+    }
+
+    const fn is_r2(self) -> bool {
+        matches!(
+            self,
+            Self::R2Endpoint | Self::R2Bucket | Self::R2AccessKeyId | Self::R2SecretAccessKey
+        )
+    }
+}
+
 /// One field-scoped validation error.
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub struct FieldError {
-    /// Form field name.
-    pub field: &'static str,
-    /// Human-readable message.
+    /// Where the page shows it.
+    pub field: Field,
+    /// A plain sentence that says what to change.
     pub message: String,
+}
+
+impl FieldError {
+    /// An error for `field`.
+    pub fn new(field: Field, message: impl Into<String>) -> Self {
+        Self {
+            field,
+            message: message.into(),
+        }
+    }
 }
 
 /// Submit outcome.
@@ -189,41 +274,212 @@ pub struct FieldError {
 pub struct SubmitResponse {
     /// True when config was validated and written.
     pub ok: bool,
-    /// Field errors when `ok` is false.
+    /// Field errors when `ok` is false, in page order.
     pub errors: Vec<FieldError>,
+    /// After a successful submit: what is left to do, with the operator's
+    /// own values filled in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next: Option<NextSteps>,
 }
 
-fn err(field: &'static str, message: impl Into<String>) -> FieldError {
-    FieldError {
-        field,
-        message: message.into(),
+impl SubmitResponse {
+    const fn success(next: Option<NextSteps>) -> Self {
+        Self {
+            ok: true,
+            errors: Vec::new(),
+            next,
+        }
+    }
+
+    const fn failure(errors: Vec<FieldError>) -> Self {
+        Self {
+            ok: false,
+            errors,
+            next: None,
+        }
+    }
+}
+
+/// The success screen's checklist values, derived from the saved config.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct NextSteps {
+    /// Adds the bot to a server with the commands and the permissions leaf
+    /// uses.
+    pub invite_url: String,
+    /// This application in the Developer Portal.
+    pub portal_url: String,
+    /// The OAuth redirects to register: the gallery's token exchange and
+    /// the admin login.
+    pub redirects: Vec<String>,
+    /// Activities → URL Mappings target for prefix `/`: the public host,
+    /// without scheme or slash.
+    pub url_mapping_target: String,
+    /// The admin panel on the public origin, where its login returns.
+    pub admin_url: String,
+    /// The public URL is a localhost address, which Discord cannot reach.
+    pub local_only: bool,
+}
+
+/// The checklist for a validated config. `public_url` is already a bare
+/// origin (see [`public_origin`]).
+fn next_steps(cfg: &Tier1Config) -> NextSteps {
+    let origin = cfg.public_url.as_str();
+    let host = origin.split_once("://").map_or(origin, |(_, host)| host);
+    NextSteps {
+        invite_url: format!(
+            "https://discord.com/oauth2/authorize?client_id={}&permissions={INVITE_PERMISSIONS}\
+             &integration_type=0&scope=bot+applications.commands",
+            cfg.client_id
+        ),
+        portal_url: format!(
+            "https://discord.com/developers/applications/{}",
+            cfg.client_id
+        ),
+        // Must match admin.rs `admin_redirect_uri` and the gallery's default
+        // redirect (the bare public URL).
+        redirects: vec![origin.to_owned(), format!("{origin}/admin/callback")],
+        url_mapping_target: host.to_owned(),
+        admin_url: format!("{origin}/admin"),
+        local_only: is_local_host(host.split(':').next().unwrap_or(host)),
+    }
+}
+
+fn is_local_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1")
+}
+
+/// What an empty field says. The page's own check before sending uses the
+/// same sentences.
+const fn missing_message(field: Field) -> &'static str {
+    match field {
+        Field::SetupCode => "Enter the setup code from the logs.",
+        Field::DiscordToken => "Enter the bot token.",
+        Field::ClientId => "Enter the application ID.",
+        Field::ClientSecret => "Enter the client secret.",
+        Field::PublicUrl => "Enter the public URL, such as https://leaf.example.com.",
+        Field::R2Endpoint => "Enter the S3 endpoint.",
+        Field::R2Bucket => "Enter the bucket name.",
+        Field::R2AccessKeyId => "Enter the access key ID.",
+        Field::R2SecretAccessKey => "Enter the secret access key.",
+        Field::Form => "Fill in every field.",
+    }
+}
+
+/// Checks the public URL and returns it as a bare origin
+/// (`https://leaf.example.com`): the form the OAuth redirects and the URL
+/// mapping are built from. Accepts a subset of what
+/// [`Tier1Config::validate`] accepts, so a passing value always saves.
+fn public_origin(raw: &str) -> Result<String, String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err(missing_message(Field::PublicUrl).to_owned());
+    }
+    if !raw.contains("://") {
+        // Suggest the fix with their own host (and without any path). A
+        // local leaf serves plain HTTP, so localhost gets http://.
+        let host = raw.split(['/', '?', '#']).next().unwrap_or(raw);
+        let name = host.split(':').next().unwrap_or(host).to_ascii_lowercase();
+        let scheme = if is_local_host(&name) {
+            "http"
+        } else {
+            "https"
+        };
+        return Err(format!(
+            "Start the address with {scheme}://, for example {scheme}://{}.",
+            clip(host, 80)
+        ));
+    }
+    let Ok(url) = reqwest::Url::parse(raw) else {
+        return Err(PUBLIC_URL_INVALID.to_owned());
+    };
+    let Some(host) = url.host_str() else {
+        return Err(PUBLIC_URL_INVALID.to_owned());
+    };
+    match url.scheme() {
+        "https" => {}
+        "http" if is_local_host(host) => {}
+        "http" => return Err(PUBLIC_URL_NOT_HTTPS.to_owned()),
+        _ => return Err(PUBLIC_URL_INVALID.to_owned()),
+    }
+    let origin = url.origin().ascii_serialization();
+    let extra = url.path() != "/"
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || !url.username().is_empty()
+        || url.password().is_some();
+    if extra {
+        return Err(format!("Enter only the address, without a path: {origin}"));
+    }
+    Ok(origin)
+}
+
+/// Whether the R2 endpoint is an `https://` URL with a host. Run mode's
+/// store refuses plain HTTP, so anything else could never work.
+fn endpoint_ok(raw: &str) -> bool {
+    reqwest::Url::parse(raw).is_ok_and(|url| url.scheme() == "https" && url.host_str().is_some())
+}
+
+/// Checks the shape of every field at once and builds the config to
+/// validate live: values trimmed, the public URL reduced to its origin.
+fn check_shape(req: &SubmitRequest) -> (Tier1Config, Vec<FieldError>) {
+    let mut errors = Vec::new();
+    let mut take = |field: Field, raw: &str| -> String {
+        let value = raw.trim();
+        if value.is_empty() {
+            errors.push(FieldError::new(field, missing_message(field)));
+        }
+        value.to_owned()
+    };
+    let discord_token = take(Field::DiscordToken, &req.discord_token);
+    let client_id = take(Field::ClientId, &req.client_id);
+    let client_secret = take(Field::ClientSecret, &req.client_secret);
+    let endpoint = take(Field::R2Endpoint, &req.r2_endpoint);
+    let bucket = take(Field::R2Bucket, &req.r2_bucket);
+    let access_key_id = take(Field::R2AccessKeyId, &req.r2_access_key_id);
+    let secret_access_key = take(Field::R2SecretAccessKey, &req.r2_secret_access_key);
+
+    // Discord ids are u64 snowflakes; anything else cannot name an app.
+    let snowflake =
+        client_id.bytes().all(|b| b.is_ascii_digit()) && client_id.parse::<u64>().is_ok();
+    if !client_id.is_empty() && !snowflake {
+        errors.push(FieldError::new(Field::ClientId, CLIENT_ID_NOT_A_NUMBER));
+    }
+    let public_url = public_origin(&req.public_url).unwrap_or_else(|message| {
+        errors.push(FieldError::new(Field::PublicUrl, message));
+        req.public_url.trim().to_owned()
+    });
+    if !endpoint.is_empty() && !endpoint_ok(&endpoint) {
+        errors.push(FieldError::new(Field::R2Endpoint, ENDPOINT_NOT_HTTPS));
+    }
+
+    let cfg = Tier1Config {
+        discord_token,
+        client_id,
+        client_secret,
+        public_url,
+        r2: R2Config {
+            endpoint,
+            bucket,
+            access_key_id,
+            secret_access_key,
+        },
+    };
+    (cfg, errors)
+}
+
+/// At most `max` characters of `s`, with an ellipsis when cut.
+pub(crate) fn clip(s: &str, max: usize) -> String {
+    let mut chars = s.chars();
+    let head: String = chars.by_ref().take(max).collect();
+    if chars.next().is_some() {
+        format!("{head}…")
+    } else {
+        head
     }
 }
 
 fn fail(status: StatusCode, error: FieldError) -> (StatusCode, Json<SubmitResponse>) {
-    (
-        status,
-        Json(SubmitResponse {
-            ok: false,
-            errors: vec![error],
-        }),
-    )
-}
-
-/// Builds the candidate config from the (trimmed) form fields.
-fn config_from(req: &SubmitRequest) -> Tier1Config {
-    Tier1Config {
-        discord_token: req.discord_token.trim().to_owned(),
-        client_id: req.client_id.trim().to_owned(),
-        client_secret: req.client_secret.trim().to_owned(),
-        public_url: req.public_url.trim().trim_end_matches('/').to_owned(),
-        r2: R2Config {
-            endpoint: req.r2_endpoint.trim().to_owned(),
-            bucket: req.r2_bucket.trim().to_owned(),
-            access_key_id: req.r2_access_key_id.trim().to_owned(),
-            secret_access_key: req.r2_secret_access_key.trim().to_owned(),
-        },
-    }
+    (status, Json(SubmitResponse::failure(vec![error])))
 }
 
 /// Checks the setup code against the shared attempt budget. Single source
@@ -233,19 +489,23 @@ fn gate_code(
     attempts: &mut Option<u32>,
     expected: &str,
     raw: &str,
-) -> Result<(), (StatusCode, Json<SubmitResponse>)> {
+) -> Result<(), (StatusCode, FieldError)> {
     let Some(count) = attempts.as_mut() else {
-        return Err(fail(
+        return Err((
             StatusCode::GONE,
-            err("setup_code", "setup already completed"),
+            FieldError::new(
+                Field::SetupCode,
+                "Setup is already complete. Open /admin to manage leaf.",
+            ),
         ));
     };
     if *count >= MAX_ATTEMPTS {
-        return Err(fail(
+        return Err((
             StatusCode::TOO_MANY_REQUESTS,
-            err(
-                "setup_code",
-                "too many attempts; restart leaf to get a new code",
+            FieldError::new(
+                Field::SetupCode,
+                "Too many wrong codes. Restart leaf to get a new one \
+                 (docker compose restart leaf), then enter the code from the logs.",
             ),
         ));
     }
@@ -253,12 +513,19 @@ fn gate_code(
         *count += 1;
         let remaining = MAX_ATTEMPTS - *count;
         tracing::warn!(remaining, "setup: wrong code entered");
-        return Err(fail(
-            StatusCode::UNAUTHORIZED,
-            err(
-                "setup_code",
-                format!("wrong code ({remaining} attempts left)"),
+        let message = match remaining {
+            0 => "That code isn't right, and that was the last try. Restart leaf to get a new \
+                  code (docker compose restart leaf)."
+                .to_owned(),
+            1 => "That code isn't right. Check the logs for the current code (1 try left)."
+                .to_owned(),
+            n => format!(
+                "That code isn't right. Check the logs for the current code ({n} tries left)."
             ),
+        };
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            FieldError::new(Field::SetupCode, message),
         ));
     }
     Ok(())
@@ -279,31 +546,8 @@ async fn verify_code<V: CredentialValidator>(
 ) -> (StatusCode, Json<SubmitResponse>) {
     let mut attempts = app.shared.attempts.lock().await;
     match gate_code(&mut attempts, &app.shared.code, &req.setup_code) {
-        Ok(()) => (
-            StatusCode::OK,
-            Json(SubmitResponse {
-                ok: true,
-                errors: Vec::new(),
-            }),
-        ),
-        Err(resp) => resp,
-    }
-}
-
-/// Maps a shape-validation error to the form field it belongs to.
-fn shape_error_field(e: &leaf_core::config::ConfigError) -> &'static str {
-    match e {
-        leaf_core::config::ConfigError::EmptyField(name) => match *name {
-            "discord_token" => "discord_token",
-            "client_id" => "client_id",
-            "client_secret" => "client_secret",
-            "public_url" => "public_url",
-            "r2.endpoint" => "r2_endpoint",
-            "r2.bucket" => "r2_bucket",
-            "r2.access_key_id" => "r2_access_key_id",
-            _ => "r2_secret_access_key",
-        },
-        _ => "public_url",
+        Ok(()) => (StatusCode::OK, Json(SubmitResponse::success(None))),
+        Err((status, error)) => fail(status, error),
     }
 }
 
@@ -317,36 +561,43 @@ async fn submit<V: CredentialValidator>(
 ) -> (StatusCode, Json<SubmitResponse>) {
     let mut attempts = app.shared.attempts.lock().await;
 
-    if let Err(resp) = gate_code(&mut attempts, &app.shared.code, &req.setup_code) {
-        return resp;
+    if let Err((status, error)) = gate_code(&mut attempts, &app.shared.code, &req.setup_code) {
+        return fail(status, error);
     }
 
-    let cfg = config_from(&req);
+    // Shape first: cheap, and covers every field in one answer.
+    let (cfg, mut errors) = check_shape(&req);
 
-    // Shape validation first: cheap, precise field errors.
-    if let Err(e) = cfg.validate() {
-        return fail(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            err(shape_error_field(&e), e.to_string()),
-        );
-    }
-
-    // Liveness validation: hit Discord and R2 for real.
-    let mut errors = Vec::new();
-    if let Err(msg) = app
-        .validator
-        .validate_discord(&cfg.discord_token, &cfg.client_id, &cfg.client_secret)
-        .await
-    {
-        errors.push(err("discord_token", msg));
-    }
-    if let Err(msg) = app.validator.validate_r2(&cfg.r2).await {
-        errors.push(err("r2_endpoint", msg));
-    }
+    // Then the live checks, side by side, for each section whose fields are
+    // all present and well formed: a gap in the R2 card does not hold back
+    // what Discord has to say, and the reverse.
+    let discord_ready = !errors.iter().any(|e| e.field.is_discord());
+    let r2_ready = !errors.iter().any(|e| e.field.is_r2());
+    let discord = async {
+        if discord_ready {
+            app.validator
+                .validate_discord(&cfg.discord_token, &cfg.client_id, &cfg.client_secret)
+                .await
+        } else {
+            Vec::new()
+        }
+    };
+    let r2 = async {
+        if r2_ready {
+            app.validator.validate_r2(&cfg.r2).await.err()
+        } else {
+            None
+        }
+    };
+    let (discord_errors, r2_error) = tokio::join!(discord, r2);
+    errors.extend(discord_errors);
+    errors.extend(r2_error);
     if !errors.is_empty() {
+        // Page order, so the first error is the first one on screen.
+        errors.sort_by_key(|e| e.field);
         return (
             StatusCode::UNPROCESSABLE_ENTITY,
-            Json(SubmitResponse { ok: false, errors }),
+            Json(SubmitResponse::failure(errors)),
         );
     }
 
@@ -354,7 +605,12 @@ async fn submit<V: CredentialValidator>(
         tracing::error!(error = %e, "setup: failed to persist config");
         return fail(
             StatusCode::INTERNAL_SERVER_ERROR,
-            err("setup_code", format!("could not write config: {e}")),
+            FieldError::new(
+                Field::Form,
+                "Everything checked out, but leaf couldn't save leaf.conf to its data volume. \
+                 Check the volume is mounted and writable, then try again; the logs have the \
+                 details (docker compose logs leaf).",
+            ),
         );
     }
 
@@ -364,10 +620,7 @@ async fn submit<V: CredentialValidator>(
 
     (
         StatusCode::OK,
-        Json(SubmitResponse {
-            ok: true,
-            errors: Vec::new(),
-        }),
+        Json(SubmitResponse::success(Some(next_steps(&cfg)))),
     )
 }
 
@@ -388,42 +641,39 @@ mod tests {
     use super::*;
 
     /// Mock validator with scriptable outcomes and call counting.
+    #[derive(Default)]
     struct Mock {
-        discord_ok: bool,
-        r2_ok: bool,
+        discord_errors: Vec<(Field, &'static str)>,
+        r2_error: Option<(Field, &'static str)>,
         discord_calls: AtomicU32,
+        r2_calls: AtomicU32,
     }
 
     impl Mock {
-        const fn ok() -> Self {
-            Self {
-                discord_ok: true,
-                r2_ok: true,
-                discord_calls: AtomicU32::new(0),
-            }
+        fn ok() -> Self {
+            Self::default()
         }
     }
 
     impl CredentialValidator for Arc<Mock> {
-        async fn validate_discord(&self, _: &str, _: &str, _: &str) -> Result<(), String> {
+        async fn validate_discord(&self, _: &str, _: &str, _: &str) -> Vec<FieldError> {
             self.discord_calls.fetch_add(1, Ordering::SeqCst);
-            if self.discord_ok {
-                Ok(())
-            } else {
-                Err("bad token".to_owned())
-            }
+            self.discord_errors
+                .iter()
+                .map(|&(field, message)| FieldError::new(field, message))
+                .collect()
         }
 
-        async fn validate_r2(&self, _: &R2Config) -> Result<(), String> {
-            if self.r2_ok {
-                Ok(())
-            } else {
-                Err("bucket unreachable".to_owned())
+        async fn validate_r2(&self, _: &R2Config) -> Result<(), FieldError> {
+            self.r2_calls.fetch_add(1, Ordering::SeqCst);
+            match self.r2_error {
+                Some((field, message)) => Err(FieldError::new(field, message)),
+                None => Ok(()),
             }
         }
     }
 
-    fn body_json(code: &str) -> String {
+    fn body_value(code: &str) -> serde_json::Value {
         serde_json::json!({
             "setup_code": code,
             "discord_token": "tok",
@@ -435,7 +685,10 @@ mod tests {
             "r2_access_key_id": "ak",
             "r2_secret_access_key": "sk",
         })
-        .to_string()
+    }
+
+    fn body_json(code: &str) -> String {
+        body_value(code).to_string()
     }
 
     async fn post_json(
@@ -480,6 +733,15 @@ mod tests {
         (dir, mode, path)
     }
 
+    fn fields(json: &serde_json::Value) -> Vec<String> {
+        json["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["field"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
     #[tokio::test]
     async fn verify_code_gates_the_form() {
         let (_dir, mode, path) = fixture(Arc::new(Mock::ok()));
@@ -488,6 +750,7 @@ mod tests {
         let (status, json) = post_verify(&mode.router, &mode.code).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["ok"], true);
+        assert!(json.get("next").is_none());
         let (status, _) = post_submit(&mode.router, body_json(&mode.code)).await;
         assert_eq!(status, StatusCode::OK);
         assert!(path.exists());
@@ -544,6 +807,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn success_lists_the_operators_own_next_steps() {
+        let (_dir, mode, path) = fixture(Arc::new(Mock::ok()));
+        let mut body = body_value(&mode.code);
+        body["client_id"] = " 1234567890123456789 ".into();
+        body["public_url"] = "HTTPS://Leaf.Example.com/".into();
+        let (status, json) = post_submit(&mode.router, body.to_string()).await;
+        assert_eq!(status, StatusCode::OK);
+        let next = &json["next"];
+        assert_eq!(
+            next["invite_url"],
+            "https://discord.com/oauth2/authorize?client_id=1234567890123456789\
+             &permissions=117824&integration_type=0&scope=bot+applications.commands"
+        );
+        assert_eq!(
+            next["portal_url"],
+            "https://discord.com/developers/applications/1234567890123456789"
+        );
+        assert_eq!(
+            next["redirects"],
+            serde_json::json!([
+                "https://leaf.example.com",
+                "https://leaf.example.com/admin/callback"
+            ])
+        );
+        assert_eq!(next["url_mapping_target"], "leaf.example.com");
+        assert_eq!(next["admin_url"], "https://leaf.example.com/admin");
+        assert_eq!(next["local_only"], false);
+
+        // The saved config holds the normalized values the checklist shows.
+        let saved = Tier1Config::load(&path).unwrap().unwrap();
+        assert_eq!(saved.public_url, "https://leaf.example.com");
+        assert_eq!(saved.client_id, "1234567890123456789");
+    }
+
+    #[test]
+    fn local_public_url_is_flagged_for_the_checklist() {
+        let mut cfg = config_with_url("http://localhost:3777");
+        let next = next_steps(&cfg);
+        assert!(next.local_only);
+        assert_eq!(next.url_mapping_target, "localhost:3777");
+        assert_eq!(next.admin_url, "http://localhost:3777/admin");
+
+        cfg.public_url = "https://leaf.example.com:8443".to_owned();
+        let next = next_steps(&cfg);
+        assert!(!next.local_only);
+        assert_eq!(next.url_mapping_target, "leaf.example.com:8443");
+    }
+
+    fn config_with_url(public_url: &str) -> Tier1Config {
+        Tier1Config {
+            discord_token: "tok".to_owned(),
+            client_id: "123".to_owned(),
+            client_secret: "sec".to_owned(),
+            public_url: public_url.to_owned(),
+            r2: R2Config {
+                endpoint: "https://acc.r2.cloudflarestorage.com".to_owned(),
+                bucket: "leaf".to_owned(),
+                access_key_id: "ak".to_owned(),
+                secret_access_key: "sk".to_owned(),
+            },
+        }
+    }
+
+    #[test]
+    fn invite_asks_for_the_documented_permissions() {
+        // View Channels, Send Messages, Embed Links, Attach Files, Add
+        // Reactions, Read Message History.
+        assert_eq!(INVITE_PERMISSIONS, 1024 + 2048 + 16384 + 32768 + 64 + 65536);
+        assert_eq!(INVITE_PERMISSIONS, 117_824);
+    }
+
+    #[tokio::test]
     async fn wrong_code_rejected_then_locked_after_max_attempts() {
         let mock = Arc::new(Mock::ok());
         let (_dir, mode, path) = fixture(Arc::clone(&mock));
@@ -555,6 +890,7 @@ mod tests {
         // Locked now — even the *correct* code is refused.
         let (status, json) = post_submit(&mode.router, body_json(&mode.code)).await;
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(json["errors"][0]["field"], "setup_code");
         assert!(
             json["errors"][0]["message"]
                 .as_str()
@@ -567,30 +903,189 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn validator_failures_become_field_errors_and_nothing_is_written() {
+    async fn validator_failures_keep_their_fields_and_nothing_is_written() {
         let mock = Arc::new(Mock {
-            discord_ok: false,
-            r2_ok: false,
-            discord_calls: AtomicU32::new(0),
+            discord_errors: vec![
+                (Field::ClientSecret, "secret rejected"),
+                (Field::DiscordToken, "bad token"),
+            ],
+            r2_error: Some((Field::R2Bucket, "no such bucket")),
+            ..Mock::default()
         });
         let (_dir, mode, path) = fixture(mock);
         let (status, json) = post_submit(&mode.router, body_json(&mode.code)).await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-        assert_eq!(json["errors"].as_array().unwrap().len(), 2);
+        // In page order, whatever order the validators reported them in.
+        assert_eq!(
+            fields(&json),
+            ["discord_token", "client_secret", "r2_bucket"]
+        );
+        assert_eq!(json["errors"][2]["message"], "no such bucket");
+        assert!(json.get("next").is_none());
         assert!(!path.exists());
         assert!(!*mode.done_rx.borrow());
     }
 
     #[tokio::test]
-    async fn shape_errors_short_circuit_before_live_validation() {
+    async fn every_empty_field_is_reported_at_once_without_live_checks() {
         let mock = Arc::new(Mock::ok());
-        let (_dir, mode, _path) = fixture(Arc::clone(&mock));
-        let mut body: serde_json::Value = serde_json::from_str(&body_json(&mode.code)).unwrap();
-        body["discord_token"] = serde_json::Value::String(String::new());
+        let (_dir, mode, path) = fixture(Arc::clone(&mock));
+        let mut body = body_value(&mode.code);
+        for name in [
+            "discord_token",
+            "client_id",
+            "client_secret",
+            "public_url",
+            "r2_endpoint",
+            "r2_bucket",
+            "r2_access_key_id",
+            "r2_secret_access_key",
+        ] {
+            body[name] = "  ".into();
+        }
         let (status, json) = post_submit(&mode.router, body.to_string()).await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-        assert_eq!(json["errors"][0]["field"], "discord_token");
+        assert_eq!(
+            fields(&json),
+            [
+                "discord_token",
+                "client_id",
+                "client_secret",
+                "public_url",
+                "r2_endpoint",
+                "r2_bucket",
+                "r2_access_key_id",
+                "r2_secret_access_key",
+            ]
+        );
+        assert_eq!(json["errors"][0]["message"], "Enter the bot token.");
         assert_eq!(mock.discord_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(mock.r2_calls.load(Ordering::SeqCst), 0);
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn a_complete_section_is_checked_while_the_other_has_gaps() {
+        let mock = Arc::new(Mock {
+            discord_errors: vec![(Field::DiscordToken, "bad token")],
+            ..Mock::default()
+        });
+        let (_dir, mode, _path) = fixture(Arc::clone(&mock));
+        let mut body = body_value(&mode.code);
+        body["r2_bucket"] = "".into();
+        let (status, json) = post_submit(&mode.router, body.to_string()).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(fields(&json), ["discord_token", "r2_bucket"]);
+        assert_eq!(mock.discord_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(mock.r2_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn malformed_values_are_named_before_any_live_check() {
+        let mock = Arc::new(Mock::ok());
+        let (_dir, mode, _path) = fixture(Arc::clone(&mock));
+        let mut body = body_value(&mode.code);
+        body["client_id"] = "my-app".into();
+        body["r2_endpoint"] = "http://acc.r2.cloudflarestorage.com".into();
+        body["public_url"] = "https://leaf.example.com/setup".into();
+        let (status, json) = post_submit(&mode.router, body.to_string()).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(fields(&json), ["client_id", "public_url", "r2_endpoint"]);
+        assert_eq!(json["errors"][0]["message"], CLIENT_ID_NOT_A_NUMBER);
+        assert_eq!(
+            json["errors"][1]["message"],
+            "Enter only the address, without a path: https://leaf.example.com"
+        );
+        assert_eq!(mock.discord_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(mock.r2_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn a_bad_public_url_alone_still_gets_the_credentials_checked() {
+        let mock = Arc::new(Mock::ok());
+        let (_dir, mode, path) = fixture(Arc::clone(&mock));
+        let mut body = body_value(&mode.code);
+        body["public_url"] = "http://leaf.example.com".into();
+        let (status, json) = post_submit(&mode.router, body.to_string()).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(fields(&json), ["public_url"]);
+        assert_eq!(mock.discord_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(mock.r2_calls.load(Ordering::SeqCst), 1);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn public_urls_are_reduced_to_an_origin_that_saves() {
+        let ok = [
+            ("https://leaf.example.com", "https://leaf.example.com"),
+            (" https://leaf.example.com/ ", "https://leaf.example.com"),
+            ("HTTPS://Leaf.Example.COM:443/", "https://leaf.example.com"),
+            (
+                "https://leaf.example.com:8443",
+                "https://leaf.example.com:8443",
+            ),
+            ("http://localhost:3777", "http://localhost:3777"),
+            ("http://127.0.0.1:3777/", "http://127.0.0.1:3777"),
+        ];
+        for (raw, origin) in ok {
+            assert_eq!(public_origin(raw).as_deref(), Ok(origin), "{raw}");
+            // Whatever passes here must also pass the config's own check.
+            assert!(config_with_url(origin).validate().is_ok(), "{origin}");
+        }
+
+        let refused = [
+            ("", "Enter the public URL"),
+            ("leaf.example.com", "https://leaf.example.com."),
+            (
+                "leaf.example.com/setup",
+                "for example https://leaf.example.com.",
+            ),
+            // A local leaf serves plain HTTP.
+            ("localhost:3777", "for example http://localhost:3777."),
+            ("127.0.0.1:3777/admin", "for example http://127.0.0.1:3777."),
+            ("http://leaf.example.com", "HTTPS"),
+            ("ftp://leaf.example.com", "isn't a web address"),
+            ("https://", "isn't a web address"),
+            ("https://leaf.example.com/setup", "without a path"),
+            ("https://leaf.example.com/?x=1", "without a path"),
+            ("https://user:pw@leaf.example.com", "without a path"),
+        ];
+        for (raw, says) in refused {
+            let message = public_origin(raw).unwrap_err();
+            assert!(message.contains(says), "{raw}: {message}");
+        }
+    }
+
+    #[test]
+    fn clip_cuts_on_characters() {
+        assert_eq!(clip("leaf", 10), "leaf");
+        assert_eq!(clip("🍃🍃🍃", 2), "🍃🍃…");
+    }
+
+    #[test]
+    fn field_names_match_the_page() {
+        let page = include_str!("setup_page.html");
+        for field in [
+            Field::DiscordToken,
+            Field::ClientId,
+            Field::ClientSecret,
+            Field::PublicUrl,
+            Field::R2Endpoint,
+            Field::R2Bucket,
+            Field::R2AccessKeyId,
+            Field::R2SecretAccessKey,
+            Field::Form,
+        ] {
+            let name = serde_json::to_value(field).unwrap();
+            let name = name.as_str().unwrap();
+            assert!(page.contains(&format!("data-for=\"{name}\"")), "{name}");
+            if field != Field::Form {
+                assert!(page.contains(&format!("name=\"{name}\"")), "{name}");
+                // The page's own empty-field check says the same thing.
+                assert!(page.contains(missing_message(field)), "{name}");
+            }
+        }
+        assert!(page.contains(CLIENT_ID_NOT_A_NUMBER));
     }
 
     #[tokio::test]
@@ -620,5 +1115,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-store"
+        );
     }
 }

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO posts\n                       (series_id, day, message_id, channel_id, caption, posted_at, archived_at)\n                   VALUES (?, ?, ?, ?, ?, ?, ?)\n                   ON CONFLICT (series_id, day) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "ff0637f25640e9fed9182f43a9d96e319746146468d2bc35d3fbb74adc720b02"
+}

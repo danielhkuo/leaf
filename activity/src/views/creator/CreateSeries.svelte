@@ -1,81 +1,153 @@
 <script lang="ts">
-  // The "start a series" view: load options + eligibility once, then either
-  // block with the server's reasons or run the wizard. A successful create
-  // refreshes the gallery and lands on the new series' home.
+  // The "start a series" view: load eligibility and options, then either say
+  // what is in the way or show the form. A successful create puts the new
+  // series into the gallery, remembers it as the one to open next time, and
+  // lands on its home, which explains how to archive the first post.
+  import { onMount } from 'svelte';
+
   import CreateWizard from '../../lib/components/creator/CreateWizard.svelte';
   import ViolationCallout from '../../lib/components/creator/ViolationCallout.svelte';
-  import Callout from '../../lib/components/shared/Callout.svelte';
+  import ErrorState from '../../lib/components/shared/ErrorState.svelte';
   import Skeleton from '../../lib/components/shared/Skeleton.svelte';
   import IconButton from '../../lib/components/ui/IconButton.svelte';
-  import { ApiError } from '../../lib/api/client';
-  import { getApi, getGuildId, refreshSeries } from '../../lib/stores/gallery.svelte';
-  import { nav } from '../../lib/stores/nav.svelte';
-  import type { CreateSeriesInput, Eligibility, SeriesOptions } from '../../lib/types/api';
-  import { seriesErrorMessage } from '../../lib/utils/labels';
+  import { resetDraft } from '../../lib/stores/createDraft.svelte';
+  import {
+    adoptSeries,
+    getApi,
+    getGuildId,
+    refreshEligibility,
+    rememberSeries,
+  } from '../../lib/stores/gallery.svelte';
+  import { focusHeading, nav } from '../../lib/stores/nav.svelte';
+  import { session } from '../../lib/stores/session.svelte';
+  import type { CreateSeriesInput, SeriesOptions, Violation } from '../../lib/types/api';
+  import { ApiError, describeError, isRetryable } from '../../lib/utils/errors';
 
-  let eligibility = $state<Eligibility | null>(null);
-  let options = $state<SeriesOptions | null>(null);
-  let loadFailed = $state(false);
+  type Load =
+    | { status: 'loading' }
+    | { status: 'failed'; error: unknown }
+    | { status: 'blocked'; violations: Violation[] }
+    | { status: 'ready'; options: SeriesOptions };
+
+  let load = $state<Load>({ status: 'loading' });
+  let attempt = $state(0);
   let submitting = $state(false);
-  let submitError = $state<string | null>(null);
+  let failure = $state<{ code: string | null; message: string } | null>(null);
+
+  /** The channel leaf was opened in: the form preselects it when it can. */
+  const launchChannelId = $derived(
+    session.value.status === 'authed' ? session.value.session.channelId : null,
+  );
+
+  type Settled<T> = { ok: true; value: T } | { ok: false; error: unknown };
+
+  function settle<T>(request: Promise<T>): Promise<Settled<T>> {
+    return request.then(
+      (value) => ({ ok: true, value }),
+      (error: unknown) => ({ ok: false, error }),
+    );
+  }
+
+  function codeOf(e: unknown): string | null {
+    return e instanceof ApiError ? (e.code ?? null) : null;
+  }
 
   $effect(() => {
+    void attempt;
     const api = getApi();
     const gid = getGuildId();
     let cancelled = false;
-    Promise.all([api.getEligibility(gid), api.getOptions(gid)])
-      .then(([e, o]) => {
+    load = { status: 'loading' };
+    void Promise.all([settle(api.getEligibility(gid)), settle(api.getOptions(gid))]).then(
+      ([eligibility, options]) => {
         if (cancelled) return;
-        eligibility = e;
-        options = o;
-      })
-      .catch(() => {
-        if (!cancelled) loadFailed = true;
-      });
+        if (eligibility.ok && !eligibility.value.can_create) {
+          load = { status: 'blocked', violations: eligibility.value.violations };
+        } else if (options.ok) {
+          // A failed eligibility check alone does not block the form: the
+          // server checks again when the series is submitted.
+          load = { status: 'ready', options: options.value };
+        } else if (codeOf(options.error) === 'guild_not_setup') {
+          load = { status: 'blocked', violations: [{ code: 'guild_not_setup', message: '' }] };
+        } else {
+          console.error('leaf: loading the create form failed', options.error);
+          load = { status: 'failed', error: options.error };
+        }
+      },
+    );
     return () => {
       cancelled = true;
     };
   });
 
+  /** Fetches the options again in place (the role list did not load), keeping the form. */
+  async function reloadOptions(): Promise<void> {
+    const fresh = await settle(getApi().getOptions(getGuildId()));
+    if (fresh.ok && load.status === 'ready') load = { status: 'ready', options: fresh.value };
+  }
+
   async function submit(input: CreateSeriesInput): Promise<void> {
     submitting = true;
-    submitError = null;
+    failure = null;
     try {
+      // A current server answers a repeat of the same create (after a lost
+      // response) with the series it already made, so trying again is safe.
       const created = await getApi().createSeries(getGuildId(), input);
-      await refreshSeries();
+      await adoptSeries(created);
+      rememberSeries(created.id);
+      // The series may have been the last one this member is allowed.
+      void refreshEligibility();
+      resetDraft();
       nav.reset({ name: 'picker' });
-      nav.push({ name: 'home', seriesId: created.id });
+      nav.push({ name: 'home', seriesId: created.id, created: true });
     } catch (e) {
-      submitError =
-        e instanceof ApiError
-          ? seriesErrorMessage(e.code, 'Couldn’t create the series. Try again.')
-          : 'Couldn’t create the series. Try again.';
+      console.error('leaf: creating the series failed', e);
+      failure = { code: codeOf(e), message: describeError(e) };
     } finally {
       submitting = false;
     }
   }
+
+  let root = $state<HTMLElement>();
+  onMount(() => focusHeading(root));
 </script>
 
-<div class="view">
+<div class="view" bind:this={root}>
   <header class="bar">
-    <IconButton ariaLabel="Back" variant="solid" onclick={() => nav.back()}>←</IconButton>
-    <h1>Start a series</h1>
+    <IconButton ariaLabel="Back" variant="solid" icon="back" onclick={() => nav.back()} />
+    <h1 tabindex="-1">Start a series</h1>
   </header>
 
-  {#if loadFailed}
-    <Callout title="Couldn’t load this">Try reopening the gallery.</Callout>
-  {:else if !eligibility || !options}
-    <Skeleton height="320px" radius="var(--radius-xl)" />
-  {:else if !eligibility.can_create}
-    <ViolationCallout violations={eligibility.violations} />
+  {#if load.status === 'loading'}
+    <Skeleton height="320px" radius="var(--radius-xl)" label="Loading the form" />
+  {:else if load.status === 'failed'}
+    {@const error = load.error}
+    <ErrorState
+      title="Couldn’t load this screen"
+      message={describeError(error)}
+      onRetry={isRetryable(error) ? () => (attempt += 1) : undefined}
+    />
+  {:else if load.status === 'blocked'}
+    <ViolationCallout violations={load.violations} />
   {:else}
-    <CreateWizard {options} {submitting} error={submitError} onSubmit={submit} />
+    <CreateWizard
+      options={load.options}
+      {submitting}
+      error={failure?.message ?? null}
+      errorCode={failure?.code}
+      channelId={launchChannelId}
+      onSubmit={(input) => void submit(input)}
+      onReloadOptions={() => void reloadOptions()}
+    />
   {/if}
 </div>
 
 <style>
   .view {
+    /* The form's sticky action bar reaches the screen edges through this. */
+    --form-bleed: var(--space-md);
     display: grid;
+    grid-template-columns: minmax(0, 1fr);
     gap: var(--space-md);
     width: 100%;
     max-width: 40rem;
@@ -93,5 +165,9 @@
     font-size: var(--fs-card-title);
     font-weight: var(--fw-display);
     letter-spacing: var(--tracking-display);
+  }
+  /* Focused by script when the screen appears; a ring there means nothing. */
+  h1:focus {
+    outline: none;
   }
 </style>

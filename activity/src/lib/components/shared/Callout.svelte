@@ -1,16 +1,23 @@
 <script lang="ts">
+  // A bordered note: empty states, policy explanations, banners, failures.
+  // `tone` colours the edge; only `error` is announced (role="alert"), so an
+  // empty state never interrupts a screen reader. `action` holds the buttons
+  // that resolve it (Try again, Back).
   import type { Snippet } from 'svelte';
 
   interface Props {
-    title?: string;
-    children: Snippet;
+    title?: string | undefined;
+    tone?: 'neutral' | 'warning' | 'error';
+    action?: Snippet | undefined;
+    children?: Snippet | undefined;
   }
-  let { title, children }: Props = $props();
+  let { title, tone = 'neutral', action, children }: Props = $props();
 </script>
 
-<div class="callout">
+<div class="callout {tone}" role={tone === 'error' ? 'alert' : undefined}>
   {#if title}<p class="title">{title}</p>{/if}
-  <div class="body">{@render children()}</div>
+  {#if children}<div class="body">{@render children()}</div>{/if}
+  {#if action}<div class="actions">{@render action()}</div>{/if}
 </div>
 
 <style>
@@ -23,12 +30,27 @@
     border-radius: var(--radius-xl);
     color: var(--ink-muted);
   }
+  .warning {
+    border-left-color: var(--warning-fill);
+  }
+  .error {
+    border-left-color: var(--error-fill);
+  }
   .title {
-    margin: 0 0 var(--space-xs);
+    margin: 0;
     color: var(--ink);
     font-weight: var(--fw-emphasis);
   }
   .body {
     font-size: var(--fs-body-sm);
+  }
+  .title + .body {
+    margin-top: var(--space-xs);
+  }
+  .actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-xs);
+    margin-top: var(--space-md);
   }
 </style>

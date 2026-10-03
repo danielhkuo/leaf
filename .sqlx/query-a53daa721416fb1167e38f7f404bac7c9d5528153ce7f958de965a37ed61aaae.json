@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE media_attachments SET day = ? WHERE series_id = ? AND day = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "a53daa721416fb1167e38f7f404bac7c9d5528153ce7f958de965a37ed61aaae"
+}

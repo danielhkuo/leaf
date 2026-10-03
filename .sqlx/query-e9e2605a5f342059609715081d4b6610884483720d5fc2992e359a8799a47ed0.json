@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT p.day AS \"day!: i64\", p.message_id AS \"message_id!: String\",\n                      p.channel_id AS \"channel_id!: String\", p.caption AS \"caption!: String\",\n                      p.posted_at AS \"posted_at!: i64\",\n                      m.original_key AS \"original_key?: String\"\n               FROM posts p\n               LEFT JOIN media_attachments m ON m.series_id = p.series_id AND m.day = p.day\n               WHERE p.series_id = ? ORDER BY p.day, m.id",
+  "describe": {
+    "columns": [
+      {
+        "name": "day!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "message_id!: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "channel_id!: String",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "caption!: String",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "posted_at!: i64",
+        "ordinal": 4,
+        "type_info": "Integer"
+      },
+      {
+        "name": "original_key?: String",
+        "ordinal": 5,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "e9e2605a5f342059609715081d4b6610884483720d5fc2992e359a8799a47ed0"
+}

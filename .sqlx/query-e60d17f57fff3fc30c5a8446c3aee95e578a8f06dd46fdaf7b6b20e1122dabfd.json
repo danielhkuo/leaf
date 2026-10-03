@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE guild_settings SET creator_role_id = ? WHERE guild_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "e60d17f57fff3fc30c5a8446c3aee95e578a8f06dd46fdaf7b6b20e1122dabfd"
+}

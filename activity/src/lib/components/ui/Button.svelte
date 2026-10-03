@@ -1,10 +1,13 @@
 <script lang="ts">
-  // Unified pill button (DESIGN.md §4). `primary` is the inverse (white on
-  // black ground) call-to-action; `secondary` is outlined; `ghost` is bare.
+  // Unified pill button. `primary` is the single blue call-to-action;
+  // `secondary` is outlined; `ghost` is bare; `danger` is the outlined
+  // destructive action (revoke, delete). `size="sm"` is the compact 44px form
+  // for tight rows such as the viewer's actions.
   import type { Snippet } from 'svelte';
 
   interface Props {
-    variant?: 'primary' | 'secondary' | 'ghost';
+    variant?: 'primary' | 'secondary' | 'ghost' | 'danger';
+    size?: 'md' | 'sm';
     type?: 'button' | 'submit';
     disabled?: boolean;
     full?: boolean;
@@ -14,6 +17,7 @@
   }
   let {
     variant = 'secondary',
+    size = 'md',
     type = 'button',
     disabled = false,
     full = false,
@@ -23,7 +27,15 @@
   }: Props = $props();
 </script>
 
-<button class="btn {variant}" class:full {type} {disabled} {onclick} aria-label={ariaLabel}>
+<button
+  class="btn {variant}"
+  class:sm={size === 'sm'}
+  class:full
+  {type}
+  {disabled}
+  {onclick}
+  aria-label={ariaLabel}
+>
   {@render children()}
 </button>
 
@@ -44,15 +56,10 @@
     border: 1px solid transparent;
     border-radius: var(--radius-pill);
     cursor: pointer;
-    user-select: none;
     transition:
       transform var(--motion-fast) var(--ease),
       opacity var(--motion-base) var(--ease),
       background var(--motion-fast) var(--ease);
-  }
-  .btn:focus-visible {
-    outline: 2px solid var(--accent);
-    outline-offset: 2px;
   }
   .btn:active {
     transform: scale(0.98);
@@ -64,6 +71,11 @@
   .btn.full {
     width: 100%;
   }
+  .btn.sm {
+    min-height: var(--touch-target);
+    padding: 0 var(--space-md);
+    font-size: var(--fs-body-sm);
+  }
 
   .primary {
     color: var(--inverse-ink);
@@ -71,22 +83,32 @@
     border-color: var(--inverse-canvas);
     box-shadow: var(--shadow-soft);
   }
-  .primary:hover {
-    filter: brightness(1.04);
-  }
-
   .secondary {
     border-color: var(--border-strong);
   }
-  .secondary:hover {
-    background: var(--surface-3);
-  }
-
   .ghost {
     color: var(--ink-muted);
   }
-  .ghost:hover {
-    color: var(--ink);
-    background: var(--surface-2);
+  .danger {
+    color: var(--error);
+    border-color: var(--error);
+  }
+
+  /* Touch feedback comes from :active. Hover is for real pointers only;
+   * on a phone it would stick to the last tapped button. */
+  @media (hover: hover) {
+    .primary:hover:not(:disabled) {
+      filter: brightness(1.04);
+    }
+    .secondary:hover:not(:disabled) {
+      background: var(--surface-3);
+    }
+    .ghost:hover:not(:disabled) {
+      color: var(--ink);
+      background: var(--surface-2);
+    }
+    .danger:hover:not(:disabled) {
+      background: color-mix(in srgb, var(--error-fill) 6%, transparent);
+    }
   }
 </style>

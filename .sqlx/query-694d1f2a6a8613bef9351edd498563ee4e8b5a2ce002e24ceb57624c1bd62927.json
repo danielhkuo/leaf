@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM launch_intents WHERE expires_at <= ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "694d1f2a6a8613bef9351edd498563ee4e8b5a2ce002e24ceb57624c1bd62927"
+}

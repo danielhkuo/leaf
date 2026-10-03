@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO launch_intents (user_id, guild_id, series_id, day, expires_at)\n               VALUES (?, ?, ?, ?, ?)\n               ON CONFLICT (user_id, guild_id) DO UPDATE SET\n                    series_id = excluded.series_id,\n                    day = excluded.day,\n                    expires_at = excluded.expires_at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "a34229d1d89acab0858f85bf511a23f85bb5f23b0c52180f5e796dec88fa79c2"
+}

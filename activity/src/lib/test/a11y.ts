@@ -4,7 +4,9 @@ import { expect } from 'vitest';
 /**
  * Runs axe-core against a rendered container and asserts no violations.
  * `color-contrast` is disabled because it needs layout, which jsdom does not
- * compute — contrast is verified in the manual device pass instead.
+ * compute. Contrast is guarded at the token level instead: see
+ * `utils/contrast.test.ts`, which checks every text and control colour in
+ * app.css against the surfaces it is used on.
  */
 export async function expectNoA11yViolations(container: Element): Promise<void> {
   const results = await axe.run(container, {

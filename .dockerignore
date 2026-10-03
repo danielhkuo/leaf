@@ -12,3 +12,9 @@ docs/
 PLAN.md
 .env
 leaf.conf
+# Copies of real data (see .gitignore): never into a build layer or its cache.
+*.tgz
+*.tar.gz
+walpurgis-export-*.json
+leaf-export-*.json
+**/.DS_Store

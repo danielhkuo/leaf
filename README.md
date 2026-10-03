@@ -15,15 +15,17 @@ docker compose up -d
 docker compose logs -f leaf       # the first run prints a one-time setup code
 ```
 
-Open `http://localhost:8080/setup`, enter the code, and fill in your Discord and
+Open `http://localhost:3777/setup`, enter the code, and fill in your Discord and
 R2 credentials. leaf validates them and starts.
 
 You'll need a Discord application and a Cloudflare R2 bucket before that step, and
 a public HTTPS hostname for anything past local testing. The
-[setup guide](guide/README.md) walks through all of it.
+[setup guide](guide/README.md) walks through all of it, including what to tick
+in Discord's Developer Portal so the gallery also works on phones.
 
 ## Documentation
 
 - [Setup & usage guide](guide/README.md)
+- [Deploying: the short version](DEPLOY.md)
 - [Local development](guide/06-local-dev.md)
-- [Web UI spec](WEB-UI-SPEC.md) (what the setup page and admin panel do)
+- [Troubleshooting](guide/07-troubleshooting.md)

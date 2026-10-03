@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT original_key, thumb_key FROM media_attachments\n               WHERE series_id = ? AND day = ?",
+  "query": "SELECT original_key, thumb_key FROM media_attachments\n               WHERE series_id = ? AND day = ? ORDER BY id",
   "describe": {
     "columns": [
       {
@@ -22,5 +22,5 @@
       true
     ]
   },
-  "hash": "4949737ee6c370d798caad309fb95817624c80aaa8f86b849303206db2be4489"
+  "hash": "ce932165ba1ff4ca08bda9680fdd76bfb903d74901733a782926ab3f319c813d"
 }

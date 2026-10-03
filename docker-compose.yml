@@ -1,8 +1,9 @@
-# The one supported deployment (see PLAN.md § Hosting):
+# The one supported deployment (see guide/README.md):
 # leaf (bot + server, one process) + Cloudflare Tunnel sidecar.
 #
 # First run: `docker compose up`, then open http://localhost:3777/setup and
-# enter the setup code from the logs. No env vars to edit.
+# enter the setup code from the logs. Credentials go in that page, never in
+# env vars.
 
 services:
   leaf:
@@ -15,8 +16,9 @@ services:
       - leaf-data:/data
     environment:
       LOG_LEVEL: ${LOG_LEVEL:-info}
-      # Dev only: set in .env to register slash commands guild-scoped
-      # (instant) instead of globally (up to ~1h propagation).
+      # Development only: a server id here registers the commands in that one
+      # server instead of globally. Leave it unset for a real install
+      # (guide/01-install.md, "Command registration and DEV_GUILD_ID").
       DEV_GUILD_ID: ${DEV_GUILD_ID:-}
     stop_grace_period: 30s
 

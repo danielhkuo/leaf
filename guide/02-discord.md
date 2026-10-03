@@ -1,114 +1,175 @@
 # 02 — Discord application setup
 
 This produces the three Discord credentials the setup form needs (**bot token**,
-**application ID**, **client secret**) and wires the application so the bot, the
-OAuth logins, and the embedded-app gallery all work.
+**application ID**, **client secret**) and configures the application so the
+bot, the sign-ins and the gallery work, on phones as well as on desktop.
 
 Everything here happens in the **Discord Developer Portal**:
 <https://discord.com/developers/applications>.
+
+The short version, to tick off as you go:
+
+- [ ] Bot token copied; no privileged intents needed ([§ 2](#2-bot-token))
+- [ ] Application ID and client secret copied; **both** redirects added ([§ 3](#3-oauth2-client-info-and-redirects))
+- [ ] Only **Guild Install** ticked ([§ 4](#4-installation-guild-install-only))
+- [ ] Activities enabled, with **iOS** and **Android** ticked, an orientation choice made, and the URL mapping added ([§ 5](#5-activities-the-gallery))
+- [ ] Members can use it: **Use Application Commands**, **Use Activities**, **Send Messages** ([§ 6](#6-what-members-need))
+- [ ] Bot invited to your server ([§ 7](#7-invite-the-bot))
 
 ## 1. Create the application
 
 **New Application** → name it (e.g. "leaf") → create. You're now in the app's
 settings. The credentials below all belong to this one application.
 
-## 2. Bot: token + the message-content intent
+## 2. Bot: token
 
 Open the **Bot** tab.
 
-- **Token** — click **Reset Token** and copy it. This is the **Bot token** for
+- **Token**: click **Reset Token** and copy it. This is the **Bot token** for
   the setup form. Discord shows it **once**; if you lose it, reset again.
-- **Privileged Gateway Intents** — enable **Message Content Intent**. leaf uses
-  it for the optional passive watcher (`crates/leaf-bot/src/lib.rs` requests
-  `GUILDS | GUILD_MESSAGES | MESSAGE_CONTENT`). The other two intents are not
-  privileged and need no toggle.
+- **Privileged Gateway Intents**: leave all three off (Presence, Server
+  Members, Message Content).
 
-Once an app reaches 100+ servers Discord requires verification and intent
-approval before privileged intents keep working; a self-hosted leaf in a handful
-of servers stays under that threshold.
+leaf connects with the `GUILDS` intent only (`crates/leaf-bot/src/lib.rs`),
+which is not privileged. It never reads channel messages on its own: archiving
+gets the message from the command you run on it. If you turned **Message
+Content Intent** on for an earlier version of leaf, you can turn it off again.
 
-## 3. OAuth2: client info + redirects
+## 3. OAuth2: client info and redirects
 
 Open the **OAuth2** tab.
 
-- **Application (client) ID** — copy it (this is the **Application ID** field in
-  the setup form; it's also shown on the General Information tab).
-- **Client secret** — **Reset Secret** and copy it (the **OAuth client secret**
+- **Application (client) ID**: copy it (the **Application ID** field in the
+  setup form; it's also on the General Information tab).
+- **Client secret**: **Reset Secret** and copy it (the **OAuth client secret**
   field). Shown once.
-- **Redirects** — add **both** of these, using your real hostname:
-  - `https://leaf.example.com` — the gallery's OAuth token exchange.
-  - `https://leaf.example.com/admin/callback` — the admin panel login.
+- **Redirects**: add **both** of these, using your real hostname:
+  - `https://leaf.example.com` for the gallery's sign-in.
+  - `https://leaf.example.com/admin/callback` for the admin panel's sign-in.
 
-leaf's gallery requests the `identify` scope (server-side it checks guild
-membership with the bot token, so the user grants nothing extra); the admin
-panel login additionally requests `guilds` to find which servers you manage.
-You don't configure scopes here — they're requested at login time — but the
-**redirect URLs above must exist** or those logins fail.
+You don't configure scopes here; leaf asks for them when someone signs in. The
+gallery asks for `identify` only (leaf checks server membership itself, with
+the bot token). The admin panel asks for `identify` and `guilds`, to find the
+servers you manage. The **redirects above must exist** or those sign-ins fail.
 
-## 4. Activities: enable the embedded app
+## 4. Installation: Guild Install only
 
-The gallery is a Discord **Activity** (embedded app). Find the **Activities**
-section and **enable** Activities for this app, choosing the platforms you want
-(desktop / mobile). Some accounts have to accept developer terms first.
+Open the **Installation** tab.
 
-### URL mapping
+- **Installation Contexts**: keep **Guild Install** ticked and untick **User
+  Install** (new applications may have both ticked). leaf only works in servers
+  the bot has joined: it checks membership and reads channels with the bot's own
+  access. Its commands are registered for server installs only.
+- **Install Link**: choose the Discord-provided link, and under **Default
+  Install Settings → Guild Install** set:
+  - **Scopes:** `bot` and `applications.commands`.
+  - **Permissions:** **View Channels**, **Send Messages**, **Embed Links**,
+    **Attach Files**, **Add Reactions**, **Read Message History**.
 
-Discord serves the Activity through its own proxy (`discordsays.com`) and needs
-to know where to fetch your content. In the Activity's **URL Mappings**, add:
+Older portals have no Installation tab; build the same link under **OAuth2 → URL
+Generator** with those scopes and permissions.
 
-- **Prefix** `/` → **Target** `leaf.example.com` (host only — **no** `https://`,
-  no trailing slash).
+## 5. Activities: the gallery
 
-This single mapping covers the app, the API, and the media proxy (all one
-origin).
+The gallery is a Discord **Activity** (an embedded app). Open the **Activities**
+section and work through these. The portal's platform and orientation settings
+can't be read by leaf, so nothing warns you later if one is missed.
 
-## 5. Entry Point launch command (recommended)
+- [ ] **Enable Activities** (Activities → Settings). Some accounts have to
+      accept developer terms first.
+- [ ] **Supported Platforms: tick iOS and Android.** Only Web (which covers the
+      desktop app) is on by default. On a platform that is not ticked the
+      gallery does not exist: members on phones see no leaf entry and no error.
+- [ ] **Default orientation lock** (set separately for phones and tablets; it
+      applies before leaf loads). leaf's screens are laid out for an upright
+      phone. The day viewer has a layout for a phone held sideways as well,
+      but landscape has not been tested on a device. Either leave phones
+      unlocked and check the gallery sideways on your own phone, or lock phones
+      to **portrait** as a stopgap. A lock also stops people who keep their
+      phone mounted sideways from rotating it, so treat it as temporary. Leave
+      tablets unlocked.
+- [ ] **URL Mappings**: add **Prefix** `/` → **Target** `leaf.example.com`
+      (host only: **no** `https://`, no trailing slash). Discord serves the
+      gallery through its own proxy (`<application id>.discordsays.com`) and
+      this tells it where to fetch your content. The one mapping covers the
+      app, the API and the media.
 
-Activities launched from a **voice channel** post "Game Invitation / Game ended"
-cards in chat. The gallery is a solo, contemplative view, so the nicer entry is
-the **Entry Point command**: when you enable Activities, Discord auto-provisions a
-default `PRIMARY_ENTRY_POINT` command whose handler is the built-in
-`DiscordLaunchActivity` ("let Discord launch the activity") — no bot code
-involved. Launch the gallery from that command (or the app launcher) rather than
-the voice-channel shelf, and the invite cards don't appear. Leave its handler set
-to Discord-handled, not "app handles the interaction".
+### Entry Point command
 
-## 6. Install (invite) the bot to your server
+Enabling Activities makes Discord create an **Entry Point command** for the
+app, named **Launch**. It is what puts leaf in the app launcher, and Discord
+itself answers it by opening the gallery. Leave it exactly as it is:
 
-Generate an invite and install it. Recent portals do this from the
-**Installation** tab (Install Link / default install settings); older ones use
-**OAuth2 → URL Generator**. Either way you need:
+- Don't delete it, and don't switch it to an app-handled command through the
+  API. leaf has no code that answers it.
+- When someone opens the gallery this way in a text channel, Discord posts a
+  message in that channel with a **Join** button, visible to everyone there.
+  That is Discord's behaviour for this command, not something leaf controls.
+  Whether leaf's own ways in (`/gallery` and the **Open gallery** buttons)
+  also post one has not been checked on a live client.
+- Discord refuses any update of an application's global command list that
+  leaves this command out. leaf therefore sends it back, with the name and
+  settings it already has, each time it registers its own commands
+  ([01 § Command registration](01-install.md#command-registration-and-dev_guild_id)).
 
-- **Scopes:** `bot` and `applications.commands`.
-- **Bot permissions:** enough to read and post in the watched channels and add
-  reactions — at minimum **View Channels**, **Send Messages**, **Embed Links**,
-  **Attach Files**, **Add Reactions**, and **Read Message History**.
+## 6. What members need
 
-Open the generated URL, pick your server, authorize. On join, leaf posts a short
-greeting prompting an admin to run `/setup` (it uses the server's system
-channel, or the top-most channel it can speak in). Continue to
-[04-usage.md](04-usage.md) for that.
+leaf can't grant these; they are your server's role and channel permissions.
 
-## 7. Enable Developer Mode (to copy IDs)
+| To do this | A member needs |
+| --- | --- |
+| See `/search` and the other slash commands, and **Apps → Archive to Series** on a message | **Use Application Commands** in that channel |
+| Open the gallery | **Use Activities** in the channel they open it from. Probably **Send Messages** there too: other developers report that launching an Activity fails in channels where the member can't post, such as read-only announcement channels. Discord's documentation doesn't say either way. |
 
-You'll need raw IDs later — your **guild (server) ID**, channel IDs, and your
-**user ID** (for the migration in [05-migration.md](05-migration.md), and for
-`DEV_GUILD_ID` if you test). Enable Developer Mode (desktop: **User Settings →
-Advanced → Developer Mode**; mobile: **User Settings → Appearance**), then
-right-click / long-press a server / channel / user → **Copy ID**.
+The bot itself needs **View Channels**, **Send Messages**, **Add Reactions**
+and **Read Message History** in every series channel, and the first two in the
+log channel. The install link from § 4 grants them server-wide; channel
+overrides can still take them away. `/setup` warns when one is missing
+([04 § First: `/setup`](04-usage.md#first-setup)).
+
+## 7. Invite the bot
+
+Open the install link from § 4, pick your server and authorize. You can do this
+before or after [first-run setup](01-install.md#first-run-setup); the success
+page of that setup offers an invite link with the same scopes and permissions.
+leaf's commands are registered globally, so they are there in any server the
+bot joins, with no restart.
+
+The bot shows as offline until first-run setup is done. When it comes online,
+run `/setup` in the server ([04](04-usage.md#first-setup)).
+
+leaf greets a server the first time it sees it, with one message asking an
+admin to run `/setup`: at once when it is added while leaf is running, or the
+next time leaf connects when it was added while leaf was offline (the usual
+case on a first install, where the bot is invited before setup is finished).
+The greeting goes to the server's system channel, or else to the top-most text
+channel leaf can post in. When leaf is added back, while it is running, to a
+server that was already set up, the message says instead that leaf is back and
+the settings are as they were.
+
+## 8. Enable Developer Mode (to copy IDs)
+
+You only need raw IDs for the migration in
+[05-migration.md](05-migration.md) (a **server ID** and a **user ID**), and
+for `DEV_GUILD_ID` when developing
+([06](06-local-dev.md#running-against-real-discord-locally)).
+Enable Developer Mode (desktop: **User Settings → Advanced → Developer Mode**;
+mobile: **User Settings → Appearance** or **Advanced**), then right-click or
+long-press a server, channel or user → **Copy ID**.
 
 ## The three hosts must match
 
 This trips everyone up. These three must name the **same origin**:
 
 1. **Public URL** in the setup form (e.g. `https://leaf.example.com`).
-2. The **OAuth2 redirect** base (`https://leaf.example.com` and its
-   `/admin/callback`).
+2. The **OAuth2 redirects** (`https://leaf.example.com` and
+   `https://leaf.example.com/admin/callback`).
 3. The **URL mapping target** (`leaf.example.com`).
 
-If they disagree, the gallery's token exchange or the admin login will fail with
-opaque OAuth errors. Set up your hostname in
-[03-cloudflare.md](03-cloudflare.md), then use that exact host everywhere.
+If they disagree, the gallery's sign-in or the admin sign-in fails. Set up your
+hostname in [03-cloudflare.md](03-cloudflare.md), then use that exact host
+everywhere. After first-run setup, the success page lists the exact redirect
+and mapping values for the Public URL you entered, each with a Copy button.
 
 → Next: **[03-cloudflare.md](03-cloudflare.md)** for the hostname and R2 media
 storage.

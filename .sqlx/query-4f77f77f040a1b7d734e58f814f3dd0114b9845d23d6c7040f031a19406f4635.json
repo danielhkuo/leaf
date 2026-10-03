@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE series SET state = ? WHERE id = ? AND state = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "4f77f77f040a1b7d734e58f814f3dd0114b9845d23d6c7040f031a19406f4635"
+}

@@ -20,3 +20,15 @@ data/
 # Secrets
 leaf.conf
 .env
+
+# Copies of real data. An archive of the data volume holds leaf.conf (bot
+# token, OAuth client secret, R2 keys) and leaf.db; an export file holds a
+# real server's day index. Keep them outside the repo: these lines only stop
+# a `git add -A` from publishing one that was left here.
+*.tgz
+*.tar.gz
+walpurgis-export-*.json
+leaf-export-*.json
+
+# macOS
+.DS_Store

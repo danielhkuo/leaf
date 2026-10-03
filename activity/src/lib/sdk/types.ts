@@ -34,10 +34,18 @@ export interface AuthenticateResult {
   expires: string;
 }
 
+/** Which Discord client hosts the Activity. There is no iOS/Android flag. */
+export type Platform = 'desktop' | 'mobile';
+
 /** The structural contract the handshake needs from the SDK. */
 export interface SdkLike {
+  /** `null` when launched from a DM or group DM. */
   readonly guildId: string | null;
   readonly channelId: string | null;
+  readonly platform: Platform;
+  /** The `custom_id` of the activity link that launched this instance. */
+  readonly customId: string | null;
+  /** Resolves once Discord answers the handshake. It never rejects. */
   ready(): Promise<void>;
   commands: {
     authorize(args: AuthorizeArgs): Promise<AuthorizeResult>;

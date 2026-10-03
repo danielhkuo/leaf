@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO guild_settings\n                   (guild_id, setup_complete, log_channel_id, watched_channels)\n               VALUES (?, 1, ?, ?)\n               ON CONFLICT (guild_id) DO UPDATE SET\n                    setup_complete = 1,\n                    log_channel_id = excluded.log_channel_id,\n                    watched_channels = excluded.watched_channels",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "95901d04c4fc08a5521c07fb8e1e8d2ee22936f2ffaac917f4874d124b763a08"
+}

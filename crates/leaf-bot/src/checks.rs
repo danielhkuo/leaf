@@ -1,9 +1,11 @@
 //! Shared command guards and small interaction helpers.
 
+use std::time::Duration;
+
 use leaf_core::domain::GuildSettings;
 use poise::serenity_prelude as serenity;
 
-use crate::{Context, Error};
+use crate::{Context, Data, Error};
 
 /// Unix now, as the policy layer expects.
 #[must_use]
@@ -19,13 +21,70 @@ pub fn valid_hh_mm(s: &str) -> bool {
     chrono::NaiveTime::parse_from_str(s, "%H:%M").is_ok()
 }
 
+/// How to name the `/setup` command in a message: a mention Discord shows
+/// as a tappable chip once the command's id is known, the plain name until
+/// then.
+#[must_use]
+pub fn setup_mention(data: &Data) -> String {
+    mention_for(*data.setup_command.borrow())
+}
+
+/// [`setup_mention`] for a message nobody is waiting on.
+///
+/// Gives the command registration up to `patience` to finish, so a message
+/// sent right after connecting still gets the chip. The plain name after
+/// that.
+pub async fn setup_mention_once_registered(data: &Data, patience: Duration) -> String {
+    mention_for(command_id_once_known(data.setup_command.clone(), patience).await)
+}
+
+/// The command id on `ids` once it is not zero, or whatever it is after
+/// `patience` (or when the registration that would send it has ended).
+async fn command_id_once_known(
+    mut ids: tokio::sync::watch::Receiver<u64>,
+    patience: Duration,
+) -> u64 {
+    // Timed out, or the sender is gone: either way the latest value is the
+    // answer, so the outcome of the wait itself is not needed.
+    let _waited = tokio::time::timeout(patience, ids.wait_for(|id| *id != 0))
+        .await
+        .map(|known| known.map(|id| *id));
+    *ids.borrow()
+}
+
+fn mention_for(command_id: u64) -> String {
+    if command_id == 0 {
+        "`/setup`".to_owned()
+    } else {
+        format!("</setup:{command_id}>")
+    }
+}
+
+/// What someone is told when the server has not been set up: an admin is
+/// pointed at the command, anyone else at an admin.
+#[must_use]
+pub fn not_set_up_text(is_admin: bool, setup: &str) -> String {
+    if is_admin {
+        format!(
+            "🌱 leaf isn't set up in this server yet. Run {setup} to choose the series channels."
+        )
+    } else {
+        "🌱 leaf isn't set up in this server yet. Ask a server admin to run `/setup`.".to_owned()
+    }
+}
+
 /// The invoking guild id as a string, or a friendly refusal in DMs.
 /// (Commands are `guild_only`, so this is a belt-and-braces guard.)
 pub async fn guild_id(ctx: &Context<'_>) -> Result<Option<String>, Error> {
     if let Some(id) = ctx.guild_id() {
         Ok(Some(id.to_string()))
     } else {
-        ctx.say("🍂 This only works inside a server.").await?;
+        ctx.send(
+            poise::CreateReply::default()
+                .content("🍂 This only works inside a server.")
+                .ephemeral(true),
+        )
+        .await?;
         Ok(None)
     }
 }
@@ -41,14 +100,9 @@ pub async fn setup_settings(ctx: &Context<'_>) -> Result<Option<GuildSettings>, 
     match settings {
         Some(s) if s.setup_complete => Ok(Some(s)),
         _ => {
-            ctx.send(
-                poise::CreateReply::default()
-                    .content(
-                        "🌱 leaf isn't set up here yet — an admin needs to run `/setup` first.",
-                    )
-                    .ephemeral(true),
-            )
-            .await?;
+            let text = not_set_up_text(is_admin(ctx), &setup_mention(ctx.data()));
+            ctx.send(poise::CreateReply::default().content(text).ephemeral(true))
+                .await?;
             Ok(None)
         }
     }
@@ -80,76 +134,49 @@ impl MemberPerms for Context<'_> {
     }
 }
 
-/// Sends an ephemeral confirm/cancel prompt; resolves to the user's pick
-/// (`false` on timeout). Message-scoped collector: only this prompt's
-/// buttons count, and only the invoker can press them.
-pub async fn confirm(ctx: &Context<'_>, prompt: &str) -> Result<bool, Error> {
-    let reply = ctx
-        .send(
-            poise::CreateReply::default()
-                .content(prompt.to_owned())
-                .ephemeral(true)
-                .components(vec![serenity::CreateActionRow::Buttons(vec![
-                    serenity::CreateButton::new("confirm-yes")
-                        .style(serenity::ButtonStyle::Danger)
-                        .label("Yes, do it"),
-                    serenity::CreateButton::new("confirm-no")
-                        .style(serenity::ButtonStyle::Secondary)
-                        .label("Cancel"),
-                ])]),
-        )
-        .await?;
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, reason = "tests may panic")]
 
-    let message = reply.message().await?;
-    let pressed = message
-        .await_component_interaction(ctx.serenity_context())
-        .author_id(ctx.author().id)
-        .timeout(std::time::Duration::from_mins(1))
-        .await;
+    use super::*;
 
-    let confirmed = pressed
-        .as_ref()
-        .is_some_and(|p| p.data.custom_id == "confirm-yes");
-
-    let outcome = if confirmed {
-        "Confirmed."
-    } else {
-        "Cancelled — nothing changed."
-    };
-    if let Some(press) = pressed {
-        press
-            .create_response(
-                ctx,
-                serenity::CreateInteractionResponse::UpdateMessage(
-                    serenity::CreateInteractionResponseMessage::new()
-                        .content(outcome)
-                        .components(vec![]),
-                ),
-            )
-            .await?;
-    } else {
-        reply
-            .edit(
-                *ctx,
-                poise::CreateReply::default()
-                    .content(outcome)
-                    .components(vec![]),
-            )
-            .await?;
+    #[test]
+    fn setup_is_a_chip_once_its_id_is_known() {
+        assert_eq!(mention_for(0), "`/setup`");
+        assert_eq!(mention_for(42), "</setup:42>");
     }
-    Ok(confirmed)
-}
 
-/// Writes a quiet one-liner to the guild's log channel, if configured.
-/// Failures are logged, never surfaced to the user.
-pub async fn log_line(ctx: &Context<'_>, settings: &GuildSettings, line: &str) {
-    let Some(channel) = &settings.log_channel_id else {
-        return;
-    };
-    let Ok(id) = channel.parse::<u64>() else {
-        return;
-    };
-    if let Err(e) = serenity::ChannelId::new(id).say(ctx.http(), line).await {
-        tracing::warn!(channel, error = %e, "log-channel write failed");
+    #[tokio::test]
+    async fn a_message_can_wait_for_the_setup_command_s_id() {
+        // Registration finishes while the message waits.
+        let (tx, rx) = tokio::sync::watch::channel(0);
+        let waiting = tokio::spawn(command_id_once_known(rx, Duration::from_secs(5)));
+        tx.send(42).unwrap();
+        assert_eq!(waiting.await.unwrap(), 42);
+
+        // Already known: no wait.
+        let (_tx, rx) = tokio::sync::watch::channel(7);
+        assert_eq!(command_id_once_known(rx, Duration::ZERO).await, 7);
+
+        // Still unknown when patience runs out: the plain name is used.
+        let (_tx, rx) = tokio::sync::watch::channel(0);
+        assert_eq!(
+            command_id_once_known(rx, Duration::from_millis(20)).await,
+            0
+        );
+
+        // Registration ended without an id (leaf is shutting down).
+        let (tx, rx) = tokio::sync::watch::channel(0);
+        drop(tx);
+        assert_eq!(command_id_once_known(rx, Duration::from_secs(5)).await, 0);
+    }
+
+    #[test]
+    fn not_set_up_copy_depends_on_who_can_fix_it() {
+        let admin = not_set_up_text(true, "</setup:42>");
+        assert!(admin.contains("Run </setup:42>"));
+        let member = not_set_up_text(false, "</setup:42>");
+        assert!(member.contains("Ask a server admin"));
+        assert!(!member.contains("</setup:42>"));
     }
 }
