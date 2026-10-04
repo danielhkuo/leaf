@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT MIN(c.d) AS \"d?: i64\" FROM (\n                   SELECT ? AS d\n                   UNION ALL\n                   SELECT day + 1 FROM posts WHERE series_id = ? AND day >= ?\n               ) c\n               WHERE NOT EXISTS (\n                   SELECT 1 FROM posts q WHERE q.series_id = ? AND q.day = c.d\n               )",
+  "describe": {
+    "columns": [
+      {
+        "name": "d?: i64",
+        "ordinal": 0,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "9cbd4f30e34cc258b2a5d3e616216ee77c768de453b0efc5dcb3557e6f3bcc23"
+}

@@ -1,0 +1,231 @@
+#!/usr/bin/env bash
+#
+# scripts/dev-status: what scripts/dev-up has running, where it answers, where
+# its logs are, where the bot's connection to Discord stands, and the next
+# command to run. It only looks: nothing is started, stopped or changed.
+#
+# The exit status is 0 when leaf is running and answering, 1 otherwise.
+
+set -u
+
+# shellcheck source=scripts/dev-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/dev-lib.sh"
+
+usage() {
+  cat <<'EOF'
+Usage: scripts/dev-status
+
+Shows what scripts/dev-up has running: ports and addresses, log files, the
+bot's gateway status from /api/status, and the next command to run.
+Exit status: 0 when leaf is running and answering, 1 otherwise.
+EOF
+}
+
+while [ $# -gt 0 ]; do
+  case $1 in
+  -h | --help)
+    usage
+    exit 0
+    ;;
+  *)
+    usage >&2
+    dev_die "“${1}” is not an option."
+    ;;
+  esac
+done
+
+# `setup` or `run` when the leaf dev-up started answers; empty otherwise.
+LEAF_MODE=
+# Why there is no such leaf, for the last line: `stopped` (dev-up starts it),
+# `port` (something else holds the port) or `stuck` (it runs, but not usably).
+LEAF_WHY=stopped
+# Whether the public URL answers through the tunnel.
+TUNNEL_ANSWERS=0
+
+status_leaf() {
+  local state pid conflict recorded
+  dev_component_state leaf
+  state=$?
+  pid=$DEV_PID
+  if [ "$state" -ne 0 ]; then
+    conflict=$(dev_port_conflict "$DEV_PORT")
+    if [ -n "$conflict" ]; then
+      LEAF_WHY=port
+      dev_line leaf stopped "dev-up has not started it, but $conflict"
+    elif [ "$state" -eq 2 ] && [ -f "$(dev_log_file leaf)" ]; then
+      # Started by dev-up and gone since: its log is where the reason is.
+      dev_line leaf stopped "it has exited since dev-up started it. scripts/dev-up starts it again."
+      dev_more "log: $(dev_show_path "$(dev_log_file leaf)")"
+    else
+      dev_line leaf stopped "scripts/dev-up starts it"
+    fi
+    return 0
+  fi
+  # The port it was started on, which --port may have changed.
+  recorded=$(dev_info_get leaf port)
+  if [ -n "$recorded" ]; then
+    DEV_PORT=$recorded
+    DEV_LOCAL_URL=http://127.0.0.1:$DEV_PORT
+  fi
+  recorded=$(dev_info_get leaf data)
+  [ -n "$recorded" ] && DEV_DATA_DIR=$recorded
+
+  LEAF_WHY=stuck
+  if ! dev_port_is_held_by "$DEV_PORT" "$pid"; then
+    # Whatever answers there, it is not the leaf dev-up started.
+    dev_line leaf failed "running (pid $pid), but $(dev_port_conflict "$DEV_PORT"), which dev-up did not start"
+    dev_more "log: $(dev_show_path "$(dev_log_file leaf)")"
+    return 0
+  fi
+  LEAF_MODE=$(dev_leaf_mode)
+  if [ -z "$LEAF_MODE" ]; then
+    dev_line leaf failed "running (pid $pid) but not answering on $DEV_LOCAL_URL"
+    dev_more "log: $(dev_show_path "$(dev_log_file leaf)")"
+    return 0
+  fi
+  dev_line leaf running "$LEAF_MODE mode on $DEV_LOCAL_URL (pid $pid)"
+  dev_more "log: $(dev_show_path "$(dev_log_file leaf)")"
+  if [ "$LEAF_MODE" = setup ]; then
+    dev_setup_code_line
+    return 0
+  fi
+
+  dev_read_gateway
+  case $DEV_GATEWAY in
+  online) dev_line gateway online "the bot is connected to Discord" ;;
+  starting) dev_line gateway starting "the bot is still connecting to Discord" ;;
+  error) dev_line gateway error "${DEV_GATEWAY_DETAIL:-leaf gave no reason}" ;;
+  *) dev_line gateway unknown "$DEV_LOCAL_URL/api/status did not say where the bot stands" ;;
+  esac
+  [ -n "$DEV_GATEWAY_NOTICE" ] && dev_more "notice: $DEV_GATEWAY_NOTICE"
+  return 0
+}
+
+status_tunnel() {
+  local state pid base url foreign code
+  dev_component_state tunnel
+  state=$?
+  pid=$DEV_PID
+  base=$DEV_PUBLIC_URL
+  [ "$state" -eq 0 ] && base=$(dev_info_get tunnel url)
+  url=$base$(dev_mode_path "$LEAF_MODE")
+
+  if [ "$state" -ne 0 ]; then
+    if [ -z "$DEV_TUNNEL_CONFIG" ]; then
+      dev_line tunnel stopped "not set up: LEAF_DEV_TUNNEL_CONFIG is not set (scripts/dev.env.example shows how)"
+      return 0
+    fi
+    foreign=$(dev_find_process "tunnel " "--config $DEV_TUNNEL_CONFIG " | head -n 1)
+    if [ -z "$foreign" ]; then
+      if [ "$state" -eq 2 ] && [ -f "$(dev_log_file tunnel)" ]; then
+        # Started by dev-up and gone since: its log is where the reason is.
+        dev_line tunnel stopped "it has exited since dev-up started it. scripts/dev-up starts it again."
+        dev_more "log: $(dev_show_path "$(dev_log_file tunnel)")"
+      else
+        dev_line tunnel stopped "scripts/dev-up starts it"
+      fi
+      return 0
+    fi
+    pid=$foreign
+    foreign=", through a cloudflared that dev-up did not start"
+  else
+    foreign=
+  fi
+
+  if [ -z "$base" ]; then
+    dev_line tunnel running "pid $pid$foreign. Set LEAF_DEV_PUBLIC_URL to have its address checked."
+  elif [ -z "$LEAF_MODE" ]; then
+    dev_line tunnel running "pid $pid$foreign. $base is not checked while the leaf dev-up starts is not answering."
+  else
+    code=$(dev_http_code "$url")
+    if [ "$code" = 200 ]; then
+      TUNNEL_ANSWERS=1
+      dev_line tunnel running "$url answers$foreign (pid $pid)"
+    else
+      dev_line tunnel failed "running (pid $pid)$foreign, but $url does not answer (HTTP $code)"
+    fi
+  fi
+  [ "$state" -eq 0 ] && dev_more "log: $(dev_show_path "$(dev_log_file tunnel)")"
+  return 0
+}
+
+status_emulator() {
+  local state pid avd foreign='' serial=''
+  dev_component_state emulator
+  state=$?
+  pid=$DEV_PID
+  if [ "$state" -eq 0 ]; then
+    avd=$(dev_info_get emulator avd)
+    [ -n "$avd" ] && DEV_AVD=$avd
+  else
+    if [ "$state" -eq 2 ] && [ -f "$(dev_log_file emulator)" ]; then
+      avd=$(dev_info_get emulator avd)
+      [ -n "$avd" ] && DEV_AVD=$avd
+    fi
+    # Nothing to say about an emulator nobody has asked for.
+    [ -n "$DEV_AVD" ] || return 0
+    pid=$(dev_foreign_emulator)
+    if [ -z "$pid" ]; then
+      if [ "$state" -eq 2 ] && [ -f "$(dev_log_file emulator)" ]; then
+        # Started by dev-up and gone since: its log is where the reason is.
+        dev_line emulator stopped "it has exited since dev-up started it. scripts/dev-up --emulator boots $DEV_AVD again."
+        dev_more "log: $(dev_show_path "$(dev_log_file emulator)")"
+      else
+        dev_line emulator stopped "scripts/dev-up --emulator boots $DEV_AVD"
+      fi
+      return 0
+    fi
+    foreign=", in an emulator that dev-up did not start"
+  fi
+
+  dev_find_sdk_tools
+  [ -n "$DEV_ADB_BIN" ] && serial=$(dev_emulator_serial)
+  if [ -z "$DEV_ADB_BIN" ]; then
+    dev_line emulator running "$DEV_AVD (pid $pid)$foreign. adb was not found, so whether it has booted is not known."
+  elif [ -n "$serial" ] && dev_emulator_booted "$serial"; then
+    dev_line emulator running "$DEV_AVD is booted on $serial$foreign (pid $pid)"
+  else
+    dev_line emulator starting "$DEV_AVD is still booting$foreign (pid $pid)"
+  fi
+  [ "$state" -eq 0 ] && dev_more "log: $(dev_show_path "$(dev_log_file emulator)")"
+  return 0
+}
+
+# The next thing to do, as a command that can be pasted at the repository root.
+status_next() {
+  local doctor asks
+  echo
+  if [ -z "$LEAF_MODE" ]; then
+    case $LEAF_WHY in
+    port) echo "Next: stop the process that holds port $DEV_PORT, or start leaf on another: scripts/dev-up --port N" ;;
+    stuck) echo "Next: scripts/dev-down, then scripts/dev-up" ;;
+    *) echo "Next: scripts/dev-up" ;;
+    esac
+  elif [ "$LEAF_MODE" = setup ]; then
+    echo "Next: open http://localhost:$DEV_PORT/setup, enter the setup code and fill in the form."
+  else
+    doctor="cargo run -p leaf -- doctor --url"
+    asks="the Public URL, the way Discord reaches it"
+    # Without the tunnel the public URL cannot answer: ask this leaf directly.
+    if [ "$TUNNEL_ANSWERS" -ne 1 ]; then
+      doctor="$doctor $DEV_LOCAL_URL"
+      asks="this leaf directly, since no tunnel answers"
+    fi
+    # The doctor reads the same two variables leaf does.
+    [ -n "${DEV_GUILD_ID:-}" ] && doctor="DEV_GUILD_ID=$(printf '%q' "$DEV_GUILD_ID") $doctor"
+    [ "$DEV_DATA_DIR" = "$DEV_REPO/data" ] || doctor="DATA_DIR=$(printf '%q' "$DEV_DATA_DIR") $doctor"
+    echo "Next: $doctor"
+    echo "      (checks the install against Discord and the storage, then asks $asks)"
+  fi
+}
+
+dev_load_settings ""
+dev_require curl
+
+status_leaf
+status_tunnel
+status_emulator
+status_next
+
+[ -n "$LEAF_MODE" ] || exit 1
+exit 0

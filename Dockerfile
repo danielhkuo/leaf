@@ -5,13 +5,11 @@ WORKDIR /app
 COPY activity/package.json activity/package-lock.json ./
 RUN npm ci
 COPY activity/ ./
-# The Discord application (client) id is public and is baked into the gallery
-# bundle at build time (Vite). Provide it with
-#   docker build --build-arg VITE_DISCORD_CLIENT_ID=<id>
-# (the publish workflow passes it from the VITE_DISCORD_CLIENT_ID repo variable).
-# Written to .env so Vite picks it up deterministically.
-ARG VITE_DISCORD_CLIENT_ID
-RUN printf 'VITE_DISCORD_CLIENT_ID=%s\n' "$VITE_DISCORD_CLIENT_ID" > .env && npm run build
+# Nothing about the Discord application is built in: inside Discord the
+# gallery reads the application id from its own <id>.discordsays.com hostname,
+# so one image serves any application. Local env files (a developer's
+# activity/.env) are removed first so they cannot leak into the bundle.
+RUN rm -f .env .env.local .env.production .env.production.local && npm run build
 
 # ---- rust build --------------------------------------------------------
 FROM rust:1.96-slim-bookworm AS build

@@ -3,11 +3,21 @@
 //!
 //! Two entry points: [`plan`] (the `--dry-run` read-only planner) and [`run`]
 //! (the real import). [`run`] is **idempotent** — every day is committed in
-//! its own [`PostRepo::insert_with_media`] transaction, already-present days
-//! are skipped, and days whose source message could not be fetched are
-//! *deferred* (left unwritten) rather than recorded as missing. That makes
-//! re-running the natural resume mechanism: kill it, run it again, and it
-//! continues where it stopped and retries anything transient.
+//! its own [`PostRepo::insert_with_media`] transaction, days that already
+//! hold their files are skipped, and days whose source message could not be
+//! fetched are *deferred* (left unwritten) rather than recorded as missing.
+//! That makes re-running the natural resume mechanism: kill it, run it
+//! again, and it continues where it stopped and retries anything transient.
+//!
+//! A day that is archived but holds no stored file (the bot's `/import`
+//! writes such days, and so does an earlier run that met a failed download)
+//! is *repaired*: if its source message is the same and its files can be
+//! stored now, the day is replaced in one transaction. Otherwise it is left
+//! exactly as it is.
+//!
+//! No stored object is deleted unless the database says no entry points at
+//! it ([`PostRepo::unreferenced_keys`]): keys are a function of series, day
+//! and attachment, and a renumbered day keeps its old keys.
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -17,7 +27,7 @@ use leaf_core::db::{DbError, GuildSettingsRepo, PostRepo, SeriesRepo};
 use leaf_core::domain::{
     Cadence, DetectionMode, NewMediaAttachment, NewSeries, Post, Privacy, Series, SeriesState,
 };
-use leaf_core::media::MediaPipeline;
+use leaf_core::media::{self, MediaPipeline};
 use leaf_core::transfer::TransferPost;
 
 use crate::discord::{FetchedMessage, MessageSource};
@@ -104,7 +114,11 @@ pub struct Summary {
     pub imported: usize,
     /// Days skipped because they were already present.
     pub skipped_existing: usize,
-    /// Days left unwritten after a transient fetch error (retry on re-run).
+    /// Days that were archived without any stored file and now have theirs
+    /// (or, in a dry run, that would be tried).
+    pub repaired: usize,
+    /// Days left as they were after a transient fetch error (retry on
+    /// re-run): not written at all, or still without their files.
     pub deferred: usize,
     /// Attachments fetched and stored in R2.
     pub media_stored: usize,
@@ -129,9 +143,16 @@ pub async fn plan(
         .get_by_name(&cfg.guild_id, &cfg.series_name)
         .await?;
     let series_id = existing.as_ref().map_or(0, |s| s.id);
-    let existing_days: BTreeSet<i64> = match &existing {
-        Some(s) => post_repo.all_days(s.id).await?.into_iter().collect(),
-        None => BTreeSet::new(),
+    let (existing_days, placeholders): (BTreeSet<i64>, BTreeSet<i64>) = match &existing {
+        Some(s) => (
+            post_repo.all_days(s.id).await?.into_iter().collect(),
+            post_repo
+                .placeholder_days(s.id)
+                .await?
+                .into_iter()
+                .collect(),
+        ),
+        None => (BTreeSet::new(), BTreeSet::new()),
     };
 
     let mut summary = Summary {
@@ -142,7 +163,13 @@ pub async fn plan(
     for p in source {
         let day = mapping::leaf_day(p.day, cfg.day_offset);
         if existing_days.contains(&day) {
-            summary.skipped_existing += 1;
+            // A day with no stored file is tried again; whether its files
+            // can still be fetched is only known in a real run.
+            if placeholders.contains(&day) {
+                summary.repaired += 1;
+            } else {
+                summary.skipped_existing += 1;
+            }
             continue;
         }
         summary.imported += 1;
@@ -159,7 +186,7 @@ pub async fn plan(
 }
 
 /// Runs the import: ensures the guild + series exist, then imports every
-/// not-yet-present day.
+/// not-yet-present day and repairs the days that hold no stored file.
 pub async fn run<S: MessageSource + Sync>(
     source: &[TransferPost],
     cfg: &ImportConfig,
@@ -179,6 +206,12 @@ pub async fn run<S: MessageSource + Sync>(
         .await?
         .into_iter()
         .collect();
+    let placeholders: BTreeSet<i64> = target
+        .posts
+        .placeholder_days(series.id)
+        .await?
+        .into_iter()
+        .collect();
 
     let runner = Run {
         cfg,
@@ -195,7 +228,11 @@ pub async fn run<S: MessageSource + Sync>(
     for p in source {
         let day = mapping::leaf_day(p.day, cfg.day_offset);
         if existing_days.contains(&day) {
-            summary.skipped_existing += 1;
+            if placeholders.contains(&day) {
+                runner.repair_one(p, day, series.id, &mut summary).await?;
+            } else {
+                summary.skipped_existing += 1;
+            }
             continue;
         }
         runner.import_one(p, day, series.id, &mut summary).await?;
@@ -282,7 +319,136 @@ struct DayMedia {
     missing: usize,
 }
 
+/// Whether an archived media row holds a stored file.
+const fn holds_a_file(row: &leaf_core::domain::MediaAttachment) -> bool {
+    !row.media_missing || row.original_key.is_some() || row.thumb_key.is_some()
+}
+
+/// The storage keys the stored attachments of a plan occupy.
+fn stored_keys(media: &[NewMediaAttachment]) -> Vec<String> {
+    media
+        .iter()
+        .flat_map(|m| [m.original_key.clone(), m.thumb_key.clone()])
+        .flatten()
+        .collect()
+}
+
 impl<S: MessageSource + Sync> Run<'_, S> {
+    /// Deletes the objects under `keys` that no archived day points at. A
+    /// failed upload can leave an object behind, and so can a day that lost
+    /// its insert; a key another day still uses is never touched.
+    async fn release(&self, keys: Vec<String>) {
+        if keys.is_empty() {
+            return;
+        }
+        match self.posts.unreferenced_keys(&keys).await {
+            Ok(free) => self.media.delete_keys(&free).await,
+            Err(e) => {
+                tracing::warn!(error = %e, "could not check which stored files are unused; left in place");
+            }
+        }
+    }
+
+    /// Gives an archived day that holds no stored file its files, when its
+    /// source message is still the one the day was written from and at least
+    /// one file can be stored now. Anything else leaves the day untouched:
+    /// counted as deferred (with a gap) when a re-run could still fill it,
+    /// as already present otherwise.
+    ///
+    /// The list of such days was read before the run started, and a run is
+    /// long: the day may have been archived for real since. It is read
+    /// again here, and the replace itself only happens while the day is
+    /// still without a file (see
+    /// [`PostRepo::replace_placeholder_with_media`]).
+    async fn repair_one(
+        &self,
+        p: &TransferPost,
+        day: i64,
+        series_id: i64,
+        summary: &mut Summary,
+    ) -> anyhow::Result<()> {
+        let Some((existing, held)) = self.posts.get(series_id, day).await? else {
+            // Removed since the listing: an ordinary import.
+            return self.import_one(p, day, series_id, summary).await;
+        };
+        if existing.message_id != p.message_id {
+            // Someone archived another post as this day: theirs to keep.
+            summary.skipped_existing += 1;
+            return Ok(());
+        }
+        if held.iter().any(holds_a_file) {
+            // Filled in since the listing (archived again by its creator,
+            // or named twice in the source): nothing left to repair.
+            summary.skipped_existing += 1;
+            return Ok(());
+        }
+        let msg = match self.messages.fetch(&p.channel_id, &p.message_id).await {
+            Ok(Some(msg)) if !msg.attachments.is_empty() => msg,
+            // Deleted or emptied: nothing to gain, now or on a re-run.
+            Ok(_) => {
+                summary.skipped_existing += 1;
+                return Ok(());
+            }
+            // Unreachable right now (no access, rate limit, network): the
+            // day stays as it is, and a re-run can still fill it.
+            Err(e) => {
+                summary.deferred += 1;
+                summary.gaps.push(Gap {
+                    day,
+                    message_id: p.message_id.clone(),
+                    reason: GapReason::FetchDeferred,
+                    detail: e,
+                });
+                return Ok(());
+            }
+        };
+
+        let plan = self.build_present(&msg, p, day, series_id).await;
+        if plan.stored == 0 {
+            // Every download failed: the day keeps its placeholder, and the
+            // report says why each file is still missing.
+            summary.skipped_existing += 1;
+            summary.gaps.extend(plan.gaps);
+            return Ok(());
+        }
+        let post = Post {
+            series_id,
+            day,
+            message_id: existing.message_id,
+            channel_id: existing.channel_id,
+            caption: plan.caption,
+            // The day keeps its place on the calendar.
+            posted_at: existing.posted_at,
+            archived_at: self.now_unix,
+        };
+        match self
+            .posts
+            .replace_placeholder_with_media(&post, &plan.media)
+            .await
+        {
+            Ok(Some(freed)) => {
+                self.media.delete_keys(&freed).await;
+                summary.repaired += 1;
+                summary.media_stored += plan.stored;
+                summary.media_missing += plan.missing;
+                summary.gaps.extend(plan.gaps);
+                Ok(())
+            }
+            // The day was archived for real while its files were being
+            // fetched: that entry stays, and only uploads it does not use
+            // are removed.
+            Ok(None) => {
+                self.release(stored_keys(&plan.media)).await;
+                summary.skipped_existing += 1;
+                Ok(())
+            }
+            Err(e) => {
+                self.release(stored_keys(&plan.media)).await;
+                Err(anyhow::Error::new(e)).with_context(|| format!("repairing day {day}"))
+            }
+        }
+    }
+
     async fn import_one(
         &self,
         p: &TransferPost,
@@ -331,10 +497,14 @@ impl<S: MessageSource + Sync> Run<'_, S> {
             // Pre-checked as absent, so this only fires on a true race; treat
             // it as already-present rather than failing the whole run.
             Err(DbError::DuplicateDay(_)) => {
+                self.release(stored_keys(&plan.media)).await;
                 summary.skipped_existing += 1;
                 Ok(())
             }
-            Err(e) => Err(anyhow::Error::new(e)).with_context(|| format!("inserting day {day}")),
+            Err(e) => {
+                self.release(stored_keys(&plan.media)).await;
+                Err(anyhow::Error::new(e)).with_context(|| format!("inserting day {day}"))
+            }
         }
     }
 
@@ -395,6 +565,10 @@ impl<S: MessageSource + Sync> Run<'_, S> {
                     plan.stored += 1;
                 }
                 Err(e) => {
+                    // A failed archive may have stored the original before
+                    // the step that failed.
+                    self.release(vec![media::original_key(&meta), media::thumb_key(&meta)])
+                        .await;
                     plan.media.push(mapping::missing_attachment_live(
                         &att.id,
                         &p.channel_id,
@@ -771,6 +945,338 @@ mod tests {
 
         assert!(db.posts.get(sid, 2).await.unwrap().is_some());
         assert_eq!(db.posts.count(sid).await.unwrap(), 2);
+    }
+
+    /// Writes a day the way the bot's `/import` does: no caption, one media
+    /// row that says the file was never captured.
+    async fn placeholder(db: &Db, series_id: i64, day: i64, message_id: &str) {
+        db.posts
+            .insert_with_media(
+                &Post {
+                    series_id,
+                    day,
+                    message_id: message_id.to_owned(),
+                    channel_id: "c1".to_owned(),
+                    caption: String::new(),
+                    posted_at: 500 + day,
+                    archived_at: 600,
+                },
+                &[NewMediaAttachment {
+                    attachment_id: format!("import-{message_id}-0"),
+                    channel_id: "c1".to_owned(),
+                    message_id: message_id.to_owned(),
+                    content_type: String::new(),
+                    original_key: None,
+                    thumb_key: None,
+                    media_missing: true,
+                }],
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn days_imported_without_media_get_their_files() {
+        let db = db().await;
+        let base = serve_png(png_bytes()).await;
+        let source = vec![
+            tp(1, "m1", vec![format!("{base}/att1.png")]),
+            tp(2, "m2", vec![format!("{base}/att2.png")]),
+            tp(3, "m3", vec![format!("{base}/att3.png")]),
+        ];
+        // An empty first run creates the series; then `/import` wrote three
+        // days without media. Day 3 has since been archived from another post.
+        let sid = run(
+            &[],
+            &cfg(),
+            &db.target(),
+            &FakeSource {
+                by_message: HashMap::new(),
+            },
+            1,
+        )
+        .await
+        .unwrap()
+        .series_id;
+        placeholder(&db, sid, 1, "m1").await;
+        placeholder(&db, sid, 2, "m2").await;
+        placeholder(&db, sid, 3, "someone-elses-post").await;
+
+        // The dry run counts all three as days without files that would be
+        // tried: which message a day holds is only read in a real run.
+        let planned = plan(&source, &cfg(), &db.series, &db.posts).await.unwrap();
+        assert_eq!((planned.repaired, planned.imported), (3, 0));
+
+        let mut by_message = HashMap::new();
+        by_message.insert("m1".to_owned(), present("caption one", &base, &["att1"]));
+        by_message.insert("m2".to_owned(), Outcome::Deleted);
+        by_message.insert("m3".to_owned(), present("three", &base, &["att3"]));
+        let fake = FakeSource { by_message };
+        let s = run(&source, &cfg(), &db.target(), &fake, 9_000)
+            .await
+            .unwrap();
+        assert_eq!(s.repaired, 1);
+        assert_eq!(s.imported, 0);
+        assert_eq!(s.skipped_existing, 2);
+        assert_eq!(s.deferred, 0);
+        assert_eq!(s.media_stored, 1);
+
+        // Day 1 now has its file and caption, and kept its date.
+        let (post, media) = db.posts.get(sid, 1).await.unwrap().unwrap();
+        assert_eq!(post.caption, "caption one");
+        assert_eq!(post.posted_at, 501);
+        assert_eq!(post.archived_at, 9_000);
+        assert_eq!(media.len(), 1);
+        let att = media.first().unwrap();
+        assert_eq!(att.attachment_id, "att1");
+        assert!(!att.media_missing);
+        let key = att.original_key.clone().unwrap();
+        assert!(db.store.head(&ObjectPath::from(key)).await.is_ok());
+
+        // Day 2's message is gone: left exactly as the import wrote it.
+        let (post, media) = db.posts.get(sid, 2).await.unwrap().unwrap();
+        assert_eq!(post.archived_at, 600);
+        assert_eq!(media.first().unwrap().attachment_id, "import-m2-0");
+        // Day 3 holds another post: not this file's to change.
+        let (post, _) = db.posts.get(sid, 3).await.unwrap().unwrap();
+        assert_eq!(post.message_id, "someone-elses-post");
+        assert_eq!(post.archived_at, 600);
+
+        // A second run finds day 1 whole and stores nothing again.
+        let again = run(&source, &cfg(), &db.target(), &fake, 9_500)
+            .await
+            .unwrap();
+        assert_eq!((again.repaired, again.media_stored), (0, 0));
+        assert_eq!(again.skipped_existing, 3);
+        assert_eq!(db.posts.placeholder_days(sid).await.unwrap(), [2, 3]);
+    }
+
+    /// A message source that, while the migration is fetching `m1`, does
+    /// what a creator does on seeing an empty day: archives that message as
+    /// Day 1 for real, with both of its files.
+    struct ArchivedMeanwhile {
+        posts: PostRepo,
+        media: MediaPipeline,
+        series_id: i64,
+        base: String,
+        /// What the migration is told the message holds.
+        seen: FetchedMessage,
+    }
+
+    impl MessageSource for ArchivedMeanwhile {
+        async fn fetch(
+            &self,
+            _channel: &str,
+            _message_id: &str,
+        ) -> Result<Option<FetchedMessage>, String> {
+            let mut rows = Vec::new();
+            for id in ["att1", "att2"] {
+                let meta = mapping::media_meta("g1", self.series_id, 1, id, "image/png");
+                let stored = self
+                    .media
+                    .archive_from_url(&format!("{}/{id}.png", self.base), &meta)
+                    .await
+                    .unwrap();
+                rows.push(mapping::stored_attachment(
+                    id,
+                    "c1",
+                    "m1",
+                    "image/png",
+                    &stored,
+                ));
+            }
+            let post = Post {
+                series_id: self.series_id,
+                day: 1,
+                message_id: "m1".to_owned(),
+                channel_id: "c1".to_owned(),
+                caption: "archived by its creator".to_owned(),
+                posted_at: 501,
+                archived_at: 8_000,
+            };
+            self.posts.replace_with_media(&post, &rows).await.unwrap();
+            Ok(Some(self.seen.clone()))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_day_archived_for_real_during_the_run_keeps_its_files() {
+        let db = db().await;
+        let base = serve_png(png_bytes()).await;
+        let source = vec![tp(1, "m1", vec![format!("{base}/att1.png")])];
+        let sid = run(
+            &[],
+            &cfg(),
+            &db.target(),
+            &FakeSource {
+                by_message: HashMap::new(),
+            },
+            1,
+        )
+        .await
+        .unwrap()
+        .series_id;
+        placeholder(&db, sid, 1, "m1").await;
+
+        // The migration downloads att1 but not att2 (nothing listens on
+        // that port), so its own version of the day would hold one file.
+        let racing = ArchivedMeanwhile {
+            posts: db.posts.clone(),
+            media: db.media.clone(),
+            series_id: sid,
+            base: base.clone(),
+            seen: FetchedMessage {
+                content: "from the migration".to_owned(),
+                attachments: vec![
+                    FetchedAttachment {
+                        id: "att1".to_owned(),
+                        content_type: "image/png".to_owned(),
+                        url: format!("{base}/att1.png"),
+                    },
+                    FetchedAttachment {
+                        id: "att2".to_owned(),
+                        content_type: "image/png".to_owned(),
+                        url: "http://127.0.0.1:1/att2.png".to_owned(),
+                    },
+                ],
+            },
+        };
+        let s = run(&source, &cfg(), &db.target(), &racing, 9_000)
+            .await
+            .unwrap();
+        assert_eq!((s.repaired, s.skipped_existing), (0, 1));
+
+        // The creator's entry is the one that stands, with both files in
+        // the database and in storage.
+        let (post, media) = db.posts.get(sid, 1).await.unwrap().unwrap();
+        assert_eq!(post.caption, "archived by its creator");
+        assert_eq!(media.len(), 2);
+        for row in &media {
+            assert!(!row.media_missing, "{}", row.attachment_id);
+            for key in [row.original_key.clone(), row.thumb_key.clone()] {
+                let key = key.unwrap();
+                assert!(
+                    db.store.head(&ObjectPath::from(key.clone())).await.is_ok(),
+                    "{key} was deleted"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_day_named_twice_is_repaired_once() {
+        let db = db().await;
+        let base = serve_png(png_bytes()).await;
+        // The source lists Day 1 twice.
+        let source = vec![
+            tp(1, "m1", vec![format!("{base}/att1.png")]),
+            tp(1, "m1", vec![format!("{base}/att1.png")]),
+        ];
+        let sid = run(
+            &[],
+            &cfg(),
+            &db.target(),
+            &FakeSource {
+                by_message: HashMap::new(),
+            },
+            1,
+        )
+        .await
+        .unwrap()
+        .series_id;
+        placeholder(&db, sid, 1, "m1").await;
+
+        let mut by_message = HashMap::new();
+        by_message.insert("m1".to_owned(), present("one", &base, &["att1"]));
+        let s = run(
+            &source,
+            &cfg(),
+            &db.target(),
+            &FakeSource { by_message },
+            9_000,
+        )
+        .await
+        .unwrap();
+        // The second pass finds the day whole and leaves it alone.
+        assert_eq!((s.repaired, s.skipped_existing, s.media_stored), (1, 1, 1));
+        let (_, media) = db.posts.get(sid, 1).await.unwrap().unwrap();
+        let key = media.first().unwrap().original_key.clone().unwrap();
+        assert!(db.store.head(&ObjectPath::from(key)).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_repair_that_could_not_fetch_is_deferred_and_reported() {
+        let db = db().await;
+        let source = vec![
+            tp(1, "m1", vec!["https://cdn.example/att1.png".to_owned()]),
+            tp(2, "m2", vec!["https://cdn.example/att2.png".to_owned()]),
+        ];
+        let sid = run(
+            &[],
+            &cfg(),
+            &db.target(),
+            &FakeSource {
+                by_message: HashMap::new(),
+            },
+            1,
+        )
+        .await
+        .unwrap()
+        .series_id;
+        placeholder(&db, sid, 1, "m1").await;
+        placeholder(&db, sid, 2, "m2").await;
+
+        // Day 1: Discord refuses the fetch (a bad token, no channel access).
+        // Day 2: the message is there, but its only file cannot be fetched.
+        let mut by_message = HashMap::new();
+        by_message.insert("m1".to_owned(), Outcome::Error);
+        by_message.insert(
+            "m2".to_owned(),
+            present("two", "http://127.0.0.1:1", &["att2"]),
+        );
+        let s = run(
+            &source,
+            &cfg(),
+            &db.target(),
+            &FakeSource { by_message },
+            9_000,
+        )
+        .await
+        .unwrap();
+
+        // Neither day changed, and the operator is told a re-run can help.
+        assert_eq!((s.repaired, s.deferred, s.skipped_existing), (0, 1, 1));
+        let reasons: Vec<_> = s.gaps.iter().map(|g| (g.day, g.reason)).collect();
+        assert_eq!(
+            reasons,
+            [
+                (1, GapReason::FetchDeferred),
+                (2, GapReason::MediaUnfetchable)
+            ]
+        );
+        assert_eq!(db.posts.placeholder_days(sid).await.unwrap(), [1, 2]);
+        let (post, _) = db.posts.get(sid, 1).await.unwrap().unwrap();
+        assert_eq!(post.archived_at, 600);
+    }
+
+    #[test]
+    fn stored_keys_lists_originals_and_thumbnails_only_for_stored_files() {
+        let stored = NewMediaAttachment {
+            attachment_id: "a".to_owned(),
+            channel_id: "c".to_owned(),
+            message_id: "m".to_owned(),
+            content_type: "image/png".to_owned(),
+            original_key: Some("o".to_owned()),
+            thumb_key: Some("t".to_owned()),
+            media_missing: false,
+        };
+        let missing = NewMediaAttachment {
+            original_key: None,
+            thumb_key: None,
+            media_missing: true,
+            ..stored.clone()
+        };
+        assert_eq!(stored_keys(&[stored, missing]), ["o", "t"]);
     }
 
     #[tokio::test]

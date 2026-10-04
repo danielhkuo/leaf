@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE posts SET archived_at = archived_at\n               WHERE series_id = ? AND day = ? AND message_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "7d882bbab288e2b66c2b0b69d8842054784c4efd350c7dcdca0a99a32e4638ec"
+}

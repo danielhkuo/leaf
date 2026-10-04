@@ -98,6 +98,7 @@ async fn main() -> anyhow::Result<()> {
         info!(
             total = summary.total_source,
             would_import = summary.imported,
+            would_retry_without_media = summary.repaired,
             already_present = summary.skipped_existing,
             predicted_gaps = summary.gaps.len(),
             "dry run — no changes written"
@@ -111,7 +112,7 @@ async fn main() -> anyhow::Result<()> {
                 config_path.display()
             )
         })?;
-        let store = leaf_core::media::r2_store(&tier1.r2).context("building R2 store")?;
+        let store = leaf_core::media::r2_store(&tier1.r2).context("opening media storage")?;
         let media =
             leaf_core::media::MediaPipeline::new(store).context("building media pipeline")?;
         let messages = discord::LiveMessageSource::new(
@@ -129,6 +130,7 @@ async fn main() -> anyhow::Result<()> {
         info!(
             series_id = summary.series_id,
             imported = summary.imported,
+            repaired = summary.repaired,
             skipped = summary.skipped_existing,
             deferred = summary.deferred,
             media_stored = summary.media_stored,

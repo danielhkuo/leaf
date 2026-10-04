@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM media_attachments WHERE series_id = ? AND day = ?\n               RETURNING original_key AS \"original_key?: String\",\n                         thumb_key AS \"thumb_key?: String\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "original_key?: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "thumb_key?: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true,
+      true
+    ]
+  },
+  "hash": "955f7593aebf940bd33a50c963fdaef27af7c8cac8a7224cda627c78f26e509f"
+}

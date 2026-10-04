@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO posts\n                   (series_id, day, message_id, channel_id, caption, posted_at, archived_at)\n               SELECT series_id, ?, message_id, channel_id, caption, posted_at, archived_at\n               FROM posts WHERE series_id = ? AND day = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "27273a63a28f567631e13bce86507b4343298b5c1f43a1116f9d591f55754898"
+}

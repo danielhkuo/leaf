@@ -10,12 +10,19 @@ gallery changes.
 
 | Chunk | Budget | Measured (gzipped) | Notes |
 | --- | --- | --- | --- |
-| Initial JS (`index-*.js`) | **40 KB** | **34.2 KB** | gate: `npm run bundle:check` |
+| Initial JS (`index-*.js`) | **40 KB** | **39.0 KB** | gate: `npm run bundle:check` |
 | Initial CSS | — | ~3.0 KB | |
 | Discord SDK (`discord-*.js`) | deferred | ~43 KB | lazy — loaded *after* first paint, not on the critical path |
 | Admin panel (`Admin-*.js`) | deferred | ~4 KB | lazy — only loaded at `/admin`, zero cost to gallery users |
 
 The budget was tightened from 50 KB → 40 KB to measured reality + headroom.
+
+Measured 2026-10-04: 39.0 KB, so 1.0 KB of headroom is left. About 1 KB of the
+growth since 34.2 KB is the minimised tile (`Minimisable.svelte`, the layout
+store, the tile card's wording). It has to be in the initial chunk: the boot
+screens are wrapped in it before anything lazy has loaded. The next change to
+the initial chunk should reclaim space first (`labels.ts` and `calendar.ts` are
+about 4 KB minified each) rather than raise the budget.
 
 ## Server (verified + tested)
 
@@ -97,7 +104,7 @@ the target hardware in Discord's webview) are inherently manual.
 
 ## Exit criteria
 
-- [x] Bundle budget measured and CI-enforced (34.2 KB < 40 KB).
+- [x] Bundle budget measured and CI-enforced (39.0 KB < 40 KB).
 - [x] Server streaming, R2 reuse, and SQLite WAL/busy-timeout verified + tested.
 - [x] axe clean on the tested components; reduced-motion and focus handled.
 - [ ] Device numbers (cold load, scroll FPS, idle CPU, memory after 50-day

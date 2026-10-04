@@ -32,18 +32,31 @@ pub enum ConfigError {
     /// The public URL is not an http(s) origin.
     #[error("public_url must start with https:// (or http://localhost for dev)")]
     BadPublicUrl,
+    /// The storage endpoint starts with `file:` but names no usable folder.
+    #[error("r2.endpoint names a folder but not by its full path: write it as file:///full/path")]
+    BadStorageFolder,
 }
 
-/// R2 credentials (S3-compatible endpoint).
+/// Where media is stored: an R2 bucket (S3-compatible endpoint), or a
+/// folder on this machine.
+///
+/// A folder is an `endpoint` of the form `file:///full/path` (see
+/// [`crate::media::local_store_dir`]). The bucket and the keys are then not
+/// used: setup leaves them out of the file, and whatever an older file holds
+/// there is ignored.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct R2Config {
-    /// S3 endpoint, e.g. `https://<account>.r2.cloudflarestorage.com`.
+    /// S3 endpoint, e.g. `https://<account>.r2.cloudflarestorage.com`, or
+    /// `file:///full/path` for a folder on this machine.
     pub endpoint: String,
-    /// Bucket name.
+    /// Bucket name. Empty for a folder.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub bucket: String,
-    /// Access key id.
+    /// Access key id. Empty for a folder.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub access_key_id: String,
-    /// Secret access key.
+    /// Secret access key. Empty for a folder.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub secret_access_key: String,
 }
 
@@ -90,22 +103,28 @@ impl Tier1Config {
     /// Validates field shape (non-empty, plausible URL). Liveness (do the
     /// credentials actually work) is the setup flow's job, not this.
     pub fn validate(&self) -> Result<(), ConfigError> {
-        let required: [(&'static str, &str); 7] = [
+        let required: [(&'static str, &str); 5] = [
             ("discord_token", &self.discord_token),
             ("client_id", &self.client_id),
             ("client_secret", &self.client_secret),
             ("public_url", &self.public_url),
             ("r2.endpoint", &self.r2.endpoint),
+        ];
+        // A bucket needs its name and keys; a folder has neither.
+        let bucket: [(&'static str, &str); 3] = [
             ("r2.bucket", &self.r2.bucket),
             ("r2.access_key_id", &self.r2.access_key_id),
+            ("r2.secret_access_key", &self.r2.secret_access_key),
         ];
-        for (name, value) in required {
+        let folder = crate::media::is_local_endpoint(&self.r2.endpoint);
+        let bucket = bucket.into_iter().filter(|_| !folder);
+        for (name, value) in required.into_iter().chain(bucket) {
             if value.trim().is_empty() {
                 return Err(ConfigError::EmptyField(name));
             }
         }
-        if self.r2.secret_access_key.trim().is_empty() {
-            return Err(ConfigError::EmptyField("r2.secret_access_key"));
+        if folder && crate::media::local_store_dir(&self.r2.endpoint).is_none() {
+            return Err(ConfigError::BadStorageFolder);
         }
         let url_ok = self.public_url.starts_with("https://")
             || self.public_url.starts_with("http://localhost")
@@ -223,6 +242,137 @@ mod tests {
         let mut cfg = sample();
         cfg.public_url = "http://localhost:3777".to_owned();
         assert!(cfg.validate().is_ok());
+    }
+
+    /// A config file as setup writes it, with `r2` as its storage table.
+    fn file_with(r2: &str) -> String {
+        format!(
+            "discord_token = \"tok\"\nclient_id = \"123\"\nclient_secret = \"sec\"\n\
+             public_url = \"https://leaf.example.com\"\n\n[r2]\n{r2}"
+        )
+    }
+
+    fn load_str(raw: &str) -> Result<Option<Tier1Config>, ConfigError> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(CONFIG_FILE_NAME);
+        std::fs::write(&path, raw).unwrap();
+        Tier1Config::load(&path)
+    }
+
+    #[test]
+    fn a_folder_endpoint_needs_no_bucket_and_no_keys() {
+        // Placeholder text (a dev config from before setup offered a
+        // folder), empty values, and no keys at all: one and the same store.
+        let tables = [
+            "endpoint = \"file:///data/media\"\nbucket = \"local\"\n\
+             access_key_id = \"local\"\nsecret_access_key = \"local\"\n",
+            "endpoint = \"file:///data/media\"\nbucket = \"\"\n\
+             access_key_id = \"\"\nsecret_access_key = \" \"\n",
+            "endpoint = \"file:///data/media\"\n",
+        ];
+        for table in tables {
+            let cfg = load_str(&file_with(table)).unwrap().unwrap();
+            assert_eq!(cfg.r2.endpoint, "file:///data/media", "{table}");
+            assert_eq!(
+                crate::media::local_store_dir(&cfg.r2.endpoint),
+                Some(std::path::PathBuf::from("/data/media")),
+                "{table}"
+            );
+        }
+        // The scheme in capitals is a folder all the same, not an S3
+        // endpoint that lacks its bucket.
+        let cfg = load_str(&file_with("endpoint = \"FILE:///data/media\"\n"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            crate::media::local_store_dir(&cfg.r2.endpoint),
+            Some(std::path::PathBuf::from("/data/media"))
+        );
+    }
+
+    #[test]
+    fn a_folder_config_is_saved_without_bucket_or_key_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(CONFIG_FILE_NAME);
+        let mut cfg = sample();
+        cfg.r2 = R2Config {
+            endpoint: "file:///data/media".to_owned(),
+            bucket: String::new(),
+            access_key_id: String::new(),
+            secret_access_key: String::new(),
+        };
+        cfg.save(&path).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            raw.ends_with("\n[r2]\nendpoint = \"file:///data/media\"\n"),
+            "{raw}"
+        );
+        assert_eq!(Tier1Config::load(&path).unwrap(), Some(cfg));
+
+        // A bucket config still writes all four.
+        sample().save(&path).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        for key in ["endpoint", "bucket", "access_key_id", "secret_access_key"] {
+            assert!(raw.contains(&format!("\n{key} = ")), "{key}: {raw}");
+        }
+    }
+
+    #[test]
+    fn an_s3_endpoint_still_needs_its_bucket_and_keys() {
+        let https = "endpoint = \"https://acc.r2.cloudflarestorage.com\"\n";
+        // (the rest of the table, the field reported)
+        let cases = [
+            ("", "r2.bucket"),
+            (
+                "bucket = \"\"\naccess_key_id = \"ak\"\nsecret_access_key = \"sk\"\n",
+                "r2.bucket",
+            ),
+            (
+                "bucket = \"leaf\"\nsecret_access_key = \"sk\"\n",
+                "r2.access_key_id",
+            ),
+            (
+                "bucket = \"leaf\"\naccess_key_id = \"ak\"\nsecret_access_key = \" \"\n",
+                "r2.secret_access_key",
+            ),
+        ];
+        for (rest, field) in cases {
+            let err = load_str(&file_with(&format!("{https}{rest}"))).unwrap_err();
+            assert!(
+                matches!(err, ConfigError::EmptyField(name) if name == field),
+                "{rest:?}: {err:?}"
+            );
+        }
+        // Placeholder text is no bucket for an S3 endpoint either way: it
+        // loads (shape only), and the live check is what refuses it.
+        let whole = format!(
+            "{https}bucket = \"leaf\"\naccess_key_id = \"ak\"\nsecret_access_key = \"sk\"\n"
+        );
+        assert!(load_str(&file_with(&whole)).unwrap().is_some());
+    }
+
+    #[test]
+    fn a_file_endpoint_that_names_no_folder_is_refused() {
+        let refused = [
+            "file://media",
+            "file://nas/media",
+            "file://",
+            "file:///",
+            "file:///data/..",
+            "FILE://media",
+        ];
+        for endpoint in refused {
+            let table = format!("endpoint = \"{endpoint}\"\n");
+            let err = load_str(&file_with(&table)).unwrap_err();
+            assert!(
+                matches!(err, ConfigError::BadStorageFolder),
+                "{endpoint}: {err:?}"
+            );
+            assert!(err.to_string().contains("file:///full/path"), "{err}");
+        }
+        // And an endpoint must be there at all.
+        let err = load_str(&file_with("endpoint = \"\"\n")).unwrap_err();
+        assert!(matches!(err, ConfigError::EmptyField("r2.endpoint")));
     }
 
     #[test]

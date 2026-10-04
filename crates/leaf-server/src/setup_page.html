@@ -17,37 +17,60 @@
     src: url('/setup/fonts/fraunces-latin-wght.woff2') format('woff2-variations');
   }
   /* Ko-fi "Warm Playful" — cream page, white floating cards, one blue CTA.
-   * Cream-only (no dark variant), mirroring the gallery's app.css tokens. */
+   * Cream-only (no dark variant), mirroring the gallery's app.css tokens.
+   * Text colours pass 4.5:1 on white and cream; *-fill colours are for
+   * borders, dots and tints only, never text. */
   :root {
     color-scheme: light;
     --accent: #72a4f2;      /* Ko-fi blue CTA */
     --accent-ink: #202020;  /* dark text on the blue CTA */
-    --ok: #2e9e6b;          /* success affordances */
+    --ok: #1f7a50;          /* success text */
+    --ok-fill: #2e9e6b;
     --bg: #f4efe7;          /* warm cream page */
     --card: #ffffff;        /* white floating panels */
     --field: #fbf8f1;       /* input ground */
     --line: rgba(32, 32, 32, 0.12);
+    --control-border: #8a8378;  /* 3:1 edge for inputs and buttons */
     --text: #202020;
     --dim: #5c574e;
-    --err: #e4572e;
+    --err: #b93f1c;         /* error text */
+    --err-fill: #e4572e;
+    --warn-fill: #e08a3c;
+    --focus-ring: #202020;
     --shadow: 0 2px 4px rgba(32,32,32,.05), 0 14px 30px rgba(32,32,32,.10);
-    --link: #3b6fb0;
+    --link: #2f5f9e;
     --radius: 24px;
     --radius-field: 14px;
+    --touch: 44px;
   }
   * { box-sizing: border-box; margin: 0; }
-  html, body { min-height: 100%; }
+  [hidden] { display: none !important; }
+  html { min-height: 100%; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
   body {
+    min-height: 100%;
     background:
       radial-gradient(60rem 34rem at 50% -16rem, rgba(114,164,242,.12), transparent 62%),
       var(--bg);
     color: var(--text);
     font: 16px/1.5 'DM Sans', system-ui, -apple-system, "Segoe UI", sans-serif;
     -webkit-font-smoothing: antialiased;
-    display: grid; place-items: start center;
+    /* minmax(0, 1fr): no child can widen the column past the screen. */
+    display: grid; grid-template-columns: minmax(0, 1fr); place-items: start center;
     padding: clamp(1.5rem, 5vh, 4rem) 1.25rem 4rem;
   }
-  main { width: 100%; max-width: 27.5rem; }
+  main { width: 100%; max-width: 27.5rem; min-width: 0; }
+  a { color: var(--link); }
+  code {
+    font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
+    font-size: .85em; overflow-wrap: anywhere;
+  }
+  .sr-only {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; border: 0;
+  }
+  :focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+  [tabindex="-1"]:focus { outline: none; }
+  a, button { -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
 
   /* ---- header ---- */
   header { text-align: center; margin-bottom: 1.75rem; }
@@ -77,41 +100,42 @@
     letter-spacing: 0; margin-bottom: 1rem;
   }
 
-  /* ---- setup code boxes ---- */
+  /* ---- setup code boxes ----
+   * The boxes share the row's width (flex-basis 0, no minimum) so eight of
+   * them fit a 320 px screen instead of widening the page. */
   .code-row {
-    display: flex; gap: .45rem; justify-content: center; align-items: center;
+    display: flex; gap: clamp(.25rem, 1.6vw, .45rem); justify-content: center; align-items: center;
     margin: .35rem 0 .8rem;
   }
-  .code-dash { color: var(--dim); font-weight: 600; user-select: none; }
+  .code-dash { flex: none; color: var(--dim); font-weight: 600; user-select: none; }
   .code-box {
-    width: 2.6rem; height: 3.1rem;
+    flex: 1 1 0; min-width: 0; max-width: 2.6rem; height: 3.1rem; padding: 0;
     text-align: center;
     font: 600 1.25rem/1 ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
     text-transform: uppercase;
     color: var(--text);
     background: var(--field);
-    border: 1px solid var(--line);
+    border: 1px solid var(--control-border);
     border-radius: 12px;
     caret-color: var(--accent);
     transition: border-color .15s, box-shadow .15s, transform .15s;
   }
   .code-box:focus {
-    outline: none;
     border-color: var(--accent);
     box-shadow: 0 0 0 3.5px color-mix(in srgb, var(--accent) 30%, transparent);
   }
+  .code-box:focus-visible { outline-offset: 1px; }
   .code-box:disabled { opacity: .55; }
-  .code-hint { text-align: center; color: var(--dim); font-size: .8rem; }
+  .code-hint { text-align: center; color: var(--dim); font-size: .85rem; }
   .code-hint code {
-    font-family: ui-monospace, "SF Mono", Menlo, monospace;
     background: color-mix(in srgb, var(--text) 7%, transparent);
-    border-radius: 5px; padding: .1rem .35rem; font-size: .75rem;
+    border-radius: 5px; padding: .1rem .35rem;
   }
   .gate-error {
-    text-align: center; color: var(--err); font-size: .85rem;
+    text-align: center; color: var(--err); font-size: .875rem;
     min-height: 1.2rem; margin-top: .55rem; font-weight: 500;
   }
-  .gate-ok { display: none; text-align: center; color: var(--ok); font-weight: 600; }
+  .gate-ok { text-align: center; color: var(--ok); font-weight: 600; }
   .gate-ok .check { font-size: 1.1rem; margin-right: .3rem; }
 
   @keyframes shake {
@@ -119,7 +143,7 @@
     20% { transform: translateX(-7px); } 40% { transform: translateX(7px); }
     60% { transform: translateX(-5px); } 80% { transform: translateX(5px); }
   }
-  .shake .code-box { animation: shake .4s ease; border-color: var(--err); }
+  .shake .code-box { animation: shake .4s ease; border-color: var(--err-fill); }
 
   /* ---- credential form ---- */
   #creds { display: none; }
@@ -131,62 +155,172 @@
 
   .frow { margin-bottom: 1.05rem; }
   .frow:last-of-type { margin-bottom: 0; }
+
+  /* ---- storage choice ----
+   * Two native radio buttons, each inside its label so the whole row is the
+   * target. The fields of the choice not made sit in a disabled fieldset:
+   * out of the tab order, not sent, not checked. */
+  fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+  legend { padding: 0; }
+  .choice { display: grid; gap: .5rem; margin-bottom: 1.2rem; }
+  .choice legend { font-size: .875rem; font-weight: 600; margin-bottom: .5rem; }
+  .opt {
+    display: flex; gap: .7rem; align-items: flex-start;
+    min-height: var(--touch); padding: .7rem .85rem;
+    background: var(--field);
+    border: 1px solid var(--control-border);
+    border-radius: var(--radius-field);
+    cursor: pointer;
+  }
+  .opt input {
+    flex: none; width: 1.15rem; height: 1.15rem; margin: .12rem 0 0;
+    accent-color: var(--text); cursor: pointer;
+  }
+  .opt input:focus { box-shadow: none; }
+  .opt:has(input:checked) { background: var(--card); border-color: var(--text); box-shadow: inset 0 0 0 1px var(--text); }
+  .opt:has(input:focus-visible) { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+  .opt:has(input:focus-visible) input { outline: none; }
+  .opt-text { min-width: 0; overflow-wrap: anywhere; }
+  .opt-name { display: block; font-size: .9rem; font-weight: 600; }
+  .opt-note { display: block; font-size: .8rem; font-weight: 400; color: var(--dim); margin-top: .1rem; }
+  .means {
+    margin-top: 1.05rem; padding: .8rem .95rem;
+    font-size: .85rem;
+    background: color-mix(in srgb, var(--warn-fill) 10%, var(--card));
+    border: 1px solid var(--line); border-left: 3px solid var(--warn-fill);
+    border-radius: var(--radius-field);
+  }
+  .means-h { font-weight: 700; margin-bottom: .35rem; }
+  .means ul { padding-left: 1.1rem; display: grid; gap: .35rem; }
   .lrow {
-    display: flex; align-items: baseline; justify-content: space-between;
+    display: flex; align-items: baseline; justify-content: space-between; gap: .5rem;
     margin-bottom: .35rem;
   }
-  label { font-size: .85rem; font-weight: 600; }
+  label { font-size: .875rem; font-weight: 600; }
   .req {
-    font-size: .66rem; font-weight: 600; color: var(--dim);
+    font-size: .7rem; font-weight: 600; color: var(--dim);
     text-transform: uppercase; letter-spacing: .06em;
   }
   input[type="text"], input[type="password"], input[type="url"] {
-    width: 100%; height: 2.85rem; padding: 0 .95rem;
-    font: inherit; color: var(--text);
+    width: 100%; min-width: 0; height: 2.85rem; padding: 0 .95rem;
+    font: inherit; font-size: max(16px, 1rem); /* 16 px: no iOS focus zoom */
+    color: var(--text);
     background: var(--field);
-    border: 1px solid var(--line);
+    border: 1px solid var(--control-border);
     border-radius: var(--radius-field);
     transition: border-color .15s, box-shadow .15s;
   }
   input:focus {
-    outline: none;
     border-color: var(--accent);
     box-shadow: 0 0 0 3.5px color-mix(in srgb, var(--accent) 28%, transparent);
   }
-  .help { font-size: .78rem; color: var(--dim); margin-top: .35rem; }
-  .help a { color: var(--link); font-weight: 500; text-decoration: none; }
+  input[type]:focus-visible { outline-offset: 1px; }
+  input[aria-invalid="true"] {
+    border-color: var(--err-fill);
+    background: color-mix(in srgb, var(--err-fill) 6%, var(--field));
+  }
+  .secret { display: flex; gap: .5rem; }
+  .secret input { flex: 1 1 auto; }
+  .help { font-size: .8rem; color: var(--dim); margin-top: .35rem; }
+  .help a { font-weight: 500; text-decoration: none; }
   .help a:hover { text-decoration: underline; }
-  .ferr { color: var(--err); font-size: .78rem; margin-top: .3rem; min-height: 0; font-weight: 500; }
-  .ferr:empty { display: none; }
+  .ferr { color: var(--err); font-size: .85rem; margin-top: .3rem; font-weight: 500; }
+  .ferr:empty, .fhint:empty { display: none; }
+  .fhint { color: var(--dim); font-size: .8rem; margin-top: .3rem; padding-left: .6rem; border-left: 3px solid var(--warn-fill); }
+  /* Form-level messages stay rendered (only collapsed) so the live region
+   * already exists when text arrives. */
+  .form-msg { color: var(--err); font-size: .9rem; font-weight: 500; text-align: center; margin: .2rem 0 .6rem; }
+  .form-msg[data-tone="info"] { color: var(--text); }
+  .form-msg:empty { margin: 0; }
+  .busy-msg { color: var(--dim); font-size: .85rem; text-align: center; margin-top: .6rem; }
+  .busy-msg:empty { margin: 0; }
 
+  button { font: inherit; color: inherit; cursor: pointer; }
   button[type="submit"] {
     width: 100%; height: 3.25rem; margin-top: .4rem;
     border: 0; border-radius: var(--radius);
     background: var(--accent); color: var(--accent-ink);
-    font: 600 1.05rem/1 inherit; font-family: inherit;
+    font-weight: 600; font-size: 1.05rem; line-height: 1;
     box-shadow: var(--shadow);
-    cursor: pointer;
     transition: filter .15s, transform .1s;
   }
-  button[type="submit"]:hover { filter: brightness(1.04); }
   button[type="submit"]:active { transform: scale(.985); }
-  button[type="submit"]:disabled { opacity: .55; cursor: wait; transform: none; }
-
-  /* ---- success ---- */
-  #done { display: none; text-align: center; padding: 2.5rem 1rem 1rem; }
-  #done.revealed { display: block; animation: rise .45s cubic-bezier(.32,.72,.35,1); }
-  .done-mark {
-    width: 72px; height: 72px; margin: 0 auto 1.1rem;
-    display: grid; place-items: center;
-    border-radius: 50%;
-    background: color-mix(in srgb, var(--ok) 18%, transparent);
-    color: var(--ok); font-size: 2rem; font-weight: 700;
+  button[type="submit"]:disabled { opacity: .7; cursor: progress; transform: none; }
+  .small-btn {
+    flex: none; min-width: 4.5rem; min-height: var(--touch); padding: 0 .9rem;
+    background: var(--card); color: var(--text);
+    border: 1px solid var(--control-border); border-radius: 12px;
+    font-size: .875rem; font-weight: 600;
+  }
+  .secret .small-btn { height: 2.85rem; }
+  @media (hover: hover) {
+    button[type="submit"]:not(:disabled):hover { filter: brightness(1.04); }
+    .small-btn:hover { background: var(--field); }
   }
 
-  footer { text-align: center; color: var(--dim); font-size: .75rem; margin-top: 1.5rem; }
+  /* ---- success ---- */
+  #done { animation: rise .45s cubic-bezier(.32,.72,.35,1); }
+  .done-head { text-align: center; margin-bottom: 1.25rem; }
+  .done-mark {
+    width: 64px; height: 64px; margin: 0 auto .9rem;
+    display: grid; place-items: center;
+    border-radius: 50%;
+    background: color-mix(in srgb, var(--ok-fill) 18%, transparent);
+    color: var(--ok); font-size: 1.8rem; font-weight: 700;
+  }
+  #done h2 { margin-bottom: 0; }
+  #done h3 { font-size: 1rem; font-weight: 700; margin: 1.5rem 0 .6rem; }
+  .status {
+    display: flex; gap: .65rem; align-items: flex-start;
+    padding: .8rem .95rem; border-radius: var(--radius-field);
+    background: var(--field); border: 1px solid var(--line);
+  }
+  .status-dot {
+    flex: none; width: .7rem; height: .7rem; margin-top: .45rem; border-radius: 50%;
+    background: var(--accent);
+  }
+  .status[data-state="busy"] .status-dot { animation: pulse 1.2s ease-in-out infinite; }
+  .status[data-state="ok"] .status-dot { background: var(--ok-fill); }
+  .status[data-state="warn"] .status-dot { background: var(--warn-fill); }
+  .status[data-state="error"] .status-dot { background: var(--err-fill); }
+  @keyframes pulse { 50% { opacity: .35; } }
+  .status-text { font-weight: 600; }
+  .status-help { color: var(--dim); font-size: .85rem; overflow-wrap: anywhere; }
+  .steps { padding-left: 1.3rem; display: grid; gap: .9rem; }
+  .steps li { padding-left: .2rem; }
+  .actions { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: .5rem; }
+  .link-btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    min-height: var(--touch); padding: 0 1rem; border-radius: 12px;
+    background: var(--accent); color: var(--accent-ink);
+    font-weight: 600; font-size: .9rem; text-decoration: none;
+  }
+  .check-list { list-style: none; padding: 0; display: grid; gap: 1rem; }
+  .check-list .where { font-weight: 600; font-size: .9rem; }
+  .check-list p { font-size: .9rem; color: var(--dim); }
+  .val {
+    display: flex; gap: .5rem; align-items: center; margin-top: .4rem;
+  }
+  .val code {
+    flex: 1 1 auto; min-width: 0;
+    padding: .55rem .7rem; border-radius: 10px;
+    background: var(--field); border: 1px solid var(--line);
+    font-size: .85rem; user-select: all; -webkit-user-select: all;
+  }
+  .note { font-size: .85rem; color: var(--dim); margin-top: .4rem; }
+  .note + .check-list { margin-top: .9rem; }
+
+  footer { text-align: center; color: var(--dim); font-size: .8rem; margin-top: 1.5rem; }
+
+  @media (max-width: 30rem) {
+    /* 16 px gutters and tighter cards on phones. */
+    body { padding: 1.25rem 1rem 3rem; }
+    .card { padding: 1.25rem 1rem 1.35rem; border-radius: 20px; }
+    h1 { font-size: 1.75rem; }
+  }
 
   @media (prefers-reduced-motion: reduce) {
-    * { animation: none !important; transition: none !important; }
+    *, *::before, *::after { animation: none !important; transition: none !important; }
   }
 </style>
 </head>
@@ -195,125 +329,311 @@
   <header>
     <div class="glyph" aria-hidden="true">🍃</div>
     <h1>Set up leaf</h1>
-    <p class="sub">Connect your Discord application and storage.<br>Validated live, saved once, never asked again.</p>
+    <p class="sub">Connect your Discord application and storage.<br>Checked live, saved once, never asked again.</p>
   </header>
 
   <!-- Step 1: setup code gate -->
   <section class="card" id="gate" aria-labelledby="gate-h">
     <h2 id="gate-h">Setup code</h2>
-    <div class="code-row" id="boxes" role="group" aria-label="Setup code">
-      <input class="code-box" maxlength="1" autocomplete="one-time-code" inputmode="text" aria-label="Character 1" autofocus>
-      <input class="code-box" maxlength="1" aria-label="Character 2">
-      <input class="code-box" maxlength="1" aria-label="Character 3">
-      <input class="code-box" maxlength="1" aria-label="Character 4">
+    <div class="code-row" id="boxes" role="group" aria-label="Setup code" aria-describedby="code-hint">
+      <input class="code-box" maxlength="1" autocomplete="one-time-code" inputmode="text" autocapitalize="characters" autocorrect="off" spellcheck="false" aria-label="Character 1" autofocus>
+      <input class="code-box" maxlength="1" autocomplete="off" inputmode="text" autocapitalize="characters" autocorrect="off" spellcheck="false" aria-label="Character 2">
+      <input class="code-box" maxlength="1" autocomplete="off" inputmode="text" autocapitalize="characters" autocorrect="off" spellcheck="false" aria-label="Character 3">
+      <input class="code-box" maxlength="1" autocomplete="off" inputmode="text" autocapitalize="characters" autocorrect="off" spellcheck="false" aria-label="Character 4">
       <span class="code-dash" aria-hidden="true">–</span>
-      <input class="code-box" maxlength="1" aria-label="Character 5">
-      <input class="code-box" maxlength="1" aria-label="Character 6">
-      <input class="code-box" maxlength="1" aria-label="Character 7">
-      <input class="code-box" maxlength="1" aria-label="Character 8">
+      <input class="code-box" maxlength="1" autocomplete="off" inputmode="text" autocapitalize="characters" autocorrect="off" spellcheck="false" aria-label="Character 5">
+      <input class="code-box" maxlength="1" autocomplete="off" inputmode="text" autocapitalize="characters" autocorrect="off" spellcheck="false" aria-label="Character 6">
+      <input class="code-box" maxlength="1" autocomplete="off" inputmode="text" autocapitalize="characters" autocorrect="off" spellcheck="false" aria-label="Character 7">
+      <input class="code-box" maxlength="1" autocomplete="off" inputmode="text" autocapitalize="characters" autocorrect="off" spellcheck="false" aria-label="Character 8">
     </div>
-    <p class="code-hint">From the container logs — <code>docker logs leaf</code></p>
-    <p class="gate-error" id="gate-error" role="alert" aria-live="polite"></p>
-    <p class="gate-ok" id="gate-ok"><span class="check">✓</span>Code verified</p>
+    <p class="code-hint" id="code-hint">Find it in leaf's logs: <code>docker compose logs leaf</code></p>
+    <p class="gate-error" id="gate-error" role="alert"></p>
+    <p class="gate-ok" id="gate-ok" hidden><span class="check" aria-hidden="true">✓</span>Code verified</p>
   </section>
 
-  <!-- Step 2: credentials (revealed after the code verifies) -->
+  <!-- Step 2: credentials (revealed after the code verifies). The data-*
+       ignore attributes keep password managers from filling or saving these:
+       they are API secrets, not a login. -->
   <form id="creds" autocomplete="off" novalidate>
-    <section class="card">
-      <h2>Discord application</h2>
+    <section class="card" aria-labelledby="discord-h">
+      <h2 id="discord-h">Discord application</h2>
 
       <div class="frow">
-        <div class="lrow"><label for="discord_token">Bot token</label><span class="req">Required</span></div>
-        <input id="discord_token" name="discord_token" type="password" spellcheck="false">
-        <p class="help"><a href="https://discord.com/developers/applications" target="_blank" rel="noreferrer">Developer Portal</a> → your application → <strong>Bot</strong> → Reset&nbsp;Token. Shown once — copy it then.</p>
-        <p class="ferr" data-for="discord_token"></p>
+        <div class="lrow"><label for="discord_token">Bot token</label><span class="req" aria-hidden="true">Required</span></div>
+        <div class="secret">
+          <input id="discord_token" name="discord_token" type="password" required autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other" aria-describedby="err-discord_token hint-discord_token help-discord_token">
+          <button type="button" class="small-btn reveal" aria-controls="discord_token"><span class="reveal-label">Show</span><span class="sr-only"> bot token</span></button>
+        </div>
+        <p class="ferr" id="err-discord_token" data-for="discord_token"></p>
+        <p class="fhint" id="hint-discord_token"></p>
+        <p class="help" id="help-discord_token"><a href="https://discord.com/developers/applications" target="_blank" rel="noreferrer">Developer Portal</a> → your application → <strong>Bot</strong> → Reset&nbsp;Token. Shown once, so copy it then.</p>
       </div>
 
       <div class="frow">
-        <div class="lrow"><label for="client_id">Application (client) ID</label><span class="req">Required</span></div>
-        <input id="client_id" name="client_id" type="text" inputmode="numeric" spellcheck="false">
-        <p class="help">Same app → <strong>OAuth2</strong> → Client information.</p>
-        <p class="ferr" data-for="client_id"></p>
+        <div class="lrow"><label for="client_id">Application (client) ID</label><span class="req" aria-hidden="true">Required</span></div>
+        <input id="client_id" name="client_id" type="text" inputmode="numeric" required autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other" aria-describedby="err-client_id help-client_id">
+        <p class="ferr" id="err-client_id" data-for="client_id"></p>
+        <p class="help" id="help-client_id">Same application → <strong>OAuth2</strong> → Client information.</p>
       </div>
 
       <div class="frow">
-        <div class="lrow"><label for="client_secret">OAuth client secret</label><span class="req">Required</span></div>
-        <input id="client_secret" name="client_secret" type="password" spellcheck="false">
-        <p class="help">Same page → <strong>Client Secret</strong> → Reset&nbsp;Secret.</p>
-        <p class="ferr" data-for="client_secret"></p>
-      </div>
-    </section>
-
-    <section class="card">
-      <h2>Public origin</h2>
-      <div class="frow">
-        <div class="lrow"><label for="public_url">Public URL</label><span class="req">Required</span></div>
-        <input id="public_url" name="public_url" type="url" placeholder="https://leaf.example.com" spellcheck="false">
-        <p class="help">The HTTPS domain your <a href="https://one.dash.cloudflare.com/" target="_blank" rel="noreferrer">Cloudflare Tunnel</a> points at leaf — what Discord's URL mapping will target. <code style="font-size:.72rem">http://localhost:3777</code> is fine for local development.</p>
-        <p class="ferr" data-for="public_url"></p>
+        <div class="lrow"><label for="client_secret">OAuth client secret</label><span class="req" aria-hidden="true">Required</span></div>
+        <div class="secret">
+          <input id="client_secret" name="client_secret" type="password" required autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other" aria-describedby="err-client_secret help-client_secret">
+          <button type="button" class="small-btn reveal" aria-controls="client_secret"><span class="reveal-label">Show</span><span class="sr-only"> client secret</span></button>
+        </div>
+        <p class="ferr" id="err-client_secret" data-for="client_secret"></p>
+        <p class="help" id="help-client_secret">Same page → <strong>Client Secret</strong> → Reset&nbsp;Secret.</p>
       </div>
     </section>
 
-    <section class="card">
-      <h2>Cloudflare R2</h2>
-
+    <section class="card" aria-labelledby="origin-h">
+      <h2 id="origin-h">Public origin</h2>
       <div class="frow">
-        <div class="lrow"><label for="r2_endpoint">S3 endpoint</label><span class="req">Required</span></div>
-        <input id="r2_endpoint" name="r2_endpoint" type="url" placeholder="https://&lt;account-id&gt;.r2.cloudflarestorage.com" spellcheck="false">
-        <p class="help"><a href="https://dash.cloudflare.com/?to=/:account/r2" target="_blank" rel="noreferrer">Dashboard → R2</a> → Overview shows your account endpoint.</p>
-        <p class="ferr" data-for="r2_endpoint"></p>
-      </div>
-
-      <div class="frow">
-        <div class="lrow"><label for="r2_bucket">Bucket</label><span class="req">Required</span></div>
-        <input id="r2_bucket" name="r2_bucket" type="text" spellcheck="false">
-        <p class="help">The R2 bucket you created for leaf's media.</p>
-        <p class="ferr" data-for="r2_bucket"></p>
-      </div>
-
-      <div class="frow">
-        <div class="lrow"><label for="r2_access_key_id">Access key ID</label><span class="req">Required</span></div>
-        <input id="r2_access_key_id" name="r2_access_key_id" type="text" spellcheck="false">
-        <p class="help">R2 → <a href="https://dash.cloudflare.com/?to=/:account/r2/api-tokens" target="_blank" rel="noreferrer">Manage R2 API Tokens</a> → Create token with <strong>Object Read &amp; Write</strong>, scoped to the bucket.</p>
-        <p class="ferr" data-for="r2_access_key_id"></p>
-      </div>
-
-      <div class="frow">
-        <div class="lrow"><label for="r2_secret_access_key">Secret access key</label><span class="req">Required</span></div>
-        <input id="r2_secret_access_key" name="r2_secret_access_key" type="password" spellcheck="false">
-        <p class="help">Shown once when the token is created.</p>
-        <p class="ferr" data-for="r2_secret_access_key"></p>
+        <div class="lrow"><label for="public_url">Public URL</label><span class="req" aria-hidden="true">Required</span></div>
+        <input id="public_url" name="public_url" type="url" inputmode="url" required placeholder="https://leaf.example.com" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other" aria-describedby="err-public_url help-public_url">
+        <p class="ferr" id="err-public_url" data-for="public_url"></p>
+        <p class="help" id="help-public_url">The HTTPS address your <a href="https://one.dash.cloudflare.com/" target="_blank" rel="noreferrer">Cloudflare Tunnel</a> points at leaf, which Discord's URL mapping will target. <code>http://localhost:3777</code> is fine for local development.</p>
       </div>
     </section>
 
+    <section class="card" aria-labelledby="storage-h">
+      <h2 id="storage-h">Media storage</h2>
+
+      <fieldset class="choice">
+        <legend>Where leaf keeps the photos and videos it archives</legend>
+        <label class="opt">
+          <input type="radio" name="storage" value="r2" checked id="storage-r2" aria-labelledby="name-storage-r2" aria-describedby="note-storage-r2">
+          <span class="opt-text">
+            <span class="opt-name" id="name-storage-r2">Cloudflare R2 (or another S3-compatible store)</span>
+            <span class="opt-note" id="note-storage-r2">Recommended for a real install: the files are kept off this machine.</span>
+          </span>
+        </label>
+        <label class="opt">
+          <input type="radio" name="storage" value="folder" id="storage-folder" aria-labelledby="name-storage-folder" aria-describedby="note-storage-folder">
+          <span class="opt-text">
+            <span class="opt-name" id="name-storage-folder">A folder on this machine</span>
+            <span class="opt-note" id="note-storage-folder">No Cloudflare bucket needed. For development, or an install that lives on one machine.</span>
+          </span>
+        </label>
+      </fieldset>
+
+      <fieldset id="group-r2">
+        <legend class="sr-only">Cloudflare R2 details</legend>
+
+        <div class="frow">
+          <div class="lrow"><label for="r2_endpoint">S3 endpoint</label><span class="req" aria-hidden="true">Required</span></div>
+          <input id="r2_endpoint" name="r2_endpoint" type="url" inputmode="url" required placeholder="https://&lt;account-id&gt;.r2.cloudflarestorage.com" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other" aria-describedby="err-r2_endpoint help-r2_endpoint">
+          <p class="ferr" id="err-r2_endpoint" data-for="r2_endpoint"></p>
+          <p class="help" id="help-r2_endpoint"><a href="https://dash.cloudflare.com/?to=/:account/r2" target="_blank" rel="noreferrer">Dashboard → R2</a> → Overview shows your account endpoint.</p>
+        </div>
+
+        <div class="frow">
+          <div class="lrow"><label for="r2_bucket">Bucket</label><span class="req" aria-hidden="true">Required</span></div>
+          <input id="r2_bucket" name="r2_bucket" type="text" required autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other" aria-describedby="err-r2_bucket help-r2_bucket">
+          <p class="ferr" id="err-r2_bucket" data-for="r2_bucket"></p>
+          <p class="help" id="help-r2_bucket">The R2 bucket you created for leaf's media.</p>
+        </div>
+
+        <div class="frow">
+          <div class="lrow"><label for="r2_access_key_id">Access key ID</label><span class="req" aria-hidden="true">Required</span></div>
+          <input id="r2_access_key_id" name="r2_access_key_id" type="text" required autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other" aria-describedby="err-r2_access_key_id help-r2_access_key_id">
+          <p class="ferr" id="err-r2_access_key_id" data-for="r2_access_key_id"></p>
+          <p class="help" id="help-r2_access_key_id">R2 → <a href="https://dash.cloudflare.com/?to=/:account/r2/api-tokens" target="_blank" rel="noreferrer">Manage R2 API Tokens</a> → Create token with <strong>Object Read &amp; Write</strong>, scoped to the bucket.</p>
+        </div>
+
+        <div class="frow">
+          <div class="lrow"><label for="r2_secret_access_key">Secret access key</label><span class="req" aria-hidden="true">Required</span></div>
+          <div class="secret">
+            <input id="r2_secret_access_key" name="r2_secret_access_key" type="password" required autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other" aria-describedby="err-r2_secret_access_key help-r2_secret_access_key">
+            <button type="button" class="small-btn reveal" aria-controls="r2_secret_access_key"><span class="reveal-label">Show</span><span class="sr-only"> secret access key</span></button>
+          </div>
+          <p class="ferr" id="err-r2_secret_access_key" data-for="r2_secret_access_key"></p>
+          <p class="help" id="help-r2_secret_access_key">Shown once when the token is created.</p>
+        </div>
+      </fieldset>
+
+      <fieldset id="group-folder" hidden disabled>
+        <legend class="sr-only">Folder details</legend>
+
+        <div class="frow">
+          <div class="lrow"><label for="storage_folder">Folder path</label><span class="req" aria-hidden="true">Required</span></div>
+          <input id="storage_folder" name="storage_folder" type="text" required placeholder="/data/media" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other" aria-describedby="err-storage_folder help-storage_folder">
+          <p class="ferr" id="err-storage_folder" data-for="storage_folder"></p>
+          <p class="help" id="help-storage_folder">The folder's full path, starting with <code>/</code>. leaf creates the folder if it isn't there yet. <span id="folder-suggestion" hidden>Suggested: <code id="folder-suggested"></code>, inside leaf's data folder.</span></p>
+        </div>
+
+        <div class="means" role="note" aria-labelledby="means-h">
+          <p class="means-h" id="means-h">What a folder means</p>
+          <ul>
+            <li>The files live only on this machine. Nothing is copied anywhere else.</li>
+            <li>There is no redundancy: if the disk fails or the folder is deleted, the archived photos and videos are gone. Back the folder up yourself.</li>
+            <li>In Docker, the folder must be inside the mounted data volume, for example <code>/data/media</code>. Anywhere else is inside the container, and the files vanish when the container is replaced.</li>
+          </ul>
+        </div>
+      </fieldset>
+    </section>
+
+    <p class="form-msg" id="err-form" data-for="form" role="alert"></p>
     <button id="go" type="submit">Validate &amp; save</button>
+    <p class="busy-msg" id="busy" role="status"></p>
   </form>
 
-  <div id="done">
-    <div class="done-mark" aria-hidden="true">✓</div>
-    <h1>leaf is configured</h1>
-    <p class="sub">The bot is connecting now. You can close this page.</p>
-  </div>
+  <!-- Step 3: saved. Values are filled in from the submit answer. -->
+  <section class="card" id="done" hidden aria-labelledby="done-h">
+    <div class="done-head">
+      <div class="done-mark" aria-hidden="true">✓</div>
+      <h2 id="done-h" tabindex="-1">leaf is set up</h2>
+    </div>
 
-  <footer>Credentials are stored in <code>leaf.conf</code> on the data volume and sent only to Discord and your R2 endpoint.</footer>
+    <div class="status" id="status" data-state="busy" role="status">
+      <span class="status-dot" aria-hidden="true"></span>
+      <div><p class="status-text" id="status-text">Restarting leaf with the new settings…</p><p class="status-help" id="status-help"></p><p class="status-help" id="status-stop"></p></div>
+    </div>
+
+    <h3>What's next</h3>
+    <ol class="steps">
+      <li>
+        <strong>Add the bot to your server</strong>, if it isn't there yet.
+        <div class="actions">
+          <a class="link-btn" id="invite-link" href="https://discord.com/developers/applications" target="_blank" rel="noreferrer">Open invite link</a>
+          <button type="button" class="small-btn" data-copy="invite-url"><span class="copy-label">Copy</span><span class="sr-only"> invite link</span></button>
+        </div>
+        <code id="invite-url" hidden></code>
+      </li>
+      <li><strong>In your server, run <code>/setup</code></strong> to choose the series channels (where posts can be archived from).</li>
+      <li>
+        <strong>Open the admin panel</strong> for limits, timezone and roles:
+        <a id="admin-link" href="/admin" target="_blank" rel="noreferrer"></a>
+      </li>
+    </ol>
+
+    <h3>Check the Developer Portal</h3>
+    <p class="note">Already done if you followed the guide. <a id="portal-link" href="https://discord.com/developers/applications" target="_blank" rel="noreferrer">Open your application</a></p>
+    <ul class="check-list">
+      <li>
+        <span class="where">OAuth2 → Redirects: add both</span>
+        <div class="val"><code id="redirect-0"></code><button type="button" class="small-btn" data-copy="redirect-0"><span class="copy-label">Copy</span><span class="sr-only"> gallery redirect</span></button></div>
+        <div class="val"><code id="redirect-1"></code><button type="button" class="small-btn" data-copy="redirect-1"><span class="copy-label">Copy</span><span class="sr-only"> admin redirect</span></button></div>
+      </li>
+      <li>
+        <span class="where">Activities → URL Mappings: prefix <code>/</code> to</span>
+        <div class="val"><code id="mapping-target"></code><button type="button" class="small-btn" data-copy="mapping-target"><span class="copy-label">Copy</span><span class="sr-only"> URL mapping target</span></button></div>
+        <p class="note" id="local-note" hidden>Discord can't reach localhost, so the gallery needs a public HTTPS address. When you have one, restart leaf with <code>--reconfigure</code> and enter it.</p>
+      </li>
+      <li>
+        <span class="where">Activities → Supported Platforms</span>
+        <p>Turn on iOS and Android so members can open the gallery on their phones. They're off by default.</p>
+      </li>
+    </ul>
+    <p class="sr-only" id="copy-status" role="status"></p>
+  </section>
+
+  <footer>Credentials are stored in <code>leaf.conf</code> on the data volume and sent only to Discord and, when you use R2, your R2 endpoint.</footer>
 </main>
 
 <script>
+  const $ = (id) => document.getElementById(id);
   const boxes = [...document.querySelectorAll('.code-box')];
-  const gateError = document.getElementById('gate-error');
-  const gateOk = document.getElementById('gate-ok');
-  const boxRow = document.getElementById('boxes');
-  const creds = document.getElementById('creds');
-  const go = document.getElementById('go');
-  let verifiedCode = null;
+  const gate = $('gate');
+  const gateError = $('gate-error');
+  const gateOk = $('gate-ok');
+  const boxRow = $('boxes');
+  const codeHint = $('code-hint');
+  const creds = $('creds');
+  const go = $('go');
+  const formMsg = $('err-form');
+  const busyMsg = $('busy');
+  const done = $('done');
+  const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const scrollMode = reducedMotion ? 'auto' : 'smooth';
 
-  const code = () => boxes.map(b => b.value).join('').toUpperCase();
+  // Field names in page order, with the sentence for an empty one. The
+  // server (setup.rs `missing_message`) uses the same sentences.
+  const FIELDS = {
+    discord_token: 'Enter the bot token.',
+    client_id: 'Enter the application ID.',
+    client_secret: 'Enter the client secret.',
+    public_url: 'Enter the public URL, such as https://leaf.example.com.',
+    storage_folder: "Enter the folder's full path, such as /data/media.",
+    r2_endpoint: 'Enter the S3 endpoint.',
+    r2_bucket: 'Enter the bucket name.',
+    r2_access_key_id: 'Enter the access key ID.',
+    r2_secret_access_key: 'Enter the secret access key.',
+  };
+  // The storage choices (the values of the `storage` radio buttons): the
+  // fieldset that holds each one's fields, those fields, and what a submit
+  // says it is checking. Only the fields of the choice made are checked and
+  // sent.
+  const STORAGE = {
+    r2: {
+      group: 'group-r2',
+      fields: ['r2_endpoint', 'r2_bucket', 'r2_access_key_id', 'r2_secret_access_key'],
+      checking: 'Discord and R2',
+    },
+    folder: {
+      group: 'group-folder',
+      fields: ['storage_folder'],
+      checking: 'Discord and the folder',
+    },
+  };
+  const CLIENT_ID_NOT_A_NUMBER = 'The application ID is a long number, such as 1234567890123456789. Copy it from OAuth2 → Client information.';
+  const FOLDER_NOT_ABSOLUTE = "Enter the folder's full path, starting with /, such as /data/media. Short forms such as ~/media, ./media or a path with .. in it don't work.";
+  const SUBMIT_LABEL = 'Validate & save';
+  // Longer than the server's worst case (about 25 s for storage, Discord in parallel).
+  const SUBMIT_TIMEOUT_MS = 60000;
+  const VERIFY_TIMEOUT_MS = 15000;
+  const LOGS = 'docker compose logs leaf';
+
+  let verifiedCode = null;
+  // Set when a submit found the code changed (leaf restarted): after the new
+  // code verifies, the operator sends the form again themselves.
+  let resendAfterVerify = false;
+
+  // sessionStorage can be missing or throw (private windows, blocked storage);
+  // persistence is a convenience, so failures are ignored.
+  const store = {
+    get(k) { try { return sessionStorage.getItem(k); } catch { return null; } },
+    set(k, v) { try { sessionStorage.setItem(k, v); } catch { /* not kept */ } },
+    remove(k) { try { sessionStorage.removeItem(k); } catch { /* not kept */ } },
+    clear() { try { sessionStorage.clear(); } catch { /* not kept */ } },
+  };
 
   // Refresh persistence (sessionStorage: this tab only, gone on close).
   // The verified code and non-secret fields survive a refresh; the three
   // secret fields are deliberately never persisted.
-  const PERSIST_FIELDS = ['client_id', 'public_url', 'r2_endpoint', 'r2_bucket', 'r2_access_key_id'];
+  const PERSIST_FIELDS = ['client_id', 'public_url', 'storage_folder', 'r2_endpoint', 'r2_bucket', 'r2_access_key_id'];
   const CODE_KEY = 'leaf-setup-code';
+  const STORAGE_KEY = 'leaf-storage';
+
+  const code = () => boxes.map(b => b.value).join('').toUpperCase();
+
+  // POST JSON with a time limit. Resolves { res, data } where data is null
+  // when the answer is not JSON; rejects on network failure or timeout
+  // (err.name === 'AbortError').
+  async function postJson(url, body, timeoutMs) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: ctrl.signal,
+        cache: 'no-store',
+      });
+      let data = null;
+      try { data = await res.json(); } catch { data = null; }
+      return { res, data };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  const firstMessage = (data) =>
+    (data && data.errors && data.errors[0] && data.errors[0].message) || '';
+
+  // ---- setup code ----
 
   function setBoxes(str, restoring = false) {
     const chars = str.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8).split('');
@@ -355,99 +675,470 @@
     });
   });
 
-  function unlock() {
+  function resetBoxes() {
+    boxes.forEach(b => { b.value = ''; b.disabled = false; });
+    boxes[0].focus({ preventScroll: true });
+  }
+
+  function unlock(restoring, suggested) {
     verifiedCode = code();
-    sessionStorage.setItem(CODE_KEY, verifiedCode);
-    boxRow.style.display = 'none';
-    document.querySelector('.code-hint').style.display = 'none';
-    gateOk.style.display = 'block';
+    store.set(CODE_KEY, verifiedCode);
+    suggestFolder(suggested);
+    boxRow.hidden = true;
+    codeHint.hidden = true;
+    gateError.textContent = '';
+    gateOk.hidden = false;
     creds.classList.add('revealed');
-    document.getElementById('discord_token').focus();
+    if (resendAfterVerify) {
+      resendAfterVerify = false;
+      setFormMsg('Code verified. Select Validate & save to send your details again.', 'info');
+      go.scrollIntoView({ block: 'center', behavior: scrollMode });
+      go.focus({ preventScroll: true });
+    } else if (!restoring) {
+      $('discord_token').focus();
+    }
+  }
+
+  // Shows the code boxes again, keeping everything typed in the form.
+  function relock(message) {
+    verifiedCode = null;
+    store.remove(CODE_KEY);
+    resendAfterVerify = true;
+    gateOk.hidden = true;
+    boxRow.hidden = false;
+    codeHint.hidden = false;
+    setFormMsg('');
+    gateError.textContent = message;
+    gate.scrollIntoView({ block: 'start', behavior: scrollMode });
+    resetBoxes();
   }
 
   async function verify(restoring = false) {
     gateError.textContent = '';
     boxes.forEach(b => b.disabled = true);
+    let outcome;
     try {
-      const res = await fetch('/setup/api/verify-code', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ setup_code: code() }),
-      });
-      const data = await res.json();
-      if (data.ok) { unlock(); return; }
+      outcome = await postJson('/setup/api/verify-code', { setup_code: code() }, VERIFY_TIMEOUT_MS);
+    } catch {
+      gateError.textContent = `Couldn't reach leaf. Check it's still running (${LOGS}), then enter the code again.`;
+      resetBoxes();
+      return;
+    }
+    const { res, data } = outcome;
+    if (data && data.ok) { unlock(restoring, data.suggested_folder); return; }
 
-      if (restoring) {
-        // Saved code is stale (leaf restarted → new code). Reset quietly.
-        sessionStorage.removeItem(CODE_KEY);
-        boxes.forEach(b => { b.value = ''; b.disabled = false; });
-        boxes[0].focus();
-        if (res.status === 401) {
-          gateError.textContent = 'leaf was restarted — enter the new code from the logs';
-          return;
+    if (restoring) {
+      // Saved code is stale (leaf restarted → new code). Reset quietly.
+      store.remove(CODE_KEY);
+      if (res.status === 401) {
+        gateError.textContent = 'leaf was restarted, so the code changed. Enter the new code from the logs.';
+        resetBoxes();
+        return;
+      }
+    }
+
+    gateError.textContent = firstMessage(data)
+      || `leaf answered in a way this page doesn't understand (HTTP ${res.status}). Reload the page and try again.`;
+    if (res.status === 401 && !restoring) {
+      boxRow.classList.add('shake');
+      setTimeout(() => {
+        boxRow.classList.remove('shake');
+        resetBoxes();
+      }, 450);
+    } else if (res.status !== 410 && res.status !== 429) {
+      resetBoxes();
+    }
+    // 410/429: leave the boxes locked — restart leaf for a new code.
+  }
+
+  // ---- credential form ----
+
+  // Show/Hide for the three secrets. The visible word is part of the
+  // button's name ("Show bot token"), so the name follows the state.
+  document.querySelectorAll('.reveal').forEach((btn) => {
+    const input = $(btn.getAttribute('aria-controls'));
+    const label = btn.querySelector('.reveal-label');
+    btn.addEventListener('click', () => {
+      const show = input.type === 'password';
+      input.type = show ? 'text' : 'password';
+      label.textContent = show ? 'Hide' : 'Show';
+    });
+  });
+
+  // Non-blocking hint: a pasted public key or client secret is the usual
+  // mistake, and a token always has three dot-separated parts.
+  $('discord_token').addEventListener('change', (e) => {
+    const v = e.target.value.trim();
+    $('hint-discord_token').textContent = v && v.split('.').length !== 3
+      ? 'Bot tokens have three parts separated by dots. Check this is the token from Bot → Reset Token, not the public key or client secret.'
+      : '';
+  });
+
+  // ---- storage choice ----
+
+  const storageRadios = [...creds.querySelectorAll('input[name="storage"]')];
+  // The folder leaf suggests, told once the code has verified.
+  let suggestedFolder = '';
+
+  const storageChoice = () => {
+    const picked = storageRadios.find((radio) => radio.checked);
+    return picked && picked.value in STORAGE ? picked.value : 'r2';
+  };
+
+  // The fields a submit checks and sends: the common ones, and those of the
+  // storage chosen.
+  function activeFields() {
+    const others = Object.entries(STORAGE)
+      .filter(([value]) => value !== storageChoice())
+      .flatMap(([, storage]) => storage.fields);
+    return Object.keys(FIELDS).filter((name) => !others.includes(name));
+  }
+
+  // An empty folder field takes the suggestion once the folder is chosen;
+  // anything typed is left alone.
+  function fillSuggestedFolder() {
+    const input = $('storage_folder');
+    if (storageChoice() === 'folder' && suggestedFolder && !input.value) {
+      input.value = suggestedFolder;
+    }
+  }
+
+  function suggestFolder(path) {
+    suggestedFolder = typeof path === 'string' ? path : '';
+    $('folder-suggested').textContent = suggestedFolder;
+    $('folder-suggestion').hidden = !suggestedFolder;
+    fillSuggestedFolder();
+  }
+
+  // Shows the fields of the storage chosen and switches the others off.
+  function applyStorage() {
+    const choice = storageChoice();
+    for (const [value, storage] of Object.entries(STORAGE)) {
+      const group = $(storage.group);
+      group.hidden = value !== choice;
+      group.disabled = value !== choice;
+      if (value !== choice) {
+        for (const name of storage.fields) {
+          $('err-' + name).textContent = '';
+          $(name).removeAttribute('aria-invalid');
         }
       }
-
-      const msg = (data.errors && data.errors[0] && data.errors[0].message) || 'verification failed';
-      gateError.textContent = msg;
-      if (res.status === 401 && !restoring) {
-        boxRow.classList.add('shake');
-        setTimeout(() => {
-          boxRow.classList.remove('shake');
-          boxes.forEach(b => { b.value = ''; b.disabled = false; });
-          boxes[0].focus();
-        }, 450);
-      }
-      // 410/429: leave the boxes locked — restart leaf for a new code.
-    } catch (err) {
-      gateError.textContent = 'request failed: ' + err;
-      boxes.forEach(b => b.disabled = false);
     }
+    fillSuggestedFolder();
+  }
+
+  storageRadios.forEach((radio) => radio.addEventListener('change', () => {
+    store.set(STORAGE_KEY, storageChoice());
+    applyStorage();
+  }));
+
+  // The line above the submit button: errors that belong to no field, and
+  // the one non-error note after a code re-check.
+  function setFormMsg(text, tone = 'error') {
+    formMsg.dataset.tone = tone;
+    formMsg.textContent = text;
+  }
+
+  function clearErrors() {
+    for (const name of Object.keys(FIELDS)) {
+      $('err-' + name).textContent = '';
+      $(name).removeAttribute('aria-invalid');
+    }
+    setFormMsg('');
+  }
+
+  // Puts each error under its field (or above the button when it belongs to
+  // no field), then scrolls to and focuses the first field with one.
+  function showErrors(errors) {
+    clearErrors();
+    const general = [];
+    const invalid = new Set();
+    const active = activeFields();
+    for (const fe of errors) {
+      if (active.includes(fe.field)) {
+        const slot = $('err-' + fe.field);
+        slot.textContent = slot.textContent ? slot.textContent + ' ' + fe.message : fe.message;
+        $(fe.field).setAttribute('aria-invalid', 'true');
+        invalid.add(fe.field);
+      } else {
+        general.push(fe.message);
+      }
+    }
+    if (invalid.size > 1) general.unshift(`${invalid.size} fields need changes. Each one says what to fix.`);
+    setFormMsg(general.join(' '));
+    const first = active.find(name => invalid.has(name));
+    if (first) {
+      const input = $(first);
+      input.scrollIntoView({ block: 'center', behavior: scrollMode });
+      input.focus({ preventScroll: true });
+    } else {
+      formMsg.scrollIntoView({ block: 'center', behavior: scrollMode });
+    }
+  }
+
+  // Checks before sending: every field of the storage chosen filled, an
+  // application ID that is a number, and a folder given by its full path.
+  // Everything else needs the server.
+  function localErrors() {
+    const errors = [];
+    for (const name of activeFields()) {
+      const v = $(name).value.trim();
+      if (!v) errors.push({ field: name, message: FIELDS[name] });
+      else if (name === 'client_id' && !/^[0-9]{1,20}$/.test(v)) errors.push({ field: name, message: CLIENT_ID_NOT_A_NUMBER });
+      else if (name === 'storage_folder' && !/^\/+[^/]/.test(v)) errors.push({ field: name, message: FOLDER_NOT_ABSOLUTE });
+    }
+    return errors;
+  }
+
+  // Only the field cards are marked busy: the status line and the form-level
+  // message sit outside them, so screen readers still announce those.
+  const credCards = [...creds.querySelectorAll('section')];
+
+  function setBusy(on) {
+    const checking = STORAGE[storageChoice()].checking;
+    go.disabled = on;
+    credCards.forEach((card) => card.setAttribute('aria-busy', String(on)));
+    go.textContent = on ? `Checking ${checking}…` : SUBMIT_LABEL;
+    busyMsg.textContent = on
+      ? `Checking your details with ${checking}. This usually takes a few seconds, and at most about 30.`
+      : '';
   }
 
   // Restore state after a refresh.
   PERSIST_FIELDS.forEach((name) => {
-    const el = document.getElementById(name);
-    const saved = sessionStorage.getItem('leaf-' + name);
+    const el = $(name);
+    const saved = store.get('leaf-' + name);
     if (saved) el.value = saved;
-    el.addEventListener('input', () => sessionStorage.setItem('leaf-' + name, el.value));
+    el.addEventListener('input', () => store.set('leaf-' + name, el.value));
   });
-  const savedCode = sessionStorage.getItem(CODE_KEY);
+  const savedStorage = store.get(STORAGE_KEY);
+  storageRadios.forEach((radio) => { if (radio.value === savedStorage) radio.checked = true; });
+  applyStorage();
+  // Opened at the public address (the documented path): that is the answer.
+  if (!$('public_url').value && location.protocol === 'https:') {
+    $('public_url').value = location.origin;
+  }
+  const savedCode = store.get(CODE_KEY);
   if (savedCode) setBoxes(savedCode, true);
 
   creds.addEventListener('submit', async (e) => {
     e.preventDefault();
-    go.disabled = true;
-    document.querySelectorAll('.ferr').forEach(el => el.textContent = '');
-    gateError.textContent = '';
+    if (go.disabled) return;
+    if (!verifiedCode) {
+      gateError.textContent = 'Enter the setup code first.';
+      gate.scrollIntoView({ block: 'start', behavior: scrollMode });
+      boxes[0].focus({ preventScroll: true });
+      return;
+    }
+    const local = localErrors();
+    if (local.length) { showErrors(local); return; }
 
-    const payload = Object.fromEntries(new FormData(creds).entries());
-    payload.setup_code = verifiedCode;
+    clearErrors();
+    gateError.textContent = '';
+    setBusy(true);
+    // The storage choice, and the fields of that choice only: what was typed
+    // for the other one stays in the page.
+    const payload = { setup_code: verifiedCode, storage: storageChoice() };
+    for (const name of activeFields()) payload[name] = $(name).value;
+    let outcome;
     try {
-      const res = await fetch('/setup/api/submit', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-      const data = await res.json();
-      if (data.ok) {
-        sessionStorage.clear(); // configured: nothing left worth restoring
-        creds.style.display = 'none';
-        document.getElementById('gate').style.display = 'none';
-        document.getElementById('done').classList.add('revealed');
+      outcome = await postJson('/setup/api/submit', payload, SUBMIT_TIMEOUT_MS);
+    } catch (err) {
+      setBusy(false);
+      showErrors([{
+        field: 'form',
+        message: err && err.name === 'AbortError'
+          // The server may still finish and save: a resend would only meet
+          // a finished setup. A reload shows where things stand.
+          ? 'No answer from leaf after 60 seconds. Reload this page before trying again: the check may still finish and save your settings.'
+          : `Couldn't reach leaf. Check it's still running (${LOGS}), then try again.`,
+      }]);
+      return;
+    }
+    setBusy(false);
+    const { res, data } = outcome;
+    if (data && data.ok) { showDone(data.next || null); return; }
+    if (res.status === 401) {
+      // The code verified earlier no longer matches: leaf restarted.
+      relock('leaf was restarted, so the setup code changed. Enter the new code from the logs. Your entries are kept.');
+      return;
+    }
+    if (!data) {
+      showErrors([{ field: 'form', message: `leaf answered in a way this page doesn't understand (HTTP ${res.status}). Try again; if it keeps happening, check the logs: ${LOGS}` }]);
+      return;
+    }
+    if (res.status === 410 || res.status === 429) {
+      // Setup finished elsewhere, or locked: nothing to resend.
+      gateError.textContent = firstMessage(data);
+      showErrors([{ field: 'form', message: firstMessage(data) }]);
+      go.disabled = true;
+      return;
+    }
+    showErrors(data.errors || []);
+  });
+
+  // ---- saved ----
+
+  function showDone(next) {
+    store.clear(); // configured: nothing left worth restoring
+    gate.hidden = true;
+    creds.classList.remove('revealed');
+    creds.hidden = true;
+    if (next) {
+      $('invite-link').href = next.invite_url;
+      $('invite-url').textContent = next.invite_url;
+      $('portal-link').href = next.portal_url;
+      $('admin-link').href = next.admin_url;
+      $('admin-link').textContent = next.admin_url;
+      $('redirect-0').textContent = next.redirects[0] || '';
+      $('redirect-1').textContent = next.redirects[1] || '';
+      $('mapping-target').textContent = next.url_mapping_target;
+      $('local-note').hidden = !next.local_only;
+    }
+    done.hidden = false;
+    window.scrollTo({ top: 0, behavior: 'auto' });
+    $('done-h').focus({ preventScroll: true });
+    watchStartup();
+  }
+
+  // Copy buttons. The clipboard API needs a secure origin (https or
+  // localhost); elsewhere the text is selected so the operator can copy it.
+  done.addEventListener('click', async (e) => {
+    const btn = e.target.closest('[data-copy]');
+    if (!btn) return;
+    const source = $(btn.dataset.copy);
+    const text = source.textContent;
+    const label = btn.querySelector('.copy-label');
+    const name = btn.querySelector('.sr-only').textContent.trim();
+    let copied = false;
+    try {
+      await navigator.clipboard.writeText(text);
+      copied = true;
+    } catch { copied = false; }
+    if (!copied && !source.hidden) {
+      const range = document.createRange();
+      range.selectNodeContents(source);
+      const sel = getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+      try { copied = document.execCommand('copy'); } catch { copied = false; }
+    }
+    let status = `Copied ${name}.`;
+    if (!copied && source.hidden) {
+      label.textContent = 'Use the link';
+      status = `This browser blocked copying. Use Open invite link instead.`;
+    } else if (!copied) {
+      label.textContent = 'Selected';
+      status = `This browser blocked copying, so the ${name} is selected. Copy it from there.`;
+    } else {
+      label.textContent = 'Copied';
+    }
+    $('copy-status').textContent = status;
+    setTimeout(() => { label.textContent = 'Copy'; }, 2500);
+  });
+
+  // ---- startup status ----
+  // leaf restarts into run mode on the same port: /healthz answers 404 (setup
+  // mode) or nothing until then, and 200 once it is up. /api/status then
+  // says where the bot's gateway connection stands; a 404 there is a server
+  // without that endpoint, which is fine.
+  function setStatus(state, text, help = '') {
+    const box = $('status');
+    if (box.dataset.state === state && $('status-text').textContent === text && $('status-help').textContent === help) return;
+    box.dataset.state = state;
+    $('status-text').textContent = text;
+    $('status-help').textContent = help;
+  }
+
+  async function getWithin(url, ms) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), ms);
+    try {
+      return await fetch(url, { cache: 'no-store', signal: ctrl.signal });
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  function watchStartup() {
+    const started = Date.now();
+    const giveUpAt = started + 10 * 60 * 1000;
+    let running = false;
+    let connectingSince = 0;
+    let onlineSince = 0;
+
+    // On giving up, what is shown stays (an error's reason and the logs hint
+    // are what to act on) and a note under it says the page stopped looking.
+    const again = (ms) => {
+      if (Date.now() > giveUpAt) {
+        const box = $('status');
+        const failed = box.dataset.state === 'error';
+        if (!failed) box.dataset.state = 'warn';
+        $('status-stop').textContent = failed
+          ? 'Stopped checking after 10 minutes.'
+          : 'Stopped checking after 10 minutes. The bot shows as online in your server once it has connected.';
         return;
       }
-      for (const fe of data.errors || []) {
-        const slot = document.querySelector(`.ferr[data-for="${fe.field}"]`);
-        if (slot) slot.textContent = fe.message;
-        else gateError.textContent = fe.message;
+      setTimeout(tick, ms);
+    };
+
+    async function tick() {
+      if (!running) {
+        const res = await getWithin('/healthz', 5000);
+        if (!res || !res.ok) {
+          if (Date.now() - started > 45000) {
+            setStatus('warn', "leaf hasn't come back up yet.", `Check the logs: ${LOGS}`);
+          }
+          again(1500);
+          return;
+        }
+        running = true;
       }
-    } catch (err) {
-      gateError.textContent = 'request failed: ' + err;
-    } finally {
-      go.disabled = false;
+      const res = await getWithin('/api/status', 5000);
+      if (res && res.status === 404) {
+        setStatus('ok', 'leaf is running.', 'Check the bot shows as online in your server.');
+        return;
+      }
+      let body = null;
+      if (res && res.ok) {
+        try { body = await res.json(); } catch { body = null; }
+      }
+      if (!body) { again(3000); return; }
+      if (body.gateway === 'online') {
+        if (body.notice) {
+          // Connected, but something still needs attention (for example the
+          // command list was refused): say so and keep watching.
+          setStatus('warn', 'The bot is online, but something needs attention.',
+            `${body.notice} The logs have the reason: ${LOGS}`);
+          again(5000);
+          return;
+        }
+        setStatus('ok', 'The bot is online.');
+        // The command list is sent just after the bot connects; look a few
+        // more times so a refusal still shows up here.
+        if (!onlineSince) onlineSince = Date.now();
+        if (Date.now() - onlineSince < 20000) again(4000);
+        return;
+      }
+      onlineSince = 0;
+      if (body.gateway === 'error') {
+        connectingSince = 0;
+        setStatus('error', "The bot couldn't connect to Discord.",
+          (body.detail ? body.detail + ' ' : '') + `The logs have the details: ${LOGS}`);
+        again(5000);
+        return;
+      }
+      if (!connectingSince) connectingSince = Date.now();
+      const slow = Date.now() - connectingSince > 60000;
+      setStatus(slow ? 'warn' : 'busy', 'leaf is running. Connecting the bot to Discord…',
+        slow ? `This is taking longer than usual. Check the logs: ${LOGS}` : '');
+      again(slow ? 5000 : 2000);
     }
-  });
+
+    tick();
+  }
 </script>
 </body>
 </html>

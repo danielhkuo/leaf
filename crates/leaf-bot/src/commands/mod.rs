@@ -7,9 +7,14 @@
               command here still carries a doc comment as its UI description"
 )]
 
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use crate::{Context, Data, Error};
+use leaf_core::db::LaunchIntentRepo;
+use poise::serenity_prelude as serenity;
+
+use crate::channels::Sight;
+use crate::{Context, Data, Error, checks, menus};
 
 pub mod archive;
 pub mod query;
@@ -18,11 +23,16 @@ pub mod setup;
 pub mod transfer;
 pub mod wrapped;
 
+use series_lookup::{
+    Asker, Scope, autocomplete_gallery_series, open_gallery_button, resolve_series,
+};
+
 /// Every command leaf registers, in menu order.
 #[must_use]
 pub fn all() -> Vec<poise::Command<Data, Error>> {
     vec![
-        ping(),
+        gallery(),
+        leaf(),
         setup::setup(),
         archive::archive_menu(),
         query::search(),
@@ -33,18 +43,110 @@ pub fn all() -> Vec<poise::Command<Data, Error>> {
         transfer::export(),
         transfer::import(),
         wrapped::wrapped(),
+        ping(),
     ]
 }
 
 /// Check that leaf is alive (version and uptime).
-#[poise::command(slash_command)]
+#[poise::command(slash_command, install_context = "Guild")]
 pub async fn ping(ctx: Context<'_>) -> Result<(), Error> {
     let uptime = format_uptime(ctx.data().started.elapsed());
-    ctx.say(format!(
-        "🍃 leaf v{} — up {uptime}",
-        env!("CARGO_PKG_VERSION")
-    ))
-    .await?;
+    let text = format!("🍃 leaf v{} is up ({uptime}).", env!("CARGO_PKG_VERSION"));
+    ctx.send(poise::CreateReply::default().content(text).ephemeral(true))
+        .await?;
+    Ok(())
+}
+
+/// Open leaf's gallery.
+#[poise::command(slash_command, guild_only, install_context = "Guild")]
+pub async fn gallery(
+    ctx: Context<'_>,
+    #[description = "Series to open (leave it out to open the gallery itself)"]
+    #[autocomplete = "autocomplete_gallery_series"]
+    series: Option<String>,
+) -> Result<(), Error> {
+    let poise::Context::Application(app) = ctx else {
+        return Ok(());
+    };
+    let Some(guild_id) = checks::guild_id(&ctx).await? else {
+        return Ok(());
+    };
+
+    // Discord's launch response carries no destination, so a named series
+    // is left as a short-lived intent the gallery collects when it starts.
+    if let Some(name) = series.as_deref().filter(|n| !n.trim().is_empty()) {
+        let Some(found) = resolve_series(&ctx, &guild_id, name, Scope::Viewable).await? else {
+            return Ok(());
+        };
+        // An admin can name any series, but the gallery shows them only
+        // what a member may view: say so, rather than leave a destination
+        // the gallery would drop and open somewhere else.
+        if !Asker::of(&ctx).await.gallery_shows(&found) {
+            let text =
+                crate::components::not_in_gallery_text(&found, ctx.data().public_url.as_deref());
+            ctx.send(poise::CreateReply::default().content(text).ephemeral(true))
+                .await?;
+            return Ok(());
+        }
+        let stored = LaunchIntentRepo::new(ctx.data().pool.clone())
+            .put(
+                &ctx.author().id.to_string(),
+                &guild_id,
+                found.id,
+                None,
+                checks::now_unix(),
+            )
+            .await;
+        if let Err(e) = stored {
+            // The gallery still opens, on its usual first screen.
+            tracing::warn!(series = found.id, error = %e, "could not store the launch intent");
+        }
+    }
+
+    let launch = serenity::CreateInteractionResponse::LaunchActivity;
+    match app.interaction.create_response(ctx.http(), launch).await {
+        Ok(()) => {
+            // poise did not send this response: tell it one went out, so a
+            // later error reply becomes a follow-up.
+            app.has_sent_initial_response.store(true, Ordering::SeqCst);
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "could not launch the Activity");
+            ctx.send(
+                poise::CreateReply::default()
+                    .content(menus::open_gallery_fallback(&ctx.data().app_name()))
+                    .ephemeral(true),
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+/// How leaf works here: starting a series, archiving a post, the gallery.
+#[poise::command(slash_command, guild_only, install_context = "Guild")]
+pub async fn leaf(ctx: Context<'_>) -> Result<(), Error> {
+    let Some(guild_id) = checks::guild_id(&ctx).await? else {
+        return Ok(());
+    };
+    let settings = ctx.data().guilds.get(&guild_id).await?;
+    let is_admin = checks::is_admin(&ctx);
+    let setup = checks::setup_mention(ctx.data());
+    let reply = match settings.filter(|s| s.setup_complete) {
+        None => poise::CreateReply::default().content(checks::not_set_up_text(is_admin, &setup)),
+        Some(settings) => {
+            // The how-to names the series channels: only those still there.
+            let sight = Sight::before_first_answer(&ctx).await;
+            let text =
+                setup::how_to_text(&settings, &ctx.data().app_name(), &sight, is_admin, &setup);
+            poise::CreateReply::default().content(text).components(vec![
+                serenity::CreateActionRow::Buttons(vec![
+                    open_gallery_button(None).style(serenity::ButtonStyle::Primary),
+                ]),
+            ])
+        }
+    };
+    ctx.send(reply.ephemeral(true)).await?;
     Ok(())
 }
 
@@ -69,6 +171,18 @@ mod tests {
     )]
 
     use super::*;
+
+    #[test]
+    fn the_gallery_and_help_commands_are_registered_once_each() {
+        let names: Vec<String> = all().into_iter().map(|c| c.name).collect();
+        for expected in ["gallery", "leaf", "setup", "ping"] {
+            assert_eq!(
+                names.iter().filter(|n| *n == expected).count(),
+                1,
+                "{expected} in {names:?}"
+            );
+        }
+    }
 
     #[test]
     fn uptime_formatting_picks_two_largest_units() {

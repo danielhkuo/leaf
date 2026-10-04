@@ -1,0 +1,2027 @@
+#!/usr/bin/env bash
+#
+# scripts/tests/run: tests for scripts/dev-up, dev-down and dev-status.
+#
+# Each test copies the three scripts into a throwaway repository skeleton and
+# runs them there against stand-ins (scripts/tests/stubs): a leaf that only
+# speaks the addresses the scripts ask, a cloudflared that plays the public
+# end of a tunnel on 127.0.0.1, an Android SDK whose emulator and adb are
+# files, and an npm and a cargo that "build" in a millisecond. Nothing real
+# is built, started or contacted, the ports are ones the system hands out,
+# and the scripts run with an empty environment, so a real leaf, tunnel or
+# emulator on this machine is never looked at.
+#
+#   scripts/tests/run                 every test
+#   scripts/tests/run tunnel leaf     only the tests whose name has a word
+#
+#   TEST_BASH=/path/to/bash   run the scripts with that bash (default: the
+#                             one their `#!/usr/bin/env bash` finds)
+#   TEST_SHOW=1               print what each run of a script printed
+#   DEV_SCRIPTS_SRC=dir       test the scripts in that directory instead
+#
+# Needs python3 (the stand-in servers) and curl. No test sleeps or reads the
+# clock: a stand-in changes its answer after a set number of questions or
+# when a file appears, and where a test starts a process itself it waits for
+# a line on a fifo, or for a file the scripts write (`wait_until`).
+
+set -u
+
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+SRC=${DEV_SCRIPTS_SRC:-$HERE/..}
+SRC=$(cd "$SRC" && pwd)
+STUBS=$HERE/stubs
+
+for tool in python3 curl; do
+  command -v "$tool" >/dev/null 2>&1 || {
+    echo "scripts/tests/run needs $tool, which was not found on PATH." >&2
+    exit 2
+  }
+done
+PYTHON=$(command -v python3)
+if [ -n "${TEST_BASH:-}" ]; then
+  TEST_BASH=$(command -v "$TEST_BASH") || {
+    echo "scripts/tests/run: TEST_BASH names no program." >&2
+    exit 2
+  }
+fi
+
+# The scripts run in a UTF-8 locale when the machine has one, as they do in a
+# terminal: bash 3.2 reads "$name” differently there than in the C locale.
+UTF8_LOCALE=C
+for candidate in en_US.UTF-8 C.UTF-8 $(locale -a 2>/dev/null | grep -i 'utf-\{0,1\}8$' | head -n 1); do
+  if locale -a 2>/dev/null | grep -qx "$candidate"; then
+    UTF8_LOCALE=$candidate
+    break
+  fi
+done
+
+TESTS_RUN=0
+TESTS_FAILED=0
+TEST_NAME=
+TEST_OK=1
+SANDBOXES=()
+
+# ---------------------------------------------------------------- checks
+
+fail() {
+  if [ "$TEST_OK" -eq 1 ]; then
+    printf 'FAIL  %s\n' "$TEST_NAME"
+  fi
+  TEST_OK=0
+  printf '      %s\n' "$*"
+}
+
+# Shows the output a failed check was about, once per run of a script.
+show_output() {
+  printf '      ---- exit status %s, output:\n' "$RC"
+  printf '%s\n' "$OUT" | sed 's/^/      | /'
+}
+
+expect_rc() {
+  [ "$RC" -eq "$1" ] && return 0
+  fail "expected exit status $1, got $RC"
+  show_output
+}
+
+expect_out() {
+  case $OUT in
+  *"$1"*) return 0 ;;
+  esac
+  fail "expected the output to contain: $1"
+  show_output
+}
+
+refute_out() {
+  case $OUT in
+  *"$1"*)
+    fail "expected the output not to contain: $1"
+    show_output
+    ;;
+  esac
+}
+
+# The output has a line that starts with the first argument (a step's name
+# and result, whatever the spacing) and contains the second.
+expect_line() {
+  local line want_start=$1 want_text=${2:-} squeezed
+  while IFS= read -r line; do
+    squeezed=$(printf '%s' "$line" | tr -s ' ')
+    case $squeezed in
+    "$want_start"*"$want_text"*) return 0 ;;
+    esac
+  done <<EOF
+$OUT
+EOF
+  fail "expected a line starting “${want_start}” that contains: $want_text"
+  show_output
+}
+
+refute_line() {
+  local line squeezed
+  while IFS= read -r line; do
+    squeezed=$(printf '%s' "$line" | tr -s ' ')
+    case $squeezed in
+    "$1"*)
+      fail "expected no line starting “${1}”"
+      show_output
+      return 0
+      ;;
+    esac
+  done <<EOF
+$OUT
+EOF
+}
+
+# The output shows the end of NAME.log as that log now is: its last lines
+# under "last lines of", or the line that says it is empty. For a process the
+# script has just stopped, whose log is therefore complete. How far a
+# stand-in got before it was stopped is not this check's business, so no
+# race with its start decides the result.
+expect_log_tail_shown() {
+  local log=$RUN/$1.log line
+  if [ ! -s "$log" ]; then
+    expect_out "(nothing was written to .dev-run/$1.log)"
+    return 0
+  fi
+  expect_out "last lines of .dev-run/$1.log:"
+  while IFS= read -r line; do
+    expect_out "| $line"
+  done <<EOF
+$(tail -n 15 "$log")
+EOF
+}
+
+expect_file() { [ -e "$1" ] || fail "expected $1 to exist"; }
+refute_file() { [ ! -e "$1" ] || fail "expected $1 not to exist"; }
+
+expect_content() {
+  local content
+  content=$(cat "$1" 2>/dev/null) || {
+    fail "expected $1 to exist and hold: $2"
+    return 0
+  }
+  case $content in
+  *"$2"*) ;;
+  *) fail "expected $1 to hold “${2}”, but it holds: $content" ;;
+  esac
+}
+
+alive() {
+  local stat
+  kill -0 "$1" 2>/dev/null || return 1
+  stat=$(ps -o stat= -p "$1" 2>/dev/null) || return 1
+  case $stat in
+  '' | Z*) return 1 ;;
+  esac
+  return 0
+}
+
+expect_alive() { alive "$1" || fail "expected ${2:-the process} (pid $1) to be running"; }
+expect_dead() { alive "$1" && fail "expected ${2:-the process} (pid $1) to have stopped"; }
+
+# The pids of processes whose command line mentions this test's directory:
+# everything a test started, and nothing else on the machine.
+sandbox_pids() {
+  local pid cmd
+  # Only ever a directory `sandbox` made: with anything shorter, the match
+  # below would take in processes that are not a test's.
+  case ${T:-} in
+  */leaf-dev-test.??????) ;;
+  *) return 0 ;;
+  esac
+  ps -Aww -o pid=,command= 2>/dev/null | while read -r pid cmd; do
+    case $cmd in
+    *"$T"*) printf '%s\n' "$pid" ;;
+    esac
+  done
+}
+
+expect_nothing_running() {
+  local pids
+  pids=$(sandbox_pids | tr '\n' ' ')
+  [ -z "$pids" ] || fail "expected nothing of this test's to be running, but found: $pids"
+}
+
+# ---------------------------------------------------------------- sandbox
+
+free_port() {
+  "$PYTHON" -c 'import socket
+s = socket.socket()
+s.bind(("127.0.0.1", 0))
+print(s.getsockname()[1])'
+}
+
+# A fresh repository skeleton in $T with the scripts under test in it, a
+# leaf already "built", and settings in scripts/dev.env.
+sandbox() {
+  T=$(mktemp -d "${TMPDIR:-/tmp}/leaf-dev-test.XXXXXX")
+  T=$(cd "$T" && pwd -P)
+  SANDBOXES+=("$T")
+  REPO=$T/repo
+  RUN=$REPO/.dev-run
+  STATE=$T/state
+  DATA=$T/data
+  mkdir -p "$REPO/scripts" "$REPO/activity/node_modules" "$REPO/activity/dist" \
+    "$REPO/target/debug" "$T/bin" "$T/sdk/emulator" "$T/sdk/platform-tools" \
+    "$STATE" "$T/home"
+  cp "$SRC/dev-up" "$SRC/dev-down" "$SRC/dev-status" "$SRC/dev-lib.sh" "$REPO/scripts/"
+  echo "<title>leaf</title>" >"$REPO/activity/dist/index.html"
+  cp "$STUBS/leaf" "$REPO/target/debug/leaf"
+  cp "$STUBS/npm" "$STUBS/cargo" "$STUBS/leaf" "$STUBS/cloudflared" "$T/bin/"
+  cp "$STUBS/emulator" "$T/sdk/emulator/emulator"
+  cp "$STUBS/adb" "$T/sdk/platform-tools/adb"
+  ln -s "$PYTHON" "$T/bin/python3"
+  PORT=$(free_port)
+  TUNNEL_PORT=$(free_port)
+  # A name no other run of this file has: an emulator "started by hand" is
+  # looked for by its AVD's name, among every process on the machine.
+  AVD=stub-avd-${T##*.}
+  PUBLIC=http://127.0.0.1:$TUNNEL_PORT
+  LOCAL=http://127.0.0.1:$PORT
+  cat >"$REPO/scripts/dev.env" <<EOF
+LEAF_DEV_PORT=$PORT
+LEAF_DEV_DATA_DIR=$DATA
+EOF
+  # What every run of a script gets, and nothing from the caller's own
+  # environment. The stand-ins come first on PATH.
+  BASE_ENV=(
+    "HOME=$T/home"
+    "LC_ALL=$UTF8_LOCALE"
+    "PATH=$T/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+    "STUB_STATE=$STATE"
+    "STUB_TUNNEL_PORT=$TUNNEL_PORT"
+    "STUB_TUNNEL_ORIGIN=127.0.0.1:$PORT"
+  )
+  EXTRA_ENV=()
+}
+
+# Adds the settings a tunnel needs to the sandbox's dev.env.
+with_tunnel() {
+  printf 'tunnel: stub-tunnel\ningress:\n  - hostname: leaf-local.example.com\n    service: http://localhost:%s\n  - service: http_status:404\n' \
+    "$PORT" >"$T/tunnel.yml"
+  cat >>"$REPO/scripts/dev.env" <<EOF
+LEAF_DEV_TUNNEL_CONFIG=$T/tunnel.yml
+LEAF_DEV_TUNNEL_NAME=stub-tunnel
+LEAF_DEV_PUBLIC_URL=$PUBLIC
+LEAF_DEV_CLOUDFLARED=$T/bin/cloudflared
+EOF
+}
+
+with_emulator() {
+  cat >>"$REPO/scripts/dev.env" <<EOF
+LEAF_DEV_AVD=$AVD
+ANDROID_HOME=$T/sdk
+EOF
+}
+
+# Runs one of the scripts in the sandbox. Sets OUT (stdout and stderr) and RC.
+script() {
+  local name=$1
+  shift
+  if [ -n "${TEST_BASH:-}" ]; then
+    OUT=$(env -i "${BASE_ENV[@]}" ${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"} \
+      "$TEST_BASH" "$REPO/scripts/$name" "$@" 2>&1)
+  else
+    OUT=$(env -i "${BASE_ENV[@]}" ${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"} \
+      "$REPO/scripts/$name" "$@" 2>&1)
+  fi
+  RC=$?
+  if [ -n "${TEST_SHOW:-}" ]; then
+    printf '$ scripts/%s %s\n%s\n[exit status %s]\n\n' "$name" "$*" "$OUT" "$RC"
+  fi
+}
+
+up() { script dev-up "$@"; }
+down() { script dev-down "$@"; }
+status() { script dev-status "$@"; }
+
+recorded_pid() { head -n 1 "$RUN/$1.pid" 2>/dev/null; }
+
+# Runs one of the scripts in the background the way a terminal runs a command:
+# in a process group of its own, with SIGINT and SIGHUP not ignored (they are
+# when this file itself was started in the background, or under nohup, and a
+# shell cannot give an ignored signal back to what it starts; python can).
+# Sets BG to its pid, which is also its process group's id. `finish` waits for
+# it to end and sets OUT and RC as `script` does.
+AS_FROM_A_TERMINAL='import os, signal, sys
+signal.signal(signal.SIGINT, signal.SIG_DFL)
+signal.signal(signal.SIGHUP, signal.SIG_DFL)
+os.execv(sys.argv[1], sys.argv[1:])'
+
+script_bg() {
+  local name=$1
+  shift
+  # The braces: see dev_spawn in dev-lib.sh, which starts things the same way.
+  set -m
+  if [ -n "${TEST_BASH:-}" ]; then
+    { env -i "${BASE_ENV[@]}" ${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"} "$PYTHON" -c "$AS_FROM_A_TERMINAL" \
+      "$TEST_BASH" "$REPO/scripts/$name" "$@" >"$T/bg.out" 2>&1 </dev/null & } 2>/dev/null
+  else
+    { env -i "${BASE_ENV[@]}" ${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"} "$PYTHON" -c "$AS_FROM_A_TERMINAL" \
+      "$REPO/scripts/$name" "$@" >"$T/bg.out" 2>&1 </dev/null & } 2>/dev/null
+  fi
+  BG=$!
+  set +m
+  BG_NAME="$name $*"
+}
+
+gone() { ! alive "$1"; }
+
+finish() {
+  # It ends by itself; a script that never would is ended here, and that is
+  # a failure.
+  if ! wait_until gone "$BG"; then
+    kill -KILL "$BG" 2>/dev/null
+  fi
+  wait "$BG"
+  RC=$?
+  OUT=$(cat "$T/bg.out")
+  if [ -n "${TEST_SHOW:-}" ]; then
+    printf '$ scripts/%s &\n%s\n[exit status %s]\n\n' "$BG_NAME" "$OUT" "$RC"
+  fi
+}
+
+# What Ctrl-C does: SIGINT to every process in the foreground process group.
+ctrl_c() { kill -s INT -- "-$1"; }
+
+# Spins until a command succeeds. Neither a sleep nor the clock decides the
+# result: the limit only ends a run in which it never would.
+wait_until() {
+  local limit=$((SECONDS + 60))
+  until "$@"; do
+    if [ "$SECONDS" -ge "$limit" ]; then
+      fail "gave up waiting for: $*"
+      return 1
+    fi
+  done
+}
+
+# Whether NAME.info in the runtime directory has a line for KEY, and whether
+# NAME.log has a line containing TEXT.
+info_has() { grep -q "^$2=" "$RUN/$1.info" 2>/dev/null; }
+log_has() { grep -qF -- "$2" "$RUN/$1.log" 2>/dev/null; }
+
+# The id of a process's process group.
+pgid_of() { ps -o pgid= -p "$1" 2>/dev/null | tr -d ' '; }
+
+# Starts a stand-in outside dev-up (something "started by hand") and waits
+# until it is ready. Sets BYSTANDER to its pid.
+#   bystander COMMAND [ARG...]   (extra environment in BYSTANDER_ENV)
+bystander() {
+  local fifo=$T/ready.$RANDOM line=
+  mkfifo "$fifo"
+  env -i "${BASE_ENV[@]}" ${BYSTANDER_ENV[@]+"${BYSTANDER_ENV[@]}"} "STUB_READY_FIFO=$fifo" \
+    "$@" >"$T/bystander.log" 2>&1 </dev/null &
+  BYSTANDER=$!
+  disown "$BYSTANDER" 2>/dev/null
+  # Opened for reading and writing so the open itself cannot block. The
+  # time limit is not a wait: it only ends a run whose stand-in never started.
+  exec 3<>"$fifo"
+  IFS= read -r -t 30 line <&3
+  exec 3<&-
+  rm -f "$fifo"
+  [ "$line" = ready ] || fail "the stand-in ($*) did not start: $(cat "$T/bystander.log" 2>/dev/null)"
+}
+
+# Ends a bystander for good; the test is over with it.
+end_bystander() {
+  kill -KILL "$1" 2>/dev/null
+  while alive "$1"; do :; done
+}
+
+# Stops whatever a test left behind, so a failed test does not leak processes.
+sweep() {
+  local dir pid
+  for dir in ${SANDBOXES[@]+"${SANDBOXES[@]}"}; do
+    T=$dir
+    for pid in $(sandbox_pids); do
+      kill -KILL "$pid" 2>/dev/null
+    done
+    case $dir in
+    */leaf-dev-test.??????) rm -rf "$dir" ;;
+    esac
+  done
+  SANDBOXES=()
+}
+trap sweep EXIT
+
+# ---------------------------------------------------------------- tests
+
+test_scripts_parse() {
+  local file shell
+  for shell in /bin/bash "${TEST_BASH:-bash}"; do
+    command -v "$shell" >/dev/null 2>&1 || continue
+    for file in "$SRC/dev-up" "$SRC/dev-down" "$SRC/dev-status" "$SRC/dev-lib.sh" \
+      "$HERE/run" "$STUBS/adb" "$STUBS/npm" "$STUBS/cargo"; do
+      "$shell" -n "$file" 2>/dev/null || fail "$shell -n $file reports a syntax error"
+    done
+  done
+  for file in dev-up dev-down dev-status; do
+    [ -x "$SRC/$file" ] || fail "scripts/$file is not executable"
+  done
+  [ -x "$HERE/run" ] || fail "scripts/tests/run is not executable"
+}
+
+test_setup_mode_up_status_down() {
+  local pid
+  sandbox
+  up --no-build --no-tunnel
+  expect_rc 0
+  expect_line "gallery skip" "--no-build: serving the build in activity/dist"
+  expect_line "binary skip" "--no-build: starting target/debug/leaf"
+  expect_line "leaf ok" "setup mode on $LOCAL (pid "
+  expect_out "setup code: TEST-C0DE"
+  expect_out "open http://localhost:$PORT/setup and enter it"
+  expect_line "tunnel skip" "--no-tunnel"
+  refute_line "emulator"
+  refute_line "gateway"
+  pid=$(recorded_pid leaf)
+  expect_alive "$pid" "leaf"
+  expect_line "leaf ok" "(pid $pid)"
+  # What leaf was started with: loopback only, the data and gallery
+  # directories, plain-text logs, from the repository root.
+  expect_content "$STATE/leaf.env" "BIND_ADDR=127.0.0.1:$PORT"
+  expect_content "$STATE/leaf.env" "DATA_DIR=$DATA"
+  expect_content "$STATE/leaf.env" "STATIC_DIR=$REPO/activity/dist"
+  expect_content "$STATE/leaf.env" "NO_COLOR=1"
+  expect_content "$STATE/leaf.env" "LOG_LEVEL=<unset>"
+  expect_content "$STATE/leaf.env" "DEV_GUILD_ID=<unset>"
+  expect_content "$STATE/leaf.env" "cwd=$REPO"
+  expect_file "$RUN/leaf.log"
+  refute_file "$RUN/lock"
+  # The log holds the setup code, so the directory is this account's only.
+  [ -n "$(find "$RUN" -maxdepth 0 -perm 700)" ] ||
+    fail "expected $RUN to be readable by its owner only: $(ls -ld "$RUN")"
+
+  status
+  expect_rc 0
+  expect_line "leaf running" "setup mode on $LOCAL (pid $pid)"
+  expect_out "log: .dev-run/leaf.log"
+  expect_out "setup code: TEST-C0DE"
+  expect_line "tunnel stopped" "LEAF_DEV_TUNNEL_CONFIG is not set"
+  refute_line "emulator"
+  expect_out "Next: open http://localhost:$PORT/setup, enter the setup code and fill in the form."
+
+  down
+  expect_rc 0
+  expect_line "tunnel ok" "nothing to stop"
+  expect_line "leaf ok" "stopped (pid $pid)"
+  expect_dead "$pid" "leaf"
+  refute_file "$RUN/leaf.pid"
+  refute_file "$RUN/leaf.info"
+  refute_file "$RUN/lock"
+  expect_content "$RUN/leaf.log" "shut down cleanly"
+
+  status
+  expect_rc 1
+  expect_line "leaf stopped" "scripts/dev-up starts it"
+  expect_out "Next: scripts/dev-up"
+  expect_nothing_running
+}
+
+test_up_twice_starts_one_leaf() {
+  local pid
+  sandbox
+  up --no-build --no-tunnel
+  expect_rc 0
+  pid=$(recorded_pid leaf)
+  # A second run must not reach the build either.
+  EXTRA_ENV=(STUB_NPM=fail STUB_CARGO=fail)
+  up
+  expect_rc 0
+  expect_line "leaf ok" "already running: setup mode on $LOCAL (pid $pid)"
+  expect_out "to rebuild and restart it: scripts/dev-down, then scripts/dev-up"
+  expect_out "setup code: TEST-C0DE"
+  refute_line "gallery"
+  refute_file "$STATE/npm.args"
+  [ "$(recorded_pid leaf)" = "$pid" ] || fail "the second run recorded another pid"
+  [ "$(sandbox_pids | wc -l | tr -d ' ')" = 1 ] || fail "expected exactly one process, found: $(sandbox_pids | tr '\n' ' ')"
+
+  down
+  expect_rc 0
+  down
+  expect_rc 0
+  expect_line "leaf ok" "nothing to stop"
+  expect_nothing_running
+}
+
+test_run_mode_reports_the_gateway() {
+  local pid
+  sandbox
+  # Two answers say `starting` before the bot is online.
+  EXTRA_ENV=(STUB_LEAF=run STUB_GATEWAY_STARTING=2)
+  up --no-build --no-tunnel
+  expect_rc 0
+  expect_line "leaf ok" "run mode on $LOCAL (pid "
+  expect_line "gateway ok" "online"
+  refute_out "setup code"
+  pid=$(recorded_pid leaf)
+
+  status
+  expect_rc 0
+  expect_line "leaf running" "run mode on $LOCAL (pid $pid)"
+  expect_line "gateway online"
+  # No tunnel, so the doctor is pointed at this leaf, and at its data dir.
+  # (Quoted for the shell, should the path need it.)
+  expect_out "Next: DATA_DIR=$(printf '%q' "$DATA") cargo run -p leaf -- doctor --url $LOCAL"
+  expect_out "then asks this leaf directly, since no tunnel answers)"
+
+  down
+  expect_rc 0
+  expect_nothing_running
+}
+
+test_a_proxy_in_the_environment_is_not_asked_about_this_machine() {
+  sandbox
+  # A proxy nothing listens on: a request sent through it gets no answer.
+  EXTRA_ENV=(STUB_LEAF=run "http_proxy=http://127.0.0.1:1" "all_proxy=http://127.0.0.1:1")
+  up --no-build --no-tunnel
+  expect_rc 0
+  expect_line "leaf ok" "run mode on $LOCAL (pid "
+  expect_line "gateway ok" "online"
+  status
+  expect_rc 0
+  expect_line "leaf running" "run mode"
+  expect_line "gateway online"
+  down
+  expect_rc 0
+  expect_nothing_running
+}
+
+test_gateway_error_is_a_failure_with_its_reason() {
+  local pid
+  sandbox
+  EXTRA_ENV=(STUB_LEAF=run STUB_GATEWAY=error)
+  up --no-build --no-tunnel
+  expect_rc 1
+  expect_line "leaf ok" "run mode"
+  # The reason, with JSON's escapes undone.
+  expect_line "gateway failed" 'the bot is not connected: Discord refused the bot token ("401 Unauthorized"). Path C:\leaf.'
+  expect_out "notice: Discord has not accepted the command list yet."
+  expect_out "last lines of .dev-run/leaf.log:"
+  expect_out "Not everything is up."
+  # leaf itself is up and stays up.
+  pid=$(recorded_pid leaf)
+  expect_alive "$pid" "leaf"
+
+  status
+  expect_rc 0
+  expect_line "gateway error" 'Discord refused the bot token ("401 Unauthorized")'
+  expect_out "notice: Discord has not accepted the command list yet."
+
+  down
+  expect_nothing_running
+}
+
+test_gateway_still_starting_is_a_failure() {
+  sandbox
+  EXTRA_ENV=(STUB_LEAF=run STUB_GATEWAY=starting LEAF_DEV_WAIT_GATEWAY=1)
+  up --no-build --no-tunnel
+  expect_rc 1
+  expect_line "gateway failed" "still connecting to Discord after 1s"
+  status
+  expect_line "gateway starting"
+  down
+  expect_nothing_running
+}
+
+test_setup_code_hidden_by_the_log_level_is_said() {
+  sandbox
+  echo "LOG_LEVEL=warn" >>"$REPO/scripts/dev.env"
+  up --no-build --no-tunnel
+  expect_rc 0
+  expect_content "$STATE/leaf.env" "LOG_LEVEL=warn"
+  expect_line "leaf ok" "setup mode"
+  refute_out "setup code:"
+  expect_out "no setup code in .dev-run/leaf.log. leaf logs it at info level: unset LOG_LEVEL, then run scripts/dev-down and scripts/dev-up."
+  down
+  expect_nothing_running
+}
+
+test_port_held_by_something_else_is_an_error_not_a_kill() {
+  local other
+  sandbox
+  BYSTANDER_ENV=("BIND_ADDR=127.0.0.1:$PORT")
+  bystander "$T/bin/leaf"
+  other=$BYSTANDER
+  # With the build on: the port is checked before anything is built.
+  up --no-tunnel
+  expect_rc 1
+  expect_line "leaf failed" "port $PORT is held by"
+  expect_line "leaf failed" "(pid $other), which dev-up did not start. Stop it yourself, or use another port: scripts/dev-up --port N."
+  refute_file "$STATE/npm.args"
+  refute_file "$STATE/cargo.args"
+  refute_file "$RUN/leaf.pid"
+  refute_line "tunnel"
+  expect_alive "$other" "the process that holds the port"
+
+  status
+  expect_rc 1
+  expect_line "leaf stopped" "dev-up has not started it, but port $PORT is held by"
+  expect_out "(pid $other)"
+  # dev-up would only fail again: the next step is about the port.
+  expect_out "Next: stop the process that holds port $PORT, or start leaf on another: scripts/dev-up --port N"
+  refute_out "Next: scripts/dev-up"
+
+  down
+  expect_rc 0
+  expect_line "leaf ok" "nothing to stop"
+  expect_out "port $PORT is held by"
+  expect_out "(pid $other), which dev-up did not start: left alone"
+  expect_alive "$other" "the process that holds the port"
+
+  end_bystander "$other"
+  expect_nothing_running
+}
+
+test_leaf_that_exits_shows_its_log() {
+  sandbox
+  with_tunnel
+  EXTRA_ENV=(STUB_LEAF=die)
+  up --no-build
+  expect_rc 1
+  expect_line "leaf failed" "leaf exited before it answered on $LOCAL"
+  expect_out "last lines of .dev-run/leaf.log:"
+  expect_out "| Caused by: Address already in use (os error 48)"
+  refute_file "$RUN/leaf.pid"
+  refute_file "$RUN/leaf.info"
+  # Nothing is started behind a leaf that is not there.
+  refute_line "tunnel"
+  refute_file "$STATE/cloudflared.args"
+  refute_file "$RUN/lock"
+  expect_nothing_running
+}
+
+test_leaf_that_died_later_is_said_and_started_again() {
+  local first second
+  sandbox
+  up --no-build --no-tunnel
+  expect_rc 0
+  first=$(recorded_pid leaf)
+  # It crashes some time after dev-up has gone.
+  end_bystander "$first"
+
+  status
+  expect_rc 1
+  expect_line "leaf stopped" "it has exited since dev-up started it. scripts/dev-up starts it again."
+  expect_out "log: .dev-run/leaf.log"
+  expect_out "Next: scripts/dev-up"
+
+  up --no-build --no-tunnel
+  expect_rc 0
+  expect_line "leaf ok" "setup mode on $LOCAL (pid "
+  refute_out "already running"
+  second=$(recorded_pid leaf)
+  [ "$second" != "$first" ] || fail "the pid of the leaf that died is still recorded"
+  expect_alive "$second" "the new leaf"
+  # The log of the run that died is kept beside the new one.
+  expect_file "$RUN/leaf.log.1"
+  down
+  expect_rc 0
+  expect_nothing_running
+}
+
+test_leaf_that_never_answers_is_stopped() {
+  sandbox
+  EXTRA_ENV=(STUB_LEAF=hang LEAF_DEV_WAIT_LEAF=1)
+  up --no-build --no-tunnel
+  expect_rc 1
+  expect_line "leaf failed" "leaf did not answer on $LOCAL within 1s, so it was stopped"
+  expect_log_tail_shown leaf
+  refute_file "$RUN/leaf.pid"
+  expect_nothing_running
+}
+
+test_port_flag_and_environment_override_the_file() {
+  local second third pid
+  sandbox
+  second=$(free_port)
+  third=$(free_port)
+  up --no-build --no-tunnel --port "$second"
+  expect_rc 0
+  expect_line "leaf ok" "setup mode on http://127.0.0.1:$second"
+  expect_content "$STATE/leaf.env" "BIND_ADDR=127.0.0.1:$second"
+  pid=$(recorded_pid leaf)
+
+  # dev-status and dev-down find it without being told the port.
+  status
+  expect_rc 0
+  expect_line "leaf running" "setup mode on http://127.0.0.1:$second (pid $pid)"
+  expect_out "Next: open http://localhost:$second/setup"
+
+  # Asking for another port while it runs is said, not acted on.
+  up --no-build --no-tunnel
+  expect_rc 1
+  expect_line "leaf failed" "leaf is already running on port $second (pid $pid), not $PORT. Run scripts/dev-down first to move it."
+  expect_alive "$pid" "leaf"
+
+  down
+  expect_rc 0
+  expect_dead "$pid" "leaf"
+
+  # The environment beats dev.env; --port beats both.
+  EXTRA_ENV=("LEAF_DEV_PORT=$third")
+  up --no-build --no-tunnel
+  expect_rc 0
+  expect_content "$STATE/leaf.env" "BIND_ADDR=127.0.0.1:$third"
+  down
+  up --no-build --no-tunnel "--port=$second"
+  expect_rc 0
+  expect_content "$STATE/leaf.env" "BIND_ADDR=127.0.0.1:$second"
+  down
+  # Leading zeros are dropped: leaf gets the number.
+  up --no-build --no-tunnel --port "00$second"
+  expect_rc 0
+  expect_line "leaf ok" "setup mode on http://127.0.0.1:$second (pid "
+  expect_content "$STATE/leaf.env" "BIND_ADDR=127.0.0.1:$second"
+  down
+  expect_nothing_running
+}
+
+test_bad_command_lines() {
+  sandbox
+  up --port
+  expect_rc 2
+  expect_out "--port needs a port number."
+  # An empty one is a missing one, not a reason to use the default.
+  up --no-build --no-tunnel --port ""
+  expect_rc 2
+  expect_out "--port needs a port number."
+  up --no-build --no-tunnel --port=
+  expect_rc 2
+  expect_out "--port needs a port number."
+  up --port http
+  expect_rc 2
+  expect_out "the port must be a number from 1 to 65535, not “http”."
+  up --port 70000
+  expect_rc 2
+  expect_out "the port must be a number from 1 to 65535, not “70000”."
+  up --port 0
+  expect_rc 2
+  expect_out "not “0”."
+  # Too long for the shell to compare as a number: still a sentence.
+  up --port 99999999999999999999
+  expect_rc 2
+  expect_out "the port must be a number from 1 to 65535, not “99999999999999999999”."
+  refute_out "integer expression"
+  up --frobnicate
+  expect_rc 2
+  expect_out "“--frobnicate” is not an option."
+  expect_out "Usage: scripts/dev-up"
+  down --frobnicate
+  expect_rc 2
+  expect_out "Usage: scripts/dev-down"
+  # A wait too long for the shell to count with is refused, not computed.
+  EXTRA_ENV=(LEAF_DEV_WAIT_STOP=99999999999999999999)
+  down
+  expect_rc 2
+  expect_out "LEAF_DEV_WAIT_STOP must be a whole number of seconds (at most 999999), not “99999999999999999999”."
+  EXTRA_ENV=()
+  status --frobnicate
+  expect_rc 2
+  up --help
+  expect_rc 0
+  expect_out "Usage: scripts/dev-up [--emulator] [--no-tunnel] [--no-build] [--port N]"
+  down --help
+  expect_rc 0
+  status --help
+  expect_rc 0
+  refute_file "$RUN/leaf.pid"
+  expect_nothing_running
+}
+
+test_settings_file_is_read_as_data() {
+  sandbox
+  mkdir -p "$T/home/leaf-data"
+  cat >"$REPO/scripts/dev.env" <<EOF
+# a comment, then a blank line
+
+LEAF_DEV_PORT=$PORT   # a trailing comment
+export LEAF_DEV_DATA_DIR="~/leaf-data"   # quoted, then a comment
+  LOG_LEVEL='debug'   # the same with single quotes
+DEV_GUILD_ID=900000000000000001
+DISCORD_TOKEN=hunter2-value-sentinel
+garbage-line-sentinel
+aGVsbG8gd29ybGQgc2VudGluZWw=
+LEAF_DEV_WAIT_LEAF=\$(touch $T/was-executed)
+EOF
+  up --no-build --no-tunnel
+  # The last line is not a number of seconds: said, and nothing was run.
+  expect_rc 2
+  expect_out "LEAF_DEV_WAIT_LEAF must be a whole number of seconds"
+  refute_file "$T/was-executed"
+
+  # A number with a leading zero is that number, not an octal one.
+  sed -i.bak '$d' "$REPO/scripts/dev.env"
+  echo "LEAF_DEV_WAIT_LEAF=08" >>"$REPO/scripts/dev.env"
+  up --no-build --no-tunnel
+  expect_rc 0
+  refute_out "value too great"
+  expect_content "$STATE/leaf.env" "BIND_ADDR=127.0.0.1:$PORT"
+  expect_content "$STATE/leaf.env" "DATA_DIR=$T/home/leaf-data"
+  expect_content "$STATE/leaf.env" "LOG_LEVEL=debug"
+  expect_content "$STATE/leaf.env" "DEV_GUILD_ID=900000000000000001"
+  # A name these scripts do not read is named; its value never is, and a line
+  # that is not a setting is only counted.
+  expect_out "line 7 sets DISCORD_TOKEN, which these scripts do not read; ignored"
+  expect_out "line 8 is not NAME=value; ignored"
+  expect_out "line 9 is not NAME=value; ignored"
+  refute_out "hunter2-value-sentinel"
+  refute_out "garbage-line-sentinel"
+  refute_out "aGVsbG8gd29ybGQgc2VudGluZWw"
+
+  status
+  expect_rc 0
+  # The doctor needs the same two settings leaf got.
+  expect_out "open http://localhost:$PORT/setup"
+  down
+  expect_nothing_running
+}
+
+test_doctor_command_carries_the_settings() {
+  sandbox
+  with_tunnel
+  echo "DEV_GUILD_ID=900000000000000001" >>"$REPO/scripts/dev.env"
+  EXTRA_ENV=(STUB_LEAF=run)
+  up --no-build
+  expect_rc 0
+  status
+  expect_rc 0
+  # The tunnel answers, so the doctor asks the public URL in leaf.conf.
+  expect_out "Next: DATA_DIR=$(printf '%q' "$DATA") DEV_GUILD_ID=900000000000000001 cargo run -p leaf -- doctor --url"
+  refute_out "doctor --url http"
+  expect_out "then asks the Public URL, the way Discord reaches it)"
+  down
+  # With the default data directory there is nothing to add.
+  sed -i.bak '/LEAF_DEV_DATA_DIR/d;/DEV_GUILD_ID/d' "$REPO/scripts/dev.env"
+  up --no-build
+  expect_rc 0
+  expect_content "$STATE/leaf.env" "DATA_DIR=$REPO/data"
+  status
+  expect_out "Next: cargo run -p leaf -- doctor --url"
+  down
+  expect_nothing_running
+}
+
+test_build_runs_before_leaf_starts() {
+  sandbox
+  rm -rf "$REPO/target" "$REPO/activity/dist"
+  up --no-tunnel
+  expect_rc 0
+  expect_line "gallery ok" "built into activity/dist"
+  expect_line "binary ok" "built target/debug/leaf"
+  expect_line "leaf ok" "setup mode"
+  expect_content "$STATE/npm.args" "--prefix $REPO/activity run build"
+  expect_content "$STATE/cargo.args" "build -p leaf"
+  expect_content "$STATE/cargo.cwd" "$REPO"
+  expect_file "$RUN/build-gallery.log"
+  expect_file "$RUN/build-leaf.log"
+  down
+  expect_nothing_running
+}
+
+test_build_follows_cargo_target_dir() {
+  sandbox
+  rm -rf "$REPO/target"
+  EXTRA_ENV=("CARGO_TARGET_DIR=$T/elsewhere")
+  up --no-tunnel
+  expect_rc 0
+  expect_line "binary ok" "built $T/elsewhere/debug/leaf"
+  expect_file "$T/elsewhere/debug/leaf"
+  refute_file "$REPO/target"
+  down
+  expect_nothing_running
+}
+
+test_failed_gallery_build_stops_before_leaf() {
+  sandbox
+  EXTRA_ENV=(STUB_NPM=fail)
+  up --no-tunnel
+  expect_rc 1
+  expect_line "gallery failed" "npm --prefix activity run build failed"
+  expect_out "last lines of .dev-run/build-gallery.log:"
+  expect_out "| error during build: stand-in npm was told to fail"
+  refute_file "$STATE/cargo.args"
+  refute_line "leaf"
+  refute_file "$RUN/leaf.pid"
+  expect_nothing_running
+}
+
+test_failed_binary_build_stops_before_leaf() {
+  sandbox
+  EXTRA_ENV=(STUB_CARGO=fail)
+  up --no-tunnel
+  expect_rc 1
+  expect_line "gallery ok"
+  expect_line "binary failed" "cargo build -p leaf failed"
+  expect_out "last lines of .dev-run/build-leaf.log:"
+  expect_out "| error[E0308]: mismatched types (stand-in cargo was told to fail)"
+  refute_line "leaf"
+  refute_file "$RUN/leaf.pid"
+  expect_nothing_running
+}
+
+test_no_build_needs_something_built() {
+  sandbox
+  rm -rf "$REPO/target"
+  up --no-build --no-tunnel
+  expect_rc 1
+  expect_line "binary failed" "leaf is not built (no target/debug/leaf). Run scripts/dev-up without --no-build."
+  rm -rf "$REPO/activity/dist"
+  up --no-build --no-tunnel
+  expect_rc 1
+  expect_line "gallery failed" "the gallery is not built (no activity/dist/index.html). Run scripts/dev-up without --no-build."
+  refute_file "$RUN/leaf.pid"
+
+  rm -rf "$REPO/activity/node_modules"
+  up --no-tunnel
+  expect_rc 1
+  expect_line "gallery failed" "the gallery's packages are not installed. Run: npm --prefix activity install"
+  refute_file "$STATE/npm.args"
+  expect_nothing_running
+}
+
+test_tunnel_waits_for_the_public_url() {
+  local leaf tunnel
+  sandbox
+  with_tunnel
+  # The first three questions get Cloudflare's "no connection" answer.
+  EXTRA_ENV=(STUB_TUNNEL_COLD=3)
+  up --no-build
+  expect_rc 0
+  expect_line "leaf ok" "setup mode"
+  # leaf is in setup mode, so the address asked is /setup.
+  expect_line "tunnel ok" "$PUBLIC/setup answers (pid "
+  refute_out "does not mention port"
+  expect_content "$STATE/cloudflared.args" "tunnel --config $T/tunnel.yml run stub-tunnel"
+  leaf=$(recorded_pid leaf)
+  tunnel=$(recorded_pid tunnel)
+  expect_alive "$tunnel" "the tunnel"
+  expect_file "$RUN/tunnel.log"
+
+  up --no-build
+  expect_rc 0
+  expect_line "tunnel ok" "already running: $PUBLIC/setup answers (pid $tunnel)"
+  [ "$(recorded_pid tunnel)" = "$tunnel" ] || fail "the second run recorded another tunnel pid"
+  [ "$(sandbox_pids | wc -l | tr -d ' ')" = 2 ] || fail "expected two processes, found: $(sandbox_pids | tr '\n' ' ')"
+
+  status
+  expect_rc 0
+  expect_line "tunnel running" "$PUBLIC/setup answers (pid $tunnel)"
+  expect_out "log: .dev-run/tunnel.log"
+
+  # --no-tunnel later leaves the running tunnel alone.
+  up --no-build --no-tunnel
+  expect_rc 0
+  expect_line "tunnel skip" "--no-tunnel"
+  expect_alive "$tunnel" "the tunnel"
+
+  down
+  expect_rc 0
+  expect_line "tunnel ok" "stopped (pid $tunnel)"
+  expect_line "leaf ok" "stopped (pid $leaf)"
+  case $OUT in
+  tunnel*leaf*) ;;
+  *) fail "expected the tunnel to be stopped before leaf" ;;
+  esac
+  expect_dead "$tunnel" "the tunnel"
+  expect_dead "$leaf" "leaf"
+  refute_file "$RUN/tunnel.pid"
+  expect_nothing_running
+}
+
+test_tunnel_in_run_mode_asks_healthz() {
+  sandbox
+  with_tunnel
+  # No tunnel name: cloudflared takes it from the config.
+  sed -i.bak '/LEAF_DEV_TUNNEL_NAME/d' "$REPO/scripts/dev.env"
+  # A config that sends the hostname to some other port.
+  sed -i.bak "s/localhost:$PORT/localhost:1/" "$T/tunnel.yml"
+  EXTRA_ENV=(STUB_LEAF=run)
+  up --no-build
+  expect_rc 0
+  expect_line "tunnel ok" "$PUBLIC/healthz answers (pid "
+  expect_out "note: $T/tunnel.yml does not mention port $PORT, so $PUBLIC may not reach this leaf"
+  expect_content "$STATE/cloudflared.args" "tunnel --config $T/tunnel.yml run"
+  [ "$(cat "$STATE/cloudflared.args")" = "tunnel --config $T/tunnel.yml run" ] ||
+    fail "expected no tunnel name in: $(cat "$STATE/cloudflared.args")"
+  status
+  expect_line "tunnel running" "$PUBLIC/healthz answers"
+  down
+  expect_nothing_running
+}
+
+test_tunnel_that_never_answers_is_stopped() {
+  local leaf
+  sandbox
+  with_tunnel
+  EXTRA_ENV=(STUB_TUNNEL=never LEAF_DEV_WAIT_TUNNEL=1)
+  up --no-build
+  expect_rc 1
+  expect_line "leaf ok"
+  expect_line "tunnel failed" "$PUBLIC/setup did not answer within 1s, so the tunnel was stopped"
+  expect_log_tail_shown tunnel
+  refute_file "$RUN/tunnel.pid"
+  refute_file "$RUN/tunnel.info"
+  # leaf answered, so it stays; only the tunnel is gone.
+  leaf=$(recorded_pid leaf)
+  expect_alive "$leaf" "leaf"
+  [ "$(sandbox_pids | tr '\n' ' ')" = "$leaf " ] || fail "expected only leaf (pid $leaf) to be running, found: $(sandbox_pids | tr '\n' ' ')"
+  status
+  expect_line "tunnel stopped" "scripts/dev-up starts it"
+  down
+  expect_nothing_running
+}
+
+test_tunnel_that_exits_shows_its_log() {
+  sandbox
+  with_tunnel
+  EXTRA_ENV=(STUB_TUNNEL=die)
+  up --no-build
+  expect_rc 1
+  expect_line "tunnel failed" "cloudflared exited before $PUBLIC/setup answered"
+  expect_out "| 2026-10-03T12:00:00Z ERR Tunnel credentials file not found"
+  refute_file "$RUN/tunnel.pid"
+  expect_alive "$(recorded_pid leaf)" "leaf"
+  down
+  expect_nothing_running
+}
+
+test_tunnel_settings_that_cannot_work() {
+  sandbox
+  with_tunnel
+  up --no-build --no-tunnel
+  expect_rc 0
+  expect_line "tunnel skip" "--no-tunnel"
+  refute_file "$STATE/cloudflared.args"
+
+  sed -i.bak '/LEAF_DEV_PUBLIC_URL/d' "$REPO/scripts/dev.env"
+  up --no-build
+  expect_rc 1
+  expect_line "tunnel failed" "LEAF_DEV_PUBLIC_URL is not set"
+
+  echo "LEAF_DEV_PUBLIC_URL=$PUBLIC/" >>"$REPO/scripts/dev.env"
+  EXTRA_ENV=("LEAF_DEV_CLOUDFLARED=$T/bin/no-such-cloudflared")
+  up --no-build
+  expect_rc 1
+  expect_line "tunnel failed" "cloudflared was not found on PATH"
+
+  EXTRA_ENV=("LEAF_DEV_TUNNEL_CONFIG=$T/missing.yml")
+  up --no-build
+  expect_rc 1
+  expect_line "tunnel failed" "there is no tunnel config at $T/missing.yml"
+
+  refute_file "$STATE/cloudflared.args"
+  refute_file "$RUN/tunnel.pid"
+  # A trailing slash on the public URL is not doubled.
+  EXTRA_ENV=()
+  up --no-build
+  expect_rc 0
+  expect_line "tunnel ok" "$PUBLIC/setup answers"
+  down
+  expect_nothing_running
+}
+
+test_tunnel_started_by_hand_is_used_and_left() {
+  local other
+  sandbox
+  with_tunnel
+  BYSTANDER_ENV=()
+  bystander "$T/bin/cloudflared" tunnel --config "$T/tunnel.yml" run stub-tunnel
+  other=$BYSTANDER
+  rm -f "$STATE/cloudflared.args"
+  up --no-build
+  expect_rc 0
+  expect_line "tunnel ok" "$PUBLIC/setup answers through a cloudflared that dev-up did not start (pid $other); dev-down will leave it running"
+  refute_file "$RUN/tunnel.pid"
+  refute_file "$STATE/cloudflared.args"
+
+  status
+  expect_line "tunnel running" "$PUBLIC/setup answers, through a cloudflared that dev-up did not start (pid $other)"
+
+  down
+  expect_rc 0
+  expect_line "tunnel ok" "nothing to stop"
+  expect_out "a cloudflared that dev-up did not start runs this tunnel (pid $other): left alone"
+  expect_alive "$other" "the cloudflared started by hand"
+
+  # With no leaf of dev-up's, the address is not asked and nothing is claimed.
+  status
+  expect_rc 1
+  expect_line "tunnel running" "pid $other, through a cloudflared that dev-up did not start. $PUBLIC is not checked while the leaf dev-up starts is not answering."
+  end_bystander "$other"
+  expect_nothing_running
+}
+
+test_emulator_waits_for_boot() {
+  local leaf emulator
+  sandbox
+  with_emulator
+  echo 'LEAF_DEV_EMULATOR_ARGS=-no-snapshot-load -no-boot-anim' >>"$REPO/scripts/dev.env"
+  # Android says it has booted the third time it is asked.
+  EXTRA_ENV=(STUB_BOOT_AFTER=3)
+  up --no-build --no-tunnel --emulator
+  expect_rc 0
+  # emulator-5552, another AVD that is already booted, is not mistaken for it.
+  expect_line "emulator ok" "$AVD is booted on emulator-5554 (pid "
+  expect_content "$STATE/emulator.args" "-avd $AVD -no-snapshot-load -no-boot-anim"
+  expect_content "$STATE/emulator.env" "ANDROID_HOME=$T/sdk"
+  expect_content "$STATE/adb.boot-polls" "3"
+  leaf=$(recorded_pid leaf)
+  emulator=$(recorded_pid emulator)
+  expect_alive "$emulator" "the emulator"
+
+  up --no-build --no-tunnel --emulator
+  expect_rc 0
+  expect_line "emulator ok" "already running: $AVD is booted on emulator-5554 (pid $emulator)"
+
+  # Not asked for: not mentioned, not touched.
+  up --no-build --no-tunnel
+  expect_rc 0
+  refute_line "emulator"
+
+  status
+  expect_rc 0
+  expect_line "emulator running" "$AVD is booted on emulator-5554 (pid $emulator)"
+  expect_out "log: .dev-run/emulator.log"
+
+  down
+  expect_rc 0
+  expect_line "leaf ok" "stopped (pid $leaf)"
+  expect_line "emulator skip" "left running (pid $emulator). scripts/dev-down --emulator stops it."
+  expect_alive "$emulator" "the emulator"
+  expect_file "$RUN/emulator.pid"
+
+  down --emulator
+  expect_rc 0
+  expect_line "emulator ok" "stopped (pid $emulator)"
+  expect_dead "$emulator" "the emulator"
+  refute_file "$RUN/emulator.pid"
+  expect_nothing_running
+}
+
+test_emulator_that_never_boots_is_stopped() {
+  sandbox
+  with_emulator
+  EXTRA_ENV=(STUB_BOOT_AFTER=never LEAF_DEV_WAIT_EMULATOR=1)
+  up --no-build --no-tunnel --emulator
+  expect_rc 1
+  expect_line "leaf ok"
+  expect_line "emulator failed" "Android had not finished booting after 1s, so the emulator was stopped. LEAF_DEV_WAIT_EMULATOR sets how long to wait."
+  expect_log_tail_shown emulator
+  refute_file "$RUN/emulator.pid"
+  refute_file "$STATE/emulator.running"
+  expect_alive "$(recorded_pid leaf)" "leaf"
+  down --emulator
+  expect_rc 0
+  expect_line "emulator ok" "nothing to stop"
+  expect_nothing_running
+}
+
+test_emulator_that_exits_shows_its_log() {
+  sandbox
+  with_emulator
+  EXTRA_ENV=(STUB_EMULATOR=die)
+  up --no-build --no-tunnel --emulator
+  expect_rc 1
+  expect_line "emulator failed" "the emulator exited before Android finished booting"
+  expect_out "| PANIC: Cannot find AVD system path. Please define ANDROID_SDK_ROOT"
+  refute_file "$RUN/emulator.pid"
+  down
+  expect_nothing_running
+}
+
+test_emulator_settings_that_cannot_work() {
+  sandbox
+  up --no-build --no-tunnel --emulator
+  expect_rc 1
+  expect_line "emulator failed" "LEAF_DEV_AVD is not set."
+  echo "LEAF_DEV_AVD=$AVD" >>"$REPO/scripts/dev.env"
+  up --no-build --no-tunnel --emulator
+  expect_rc 1
+  expect_line "emulator failed" "the Android SDK's emulator and adb were not found. Set ANDROID_HOME"
+  refute_file "$STATE/emulator.args"
+  refute_file "$RUN/emulator.pid"
+  # ANDROID_SDK_ROOT is the older name for the same directory.
+  EXTRA_ENV=("ANDROID_SDK_ROOT=$T/sdk")
+  up --no-build --no-tunnel --emulator
+  expect_rc 0
+  expect_line "emulator ok" "$AVD is booted on emulator-5554"
+  down --emulator
+  expect_nothing_running
+}
+
+test_emulator_started_by_hand_is_used_and_left() {
+  local other
+  sandbox
+  with_emulator
+  BYSTANDER_ENV=()
+  bystander "$T/sdk/emulator/emulator" -avd "$AVD"
+  other=$BYSTANDER
+  rm -f "$STATE/emulator.args"
+  up --no-build --no-tunnel --emulator
+  expect_rc 0
+  expect_line "emulator ok" "$AVD is booted on emulator-5554, in an emulator that dev-up did not start (pid $other); dev-down will leave it running"
+  refute_file "$RUN/emulator.pid"
+  refute_file "$STATE/emulator.args"
+
+  status
+  expect_line "emulator running" "$AVD is booted on emulator-5554, in an emulator that dev-up did not start (pid $other)"
+
+  down --emulator
+  expect_rc 0
+  expect_line "emulator ok" "nothing to stop"
+  expect_out "an emulator that dev-up did not start runs $AVD (pid $other): left alone"
+  expect_alive "$other" "the emulator started by hand"
+  end_bystander "$other"
+  expect_nothing_running
+}
+
+test_down_never_signals_a_pid_that_is_not_dev_ups() {
+  local leaf other
+  sandbox
+  up --no-build --no-tunnel
+  expect_rc 0
+  leaf=$(recorded_pid leaf)
+  # The pid file now names some other process, as it would if leaf had died
+  # and the system had handed its pid out again.
+  cp "$STUBS/leaf" "$T/bin/bystander"
+  BYSTANDER_ENV=("BIND_ADDR=127.0.0.1:$TUNNEL_PORT")
+  bystander "$T/bin/bystander"
+  other=$BYSTANDER
+  echo "$other" >"$RUN/leaf.pid"
+
+  status
+  expect_rc 1
+  expect_line "leaf stopped"
+
+  down
+  expect_rc 0
+  expect_line "leaf ok" "nothing to stop: pid $other, which dev-up recorded, now belongs to"
+  expect_out "and was left alone"
+  expect_alive "$other" "the process that got the pid"
+  refute_file "$RUN/leaf.pid"
+
+  # The same when the record of what was started is gone.
+  echo "$other" >"$RUN/leaf.pid"
+  down
+  expect_line "leaf ok" "nothing to stop: pid $other"
+  expect_alive "$other" "the process that got the pid"
+
+  # And dev-up does not take it for a running leaf either: it starts none on
+  # a port that the real one (now unrecorded) still holds.
+  echo "$other" >"$RUN/leaf.pid"
+  echo "sig=$T/bin/not-this" >"$RUN/leaf.info"
+  up --no-build --no-tunnel
+  expect_rc 1
+  expect_line "leaf failed" "port $PORT is held by"
+  expect_alive "$other" "the process that got the pid"
+  expect_alive "$leaf" "the unrecorded leaf"
+
+  end_bystander "$other"
+  end_bystander "$leaf"
+  expect_nothing_running
+}
+
+test_stale_pid_file_is_forgotten() {
+  local gone
+  sandbox
+  mkdir -p "$RUN"
+  # A pid that is certainly not running: one that has just been reaped.
+  true &
+  gone=$!
+  wait "$gone"
+  echo "$gone" >"$RUN/leaf.pid"
+  echo "sig=$REPO/target/debug/leaf" >"$RUN/leaf.info"
+  status
+  expect_rc 1
+  expect_line "leaf stopped" "scripts/dev-up starts it"
+  down
+  expect_rc 0
+  expect_line "leaf ok" "nothing to stop: it had already exited"
+  refute_file "$RUN/leaf.pid"
+
+  echo "$gone" >"$RUN/leaf.pid"
+  echo "not-a-pid" >"$RUN/tunnel.pid"
+  up --no-build --no-tunnel
+  expect_rc 0
+  expect_line "leaf ok" "setup mode"
+  [ "$(recorded_pid leaf)" != "$gone" ] || fail "the stale pid is still recorded"
+  down
+  expect_rc 0
+  refute_file "$RUN/tunnel.pid"
+  expect_nothing_running
+}
+
+test_down_kills_what_ignores_sigterm() {
+  local leaf
+  sandbox
+  EXTRA_ENV=(STUB_IGNORE_TERM=leaf LEAF_DEV_WAIT_STOP=1)
+  up --no-build --no-tunnel
+  expect_rc 0
+  leaf=$(recorded_pid leaf)
+  down
+  expect_rc 0
+  expect_line "leaf ok" "stopped (pid $leaf). It did not stop when asked, so after 1s it was killed."
+  expect_dead "$leaf" "leaf"
+  refute_file "$RUN/leaf.pid"
+  expect_nothing_running
+}
+
+test_one_run_at_a_time() {
+  local other gone
+  sandbox
+  mkdir -p "$RUN/lock"
+  cp "$STUBS/leaf" "$T/bin/bystander"
+  BYSTANDER_ENV=("BIND_ADDR=127.0.0.1:$TUNNEL_PORT")
+  bystander "$T/bin/bystander"
+  other=$BYSTANDER
+  echo "$other" >"$RUN/lock/pid"
+  up --no-build --no-tunnel
+  expect_rc 1
+  expect_out "another dev-up or dev-down is running (pid $other)"
+  refute_file "$RUN/leaf.pid"
+  down
+  expect_rc 1
+  expect_out "another dev-up or dev-down is running (pid $other)"
+  # The other run's lock is not taken away by the refusal.
+  expect_content "$RUN/lock/pid" "$other"
+  end_bystander "$other"
+
+  # A lock left by a run that was killed does not block the next one.
+  true &
+  gone=$!
+  wait "$gone"
+  echo "$gone" >"$RUN/lock/pid"
+  up --no-build --no-tunnel
+  expect_rc 0
+  refute_file "$RUN/lock"
+  down
+  expect_rc 0
+  refute_file "$RUN/lock"
+  expect_nothing_running
+}
+
+test_runtime_dir_is_never_the_data_dir() {
+  sandbox
+  EXTRA_ENV=("LEAF_DEV_RUN_DIR=$DATA")
+  up --no-build --no-tunnel
+  expect_rc 2
+  expect_out "the runtime directory ($DATA) must not be the data directory or inside it"
+  EXTRA_ENV=("LEAF_DEV_RUN_DIR=$DATA/run")
+  up --no-build --no-tunnel
+  expect_rc 2
+  refute_file "$DATA/run"
+  # Another spelling of the data directory is still the data directory:
+  # through `.` and `..`, before the directory exists and after.
+  EXTRA_ENV=("LEAF_DEV_RUN_DIR=$T/./data")
+  up --no-build --no-tunnel
+  expect_rc 2
+  expect_out "must not be the data directory or inside it"
+  EXTRA_ENV=("LEAF_DEV_RUN_DIR=$DATA/logs/../run")
+  up --no-build --no-tunnel
+  expect_rc 2
+  mkdir -p "$DATA"
+  EXTRA_ENV=("LEAF_DEV_RUN_DIR=$T/home/../data")
+  up --no-build --no-tunnel
+  expect_rc 2
+  expect_out "must not be the data directory or inside it"
+  # Relative to the repository root, as dev.env's examples are written.
+  EXTRA_ENV=(LEAF_DEV_DATA_DIR=data LEAF_DEV_RUN_DIR=./data)
+  up --no-build --no-tunnel
+  expect_rc 2
+  expect_out "the runtime directory ($REPO/./data) must not be the data directory or inside it"
+  refute_file "$REPO/data"
+  # Through a symlink to it.
+  ln -s "$DATA" "$T/link"
+  EXTRA_ENV=("LEAF_DEV_RUN_DIR=$T/link")
+  up --no-build --no-tunnel
+  expect_rc 2
+  expect_out "must not be the data directory or inside it"
+  EXTRA_ENV=("LEAF_DEV_RUN_DIR=$T/link/run")
+  status
+  expect_rc 2
+  down
+  expect_rc 2
+  # And where the file system ignores case (macOS by default), in another case.
+  if [ -d "$T/DATA" ]; then
+    EXTRA_ENV=("LEAF_DEV_RUN_DIR=$T/DATA/run")
+    up --no-build --no-tunnel
+    expect_rc 2
+    expect_out "must not be the data directory or inside it"
+  fi
+  # None of those runs wrote anything into the data directory.
+  [ -z "$(ls -A "$DATA")" ] || fail "expected $DATA to be empty, but it holds: $(ls -A "$DATA")"
+  # Somewhere else is fine, and is where everything goes.
+  EXTRA_ENV=("LEAF_DEV_RUN_DIR=$T/elsewhere")
+  up --no-build --no-tunnel
+  expect_rc 0
+  expect_file "$T/elsewhere/leaf.pid"
+  refute_file "$RUN"
+  status
+  expect_rc 0
+  expect_out "log: $T/elsewhere/leaf.log"
+  down
+  expect_rc 0
+  expect_nothing_running
+}
+
+test_nothing_secret_is_read_or_printed() {
+  local all file pass
+  sandbox
+  with_tunnel
+  with_emulator
+  mkdir -p "$DATA"
+  echo 'discord_token = "conf-value-sentinel"' >"$DATA/leaf.conf"
+  # Twice. With leaf.conf readable, a script that opened it would have its
+  # contents to print or to log, and none may show up anywhere. With it
+  # unreadable, everything must still work: no script needs the file.
+  for pass in readable unreadable; do
+    chmod 600 "$DATA/leaf.conf"
+    [ "$pass" = unreadable ] && chmod 000 "$DATA/leaf.conf"
+    EXTRA_ENV=(STUB_LEAF=run DISCORD_TOKEN=env-value-sentinel R2_SECRET_ACCESS_KEY=env-value-sentinel)
+    up --no-build --emulator
+    expect_rc 0
+    all=$OUT
+    # Again, down the "already running" paths.
+    up --no-build --emulator
+    expect_rc 0
+    all="$all$OUT"
+    status
+    expect_rc 0
+    all="$all$OUT"
+    down --emulator
+    expect_rc 0
+    all="$all$OUT"
+    status
+    expect_rc 1
+    OUT="$all$OUT"
+    refute_out "conf-value-sentinel"
+    refute_out "env-value-sentinel"
+    for file in "$RUN"/*; do
+      [ -f "$file" ] || continue
+      if grep -q -e "conf-value-sentinel" -e "env-value-sentinel" "$file"; then
+        fail "$file holds a value it should never have seen ($pass leaf.conf)"
+      fi
+    done
+  done
+  chmod 600 "$DATA/leaf.conf"
+  # No line of code names the file: the scripts have no reason to.
+  for file in dev-up dev-down dev-status dev-lib.sh; do
+    if grep -v '^[[:space:]]*#' "$SRC/$file" | grep -q 'leaf\.conf'; then
+      fail "scripts/$file mentions leaf.conf outside a comment"
+    fi
+    # Nor does any line list the environment or the shell's variables.
+    if grep -v '^[[:space:]]*#' "$SRC/$file" |
+      grep -Eq '(^|[;&|[:space:]])(printenv|export -p|declare -[px]|env|set)[[:space:]]*($|[|>;])'; then
+      fail "scripts/$file prints the environment"
+    fi
+  done
+  expect_nothing_running
+}
+
+test_example_settings_file_is_complete_and_valid() {
+  local key keys
+  keys=$(sed -n '/^DEV_ENV_KEYS="/,/"$/p' "$SRC/dev-lib.sh" | sed -e 's/^DEV_ENV_KEYS="//' -e 's/"$//')
+  [ -n "$keys" ] || fail "could not read the list of settings from dev-lib.sh"
+  for key in $keys; do
+    grep -Eq "^#? ?$key=" "$SRC/dev.env.example" || fail "dev.env.example does not document $key"
+  done
+  # Used as it is, and with every commented setting switched on, it loads
+  # without a complaint.
+  sandbox
+  # Whatever the example names, this test looks only at its own port, tunnel
+  # and SDK: the environment beats the file.
+  EXTRA_ENV=("LEAF_DEV_PORT=$PORT" "LEAF_DEV_AVD=$AVD" "ANDROID_HOME=$T/sdk"
+    "LEAF_DEV_TUNNEL_CONFIG=$T/tunnel.yml" "LEAF_DEV_PUBLIC_URL=$PUBLIC")
+  cp "$SRC/dev.env.example" "$REPO/scripts/dev.env"
+  status
+  expect_rc 1
+  refute_out "ignored"
+  expect_line "leaf stopped" "scripts/dev-up starts it"
+  sed -e 's/^# \([A-Z_]*=\)/\1/' "$SRC/dev.env.example" >"$REPO/scripts/dev.env"
+  grep -q '^LEAF_DEV_WAIT_STOP=' "$REPO/scripts/dev.env" || fail "the commented settings were not switched on"
+  status
+  expect_rc 1
+  refute_out "ignored"
+  refute_out "must be"
+  expect_line "leaf stopped" "scripts/dev-up starts it"
+  expect_nothing_running
+}
+
+test_runtime_files_are_git_ignored() {
+  local root=$SRC/..
+  if ! git -C "$root" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    printf 'skip  %s (the scripts under test are not in a git checkout)\n' "$TEST_NAME"
+    TEST_OK=skip
+    return 0
+  fi
+  git -C "$root" check-ignore -q scripts/dev.env || fail "scripts/dev.env is not git-ignored"
+  git -C "$root" check-ignore -q .dev-run/leaf.log || fail ".dev-run/ is not git-ignored"
+  git -C "$root" check-ignore -q scripts/dev.env.example && fail "scripts/dev.env.example is git-ignored"
+  git -C "$root" check-ignore -q scripts/dev-up && fail "scripts/dev-up is git-ignored"
+  # Nor do they go into an image build: the Dockerfile copies the whole tree.
+  grep -qx 'scripts/dev\.env' "$root/.dockerignore" || fail "scripts/dev.env is not in .dockerignore"
+  grep -qx '\.dev-run/' "$root/.dockerignore" || fail ".dev-run/ is not in .dockerignore"
+}
+
+test_what_dev_up_starts_is_detached_from_the_terminal() {
+  local leaf tunnel
+  sandbox
+  with_tunnel
+  # As from a terminal, where SIGHUP is not ignored to begin with.
+  script_bg dev-up --no-build
+  finish
+  expect_rc 0
+  expect_line "tunnel ok"
+  leaf=$(recorded_pid leaf)
+  tunnel=$(recorded_pid tunnel)
+  # Each leads a process group of its own, so the SIGINT that Ctrl-C sends to
+  # the terminal's group (dev-up's now, the shell's later) does not reach it.
+  [ "$(pgid_of "$leaf")" = "$leaf" ] ||
+    fail "expected leaf (pid $leaf) to lead its own process group, but its group is $(pgid_of "$leaf")"
+  [ "$(pgid_of "$tunnel")" = "$tunnel" ] ||
+    fail "expected the tunnel (pid $tunnel) to lead its own process group, but its group is $(pgid_of "$tunnel")"
+  [ "$(pgid_of "$leaf")" != "$BG" ] || fail "leaf is in dev-up's process group"
+  # And it ignores SIGHUP, so closing the terminal does not end it.
+  expect_content "$STATE/leaf.env" "SIGHUP=ignored"
+  down
+  expect_rc 0
+  expect_nothing_running
+}
+
+test_ctrl_c_during_up_frees_the_lock_and_keeps_what_started() {
+  local leaf
+  sandbox
+  # This leaf starts and never answers, so dev-up is waiting for it when
+  # Ctrl-C arrives. The wait is long enough never to end on its own.
+  EXTRA_ENV=(STUB_LEAF=hang LEAF_DEV_WAIT_LEAF=3600)
+  script_bg dev-up --no-build --no-tunnel
+  # The last thing dev-up records about leaf before it starts waiting, and
+  # the line the stand-in logs once it is up and would act on a SIGINT.
+  if ! wait_until info_has leaf data || ! wait_until log_has leaf "stub: never listening"; then
+    kill -KILL "$BG" 2>/dev/null
+    return 0
+  fi
+  leaf=$(recorded_pid leaf)
+  ctrl_c "$BG"
+  finish
+  expect_rc 130
+  expect_out "interrupted. What had started is still running: scripts/dev-status shows it, scripts/dev-down stops it."
+  refute_out "Up."
+  refute_file "$RUN/lock"
+  # Ctrl-C was for dev-up. leaf is still there, and still on record.
+  expect_alive "$leaf" "leaf"
+  [ "$(recorded_pid leaf)" = "$leaf" ] || fail "leaf (pid $leaf) is no longer recorded"
+  expect_content "$RUN/leaf.info" "sig=$REPO/target/debug/leaf"
+
+  # So the next dev-down finds it and stops it.
+  EXTRA_ENV=()
+  down
+  expect_rc 0
+  expect_line "leaf ok" "stopped (pid $leaf)"
+  expect_nothing_running
+}
+
+test_ctrl_c_during_down_frees_the_lock() {
+  local leaf
+  sandbox
+  EXTRA_ENV=(STUB_IGNORE_TERM=leaf LEAF_DEV_WAIT_STOP=3600)
+  up --no-build --no-tunnel
+  expect_rc 0
+  leaf=$(recorded_pid leaf)
+  script_bg dev-down
+  # dev-down has asked leaf to stop and is waiting for it to go.
+  if ! wait_until log_has leaf "stub: SIGTERM ignored"; then
+    kill -KILL "$BG" 2>/dev/null
+    return 0
+  fi
+  ctrl_c "$BG"
+  finish
+  expect_rc 130
+  expect_out "interrupted. scripts/dev-status shows what is still running."
+  refute_file "$RUN/lock"
+  expect_alive "$leaf" "leaf"
+  [ "$(recorded_pid leaf)" = "$leaf" ] || fail "leaf (pid $leaf) is no longer recorded"
+
+  EXTRA_ENV=(LEAF_DEV_WAIT_STOP=1)
+  down
+  expect_rc 0
+  expect_line "leaf ok" "stopped (pid $leaf). It did not stop when asked, so after 1s it was killed."
+  expect_nothing_running
+}
+
+test_down_looks_again_before_it_kills() {
+  local leaf
+  sandbox
+  cp "$STUBS/leaf" "$T/bin/bystander"
+  # Asked to stop, this leaf turns into another program under the same pid:
+  # what it looks like when a process exits during the wait and the system
+  # hands its pid to something else.
+  EXTRA_ENV=("STUB_TERM_EXEC=$T/bin/bystander" LEAF_DEV_WAIT_STOP=1)
+  up --no-build --no-tunnel
+  expect_rc 0
+  leaf=$(recorded_pid leaf)
+  down
+  expect_rc 0
+  expect_line "leaf ok" "asked to stop (pid $leaf). After 1s that pid belongs to"
+  expect_out "which was left alone."
+  refute_out "it was killed"
+  expect_alive "$leaf" "the process that has the pid now"
+  refute_file "$RUN/leaf.pid"
+  end_bystander "$leaf"
+  expect_nothing_running
+}
+
+test_leaf_that_stops_answering_is_reported_and_left_running() {
+  local leaf
+  sandbox
+  with_tunnel
+  up --no-build --no-tunnel
+  expect_rc 0
+  leaf=$(recorded_pid leaf)
+  # From here on the stand-in answers every request with 503.
+  : >"$STATE/leaf.deaf"
+  EXTRA_ENV=(LEAF_DEV_WAIT_LEAF=1)
+  up --no-build
+  expect_rc 1
+  expect_line "leaf failed" "running (pid $leaf) but not answering on $LOCAL. scripts/dev-down, then scripts/dev-up, restarts it."
+  expect_out "last lines of .dev-run/leaf.log:"
+  # Reported, not stopped, and nothing is started behind it.
+  expect_alive "$leaf" "leaf"
+  [ "$(recorded_pid leaf)" = "$leaf" ] || fail "leaf (pid $leaf) is no longer recorded"
+  refute_line "tunnel"
+  refute_file "$STATE/cloudflared.args"
+
+  status
+  expect_rc 1
+  expect_line "leaf failed" "running (pid $leaf) but not answering on $LOCAL"
+  expect_out "log: .dev-run/leaf.log"
+  # dev-up alone would say the same again.
+  expect_out "Next: scripts/dev-down, then scripts/dev-up"
+  expect_alive "$leaf" "leaf"
+
+  down
+  expect_rc 0
+  expect_line "leaf ok" "stopped (pid $leaf)"
+  expect_nothing_running
+}
+
+test_tunnel_that_stops_answering_is_reported_and_left_running() {
+  local tunnel
+  sandbox
+  with_tunnel
+  up --no-build
+  expect_rc 0
+  tunnel=$(recorded_pid tunnel)
+  # The tunnel loses its connection: Cloudflare's 530 again.
+  : >"$STATE/tunnel.down"
+  EXTRA_ENV=(LEAF_DEV_WAIT_TUNNEL=1)
+  up --no-build
+  expect_rc 1
+  expect_line "leaf ok" "already running"
+  expect_line "tunnel failed" "running (pid $tunnel), but $PUBLIC/setup does not answer. scripts/dev-down, then scripts/dev-up, restarts it."
+  expect_out "last lines of .dev-run/tunnel.log:"
+  expect_alive "$tunnel" "the tunnel"
+  [ "$(recorded_pid tunnel)" = "$tunnel" ] || fail "the tunnel (pid $tunnel) is no longer recorded"
+
+  status
+  expect_rc 0
+  expect_line "tunnel failed" "running (pid $tunnel), but $PUBLIC/setup does not answer (HTTP 530)"
+  expect_out "log: .dev-run/tunnel.log"
+
+  down
+  expect_rc 0
+  expect_line "tunnel ok" "stopped (pid $tunnel)"
+  expect_nothing_running
+}
+
+test_tunnel_started_by_hand_that_never_answers_is_left_running() {
+  local other
+  sandbox
+  with_tunnel
+  BYSTANDER_ENV=(STUB_TUNNEL=never)
+  bystander "$T/bin/cloudflared" tunnel --config "$T/tunnel.yml" run stub-tunnel
+  other=$BYSTANDER
+  rm -f "$STATE/cloudflared.args"
+  EXTRA_ENV=(LEAF_DEV_WAIT_TUNNEL=1)
+  up --no-build
+  expect_rc 1
+  expect_line "leaf ok"
+  expect_line "tunnel failed" "a cloudflared that dev-up did not start (pid $other) runs this tunnel, but $PUBLIC/setup does not answer. Stop it yourself, then run scripts/dev-up again."
+  # Not dev-up's to stop, whatever state it is in; and no second connector
+  # is started beside it.
+  expect_alive "$other" "the cloudflared started by hand"
+  refute_file "$RUN/tunnel.pid"
+  refute_file "$STATE/cloudflared.args"
+
+  status
+  expect_line "tunnel failed" "running (pid $other), through a cloudflared that dev-up did not start, but $PUBLIC/setup does not answer (HTTP 530)"
+
+  down
+  expect_rc 0
+  expect_alive "$other" "the cloudflared started by hand"
+  end_bystander "$other"
+  expect_nothing_running
+}
+
+test_tunnel_and_emulator_that_died_later_are_said_and_started_again() {
+  local tunnel emulator
+  sandbox
+  with_tunnel
+  with_emulator
+  up --no-build --emulator
+  expect_rc 0
+  tunnel=$(recorded_pid tunnel)
+  emulator=$(recorded_pid emulator)
+  # Both crash some time after dev-up has gone.
+  end_bystander "$tunnel"
+  end_bystander "$emulator"
+
+  status
+  expect_rc 0
+  expect_line "tunnel stopped" "it has exited since dev-up started it. scripts/dev-up starts it again."
+  expect_out "log: .dev-run/tunnel.log"
+  expect_line "emulator stopped" "it has exited since dev-up started it. scripts/dev-up --emulator boots $AVD again."
+  expect_out "log: .dev-run/emulator.log"
+
+  up --no-build --emulator
+  expect_rc 0
+  expect_line "tunnel ok" "$PUBLIC/setup answers (pid "
+  expect_line "emulator ok" "$AVD is booted on emulator-5554 (pid "
+  refute_line "tunnel ok already running"
+  [ "$(recorded_pid tunnel)" != "$tunnel" ] || fail "the pid of the tunnel that died is still recorded"
+  [ "$(recorded_pid emulator)" != "$emulator" ] || fail "the pid of the emulator that died is still recorded"
+  down --emulator
+  expect_rc 0
+  expect_nothing_running
+}
+
+test_emulator_from_an_earlier_run_is_waited_for_not_restarted() {
+  local emulator
+  sandbox
+  with_emulator
+  up --no-build --no-tunnel --emulator
+  expect_rc 0
+  emulator=$(recorded_pid emulator)
+  rm -f "$STATE/emulator.args"
+
+  # Run again while Android is still booting: the wait ends, the emulator
+  # stays, and no second one is started.
+  EXTRA_ENV=(STUB_BOOT_AFTER=never LEAF_DEV_WAIT_EMULATOR=1)
+  up --no-build --no-tunnel --emulator
+  expect_rc 1
+  expect_line "emulator failed" "the emulator is running (pid $emulator), but Android has not finished booting after 1s. Run scripts/dev-up --emulator again to keep waiting."
+  expect_out "last lines of .dev-run/emulator.log:"
+  expect_alive "$emulator" "the emulator"
+  [ "$(recorded_pid emulator)" = "$emulator" ] || fail "the emulator (pid $emulator) is no longer recorded"
+  refute_file "$STATE/emulator.args"
+
+  status
+  expect_line "emulator starting" "$AVD is still booting (pid $emulator)"
+  expect_out "log: .dev-run/emulator.log"
+
+  # Asked for another device while that one runs: said, not acted on. (adb
+  # lists a booted `other-avd`, which is not the emulator dev-up started.)
+  EXTRA_ENV=(LEAF_DEV_AVD=other-avd)
+  up --no-build --no-tunnel --emulator
+  expect_rc 1
+  expect_line "emulator failed" "the emulator dev-up started runs $AVD (pid $emulator), not other-avd. Run scripts/dev-down --emulator first."
+  expect_alive "$emulator" "the emulator"
+  refute_file "$STATE/emulator.args"
+
+  EXTRA_ENV=()
+  down --emulator
+  expect_rc 0
+  expect_line "emulator ok" "stopped (pid $emulator)"
+  expect_nothing_running
+}
+
+test_emulator_started_by_hand_that_never_boots_is_left_running() {
+  local other
+  sandbox
+  with_emulator
+  BYSTANDER_ENV=()
+  bystander "$T/sdk/emulator/emulator" -avd "$AVD"
+  other=$BYSTANDER
+  rm -f "$STATE/emulator.args"
+  EXTRA_ENV=(STUB_BOOT_AFTER=never LEAF_DEV_WAIT_EMULATOR=1)
+  up --no-build --no-tunnel --emulator
+  expect_rc 1
+  expect_line "emulator failed" "an emulator that dev-up did not start runs $AVD (pid $other), but Android has not finished booting after 1s."
+  expect_alive "$other" "the emulator started by hand"
+  refute_file "$RUN/emulator.pid"
+  refute_file "$STATE/emulator.args"
+
+  status
+  expect_line "emulator starting" "$AVD is still booting, in an emulator that dev-up did not start (pid $other)"
+
+  down --emulator
+  expect_rc 0
+  expect_alive "$other" "the emulator started by hand"
+  end_bystander "$other"
+  expect_nothing_running
+}
+
+test_emulator_gets_its_own_wait_before_it_is_killed() {
+  local emulator
+  sandbox
+  with_emulator
+  # The emulator may take long to save its snapshot, so its wait is a
+  # setting of its own and not the one leaf and the tunnel get.
+  EXTRA_ENV=(STUB_IGNORE_TERM=emulator LEAF_DEV_WAIT_STOP=3 LEAF_DEV_WAIT_STOP_EMULATOR=1)
+  up --no-build --no-tunnel --emulator
+  expect_rc 0
+  emulator=$(recorded_pid emulator)
+  down --emulator
+  expect_rc 0
+  expect_line "leaf ok" "stopped (pid "
+  expect_line "emulator ok" "stopped (pid $emulator). It did not stop when asked, so after 1s it was killed."
+  expect_dead "$emulator" "the emulator"
+  expect_nothing_running
+}
+
+test_named_settings_file_must_exist() {
+  local other name
+  sandbox
+  # A second environment's file, misspelt: acting on the default environment
+  # instead would stop or start the wrong leaf.
+  EXTRA_ENV=("LEAF_DEV_ENV_FILE=$T/no-such.env")
+  for name in dev-up dev-status dev-down; do
+    script "$name"
+    expect_rc 2
+    expect_out "there is no settings file at $T/no-such.env. Correct LEAF_DEV_ENV_FILE, or unset it to use scripts/dev.env."
+  done
+  refute_file "$RUN"
+  refute_file "$STATE/leaf.env"
+
+  # One that is there is read instead of scripts/dev.env.
+  other=$(free_port)
+  printf 'LEAF_DEV_PORT=%s\nLEAF_DEV_DATA_DIR=%s\nLEAF_DEV_RUN_DIR=%s\n' \
+    "$other" "$T/data2" "$T/run2" >"$T/second.env"
+  EXTRA_ENV=("LEAF_DEV_ENV_FILE=$T/second.env")
+  up --no-build --no-tunnel
+  expect_rc 0
+  expect_line "leaf ok" "setup mode on http://127.0.0.1:$other (pid "
+  expect_content "$STATE/leaf.env" "DATA_DIR=$T/data2"
+  expect_file "$T/run2/leaf.pid"
+  refute_file "$RUN"
+  status
+  expect_rc 0
+  down
+  expect_rc 0
+  expect_nothing_running
+}
+
+test_port_taken_during_the_build_is_not_taken_for_leaf() {
+  local squatter
+  sandbox
+  cp "$STUBS/leaf" "$T/bin/squatter"
+  mv "$T/bin/npm" "$T/bin/npm.real"
+  # A build during which some other program takes the port dev-up had found
+  # free. It is listening before the build ends.
+  cat >"$T/bin/npm" <<EOF
+#!/usr/bin/env bash
+mkfifo "$T/squatter.fifo"
+STUB_LEAF=setup BIND_ADDR=127.0.0.1:$PORT STUB_READY_FIFO="$T/squatter.fifo" \\
+  "$T/bin/squatter" >/dev/null 2>&1 </dev/null &
+echo \$! >"$STATE/squatter.pid"
+read -r line <"$T/squatter.fifo"
+exec "$T/bin/npm.real" "\$@"
+EOF
+  chmod +x "$T/bin/npm"
+  # The leaf dev-up starts cannot have the port. This one stays up without
+  # it, so the only thing answering is the other program.
+  EXTRA_ENV=(STUB_LEAF=hang)
+  up --no-tunnel
+  expect_rc 1
+  squatter=$(cat "$STATE/squatter.pid")
+  expect_line "gallery ok"
+  expect_line "binary ok"
+  expect_line "leaf failed" "port $PORT is held by"
+  expect_line "leaf failed" "(pid $squatter), which dev-up did not start. It took the port after dev-up found it free, so the leaf dev-up started could not listen there and was stopped. Stop that process yourself, or use another port: scripts/dev-up --port N."
+  expect_log_tail_shown leaf
+  refute_line "leaf ok"
+  refute_out "setup code"
+  refute_line "tunnel"
+  refute_file "$RUN/leaf.pid"
+  refute_file "$RUN/leaf.info"
+  # The leaf that never got the port is gone; the other program is untouched.
+  expect_alive "$squatter" "the program that took the port"
+  [ "$(sandbox_pids | tr '\n' ' ')" = "$squatter " ] ||
+    fail "expected only the other program (pid $squatter) to be running, found: $(sandbox_pids | tr '\n' ' ')"
+  end_bystander "$squatter"
+  expect_nothing_running
+}
+
+test_recorded_leaf_without_the_port_is_not_said_to_answer() {
+  local stuck squatter
+  sandbox
+  # A leaf dev-up started that is running but does not have the port, and
+  # another program that does: what answers is not dev-up's leaf.
+  mkdir -p "$RUN"
+  BYSTANDER_ENV=(STUB_LEAF=hang)
+  bystander "$REPO/target/debug/leaf"
+  stuck=$BYSTANDER
+  echo "$stuck" >"$RUN/leaf.pid"
+  printf 'sig=%s\nport=%s\ndata=%s\n' "$REPO/target/debug/leaf" "$PORT" "$DATA" >"$RUN/leaf.info"
+  cp "$STUBS/leaf" "$T/bin/squatter"
+  BYSTANDER_ENV=("BIND_ADDR=127.0.0.1:$PORT")
+  bystander "$T/bin/squatter"
+  squatter=$BYSTANDER
+
+  status
+  expect_rc 1
+  expect_line "leaf failed" "running (pid $stuck), but port $PORT is held by"
+  expect_out "(pid $squatter), which dev-up did not start"
+  refute_line "leaf running"
+  expect_out "Next: scripts/dev-down, then scripts/dev-up"
+
+  up --no-build --no-tunnel
+  expect_rc 1
+  expect_line "leaf failed" "leaf is running (pid $stuck), but port $PORT is held by"
+  expect_out "(pid $squatter), which dev-up did not start: what answers on $LOCAL is not this leaf. scripts/dev-down stops this leaf; stop the other process yourself."
+  refute_out "already running"
+  expect_alive "$stuck" "the leaf without the port"
+  expect_alive "$squatter" "the program that has the port"
+
+  down
+  expect_rc 0
+  expect_line "leaf ok" "stopped (pid $stuck)"
+  expect_alive "$squatter" "the program that has the port"
+  end_bystander "$squatter"
+  expect_nothing_running
+}
+
+test_build_asks_cargo_where_it_builds() {
+  sandbox
+  rm -rf "$REPO/target"
+  # A target directory set in a cargo config file: only cargo knows it.
+  EXTRA_ENV=("STUB_CARGO_CONFIG_TARGET=$T/configured")
+  up --no-tunnel
+  expect_rc 0
+  expect_line "binary ok" "built $T/configured/debug/leaf"
+  expect_content "$STATE/cargo.metadata" "metadata --no-deps --format-version 1"
+  refute_file "$REPO/target"
+  down
+  # --no-build looks in the same place.
+  up --no-build --no-tunnel
+  expect_rc 0
+  expect_line "binary skip" "--no-build: starting $T/configured/debug/leaf"
+  down
+
+  # A cargo that cannot say: the environment's two names for it, then ./target.
+  EXTRA_ENV=(STUB_CARGO_METADATA=fail "CARGO_BUILD_TARGET_DIR=$T/from-env")
+  up --no-tunnel
+  expect_rc 0
+  expect_line "binary ok" "built $T/from-env/debug/leaf"
+  down
+  EXTRA_ENV=(STUB_CARGO_METADATA=fail)
+  up --no-tunnel
+  expect_rc 0
+  expect_line "binary ok" "built target/debug/leaf"
+  down
+
+  # A build that finishes and leaves no binary where it was looked for is
+  # not called a failed build.
+  EXTRA_ENV=(STUB_CARGO=nobinary "STUB_CARGO_CONFIG_TARGET=$T/empty")
+  up --no-tunnel
+  expect_rc 1
+  expect_line "binary failed" "cargo build -p leaf finished, but there is no binary at $T/empty/debug/leaf. Set CARGO_TARGET_DIR to the directory cargo builds into, then run scripts/dev-up again."
+  refute_out "cargo build -p leaf failed"
+  refute_line "leaf"
+  refute_file "$RUN/leaf.pid"
+  expect_nothing_running
+}
+
+# ---------------------------------------------------------------- runner
+
+ALL_TESTS=$(declare -F | sed -n 's/^declare -f \(test_.*\)$/\1/p')
+
+for TEST_NAME in $ALL_TESTS; do
+  if [ $# -gt 0 ]; then
+    wanted=0
+    for word in "$@"; do
+      case $TEST_NAME in
+      *"$word"*) wanted=1 ;;
+      esac
+    done
+    [ "$wanted" -eq 1 ] || continue
+  fi
+  TEST_OK=1
+  T=
+  "$TEST_NAME"
+  TESTS_RUN=$((TESTS_RUN + 1))
+  case $TEST_OK in
+  1) printf 'ok    %s\n' "$TEST_NAME" ;;
+  0) TESTS_FAILED=$((TESTS_FAILED + 1)) ;;
+  esac
+  sweep
+done
+
+if [ "$TESTS_RUN" -eq 0 ]; then
+  echo "No test matches: $*" >&2
+  exit 2
+fi
+printf '\n%s tests, %s failed.\n' "$TESTS_RUN" "$TESTS_FAILED"
+[ "$TESTS_FAILED" -eq 0 ]

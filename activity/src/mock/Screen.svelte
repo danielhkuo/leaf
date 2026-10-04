@@ -1,246 +1,265 @@
 <script lang="ts">
   // Renders a single leaf screen by id with fixture data and no Discord SDK /
-  // network / auth. Real prop-driven components are used directly; the few
-  // store-coupled views are mirrored (MockHome) or fed a stand-in API (admin).
+  // network / auth. The gallery and creator screens are the real views over a
+  // mock API (MockGallery); the admin panel is the real GuildPanel with a
+  // stand-in client. Only what cannot run in a browser tab is mirrored: the
+  // boot screens (MockBoot) and the admin page's own chrome, below.
   // ScreenViewer embeds this per screen inside a width-controlled iframe, so
   // each screen sees a real device-width viewport for its media queries.
-  import CreateWizard from '../lib/components/creator/CreateWizard.svelte';
-  import MySeriesCard from '../lib/components/creator/MySeriesCard.svelte';
-  import SeriesSettingsForm from '../lib/components/creator/SeriesSettingsForm.svelte';
-  import SeriesPicker from '../lib/components/picker/SeriesPicker.svelte';
+  import { untrack } from 'svelte';
+
   import Button from '../lib/components/ui/Button.svelte';
-  import IconButton from '../lib/components/ui/IconButton.svelte';
+  import type { View } from '../lib/stores/nav.svelte';
   import GuildPanel from '../views/admin/GuildPanel.svelte';
+  import Landing from '../views/Landing.svelte';
+  import type { Scenario } from './api';
   import {
+    bootScreens,
+    createMockAdminApi,
     eligibilityBlocked,
     eligibilityOk,
-    mockAdminApi,
-    mySeries,
-    options,
+    guildDetail,
+    homeSeries,
+    MISSING_DAY,
+    optionsChannelUnseen,
     series,
-    seriesSettings,
+    seriesChannelGone,
+    VIDEO_DAY,
+    VIEWER_DAY,
+    worstCase,
   } from './fixtures';
-  import MockHome from './MockHome.svelte';
-  import MockViewer from './MockViewer.svelte';
+  import MockBoot from './MockBoot.svelte';
+  import MockGallery from './MockGallery.svelte';
+  import type { ScreenId } from './screens';
 
   interface Props {
     id: string;
+    /** Show every name, description and caption at its worst-case length. */
+    longText?: boolean;
   }
-  let { id }: Props = $props();
+  let { id, longText = false }: Props = $props();
+
+  interface GalleryScreen {
+    scenario?: Scenario;
+    stack: [View, ...View[]];
+  }
+
+  const PICKER: View = { name: 'picker' };
+  const home = (seriesId: number): View => ({ name: 'home', seriesId });
+  const viewer = (day: number): View => ({ name: 'viewer', seriesId: homeSeries.id, day });
+  /** What a member who has not started a series sees. */
+  const others = series.filter((s) => !s.is_owner);
+
+  // Keyed by ids the sidebar lists (screens.ts), so none is out of reach.
+  const GALLERY: ReadonlyMap<string, GalleryScreen> = new Map([
+    ['picker', { stack: [PICKER] }],
+    [
+      'picker-empty',
+      {
+        scenario: { series: [], eligibility: { ...eligibilityOk, owns_any: false } },
+        stack: [PICKER],
+      },
+    ],
+    [
+      'picker-blocked',
+      { scenario: { series: others, eligibility: eligibilityBlocked }, stack: [PICKER] },
+    ],
+    ['home', { stack: [PICKER, home(homeSeries.id)] }],
+    // A series the viewer has just started: nothing archived yet.
+    ['home-empty', { stack: [PICKER, home(8)] }],
+    // The viewer's own sprout, two days in.
+    ['home-sprout', { stack: [PICKER, home(1)] }],
+    // The viewer's own series after its channel was deleted in Discord.
+    [
+      'home-channel-gone',
+      { scenario: { series: seriesChannelGone }, stack: [PICKER, home(homeSeries.id)] },
+    ],
+    ['viewer', { stack: [PICKER, home(homeSeries.id), viewer(VIEWER_DAY)] }],
+    ['viewer-video', { stack: [PICKER, home(homeSeries.id), viewer(VIDEO_DAY)] }],
+    [
+      'viewer-loading',
+      { scenario: { holdDays: true }, stack: [PICKER, home(homeSeries.id), viewer(VIEWER_DAY)] },
+    ],
+    // A day the server does not have (removed since the calendar loaded, say).
+    ['viewer-failed', { stack: [PICKER, home(homeSeries.id), viewer(MISSING_DAY)] }],
+    ['create', { stack: [PICKER, { name: 'createSeries' }] }],
+    [
+      'create-blocked',
+      {
+        scenario: { series: others, eligibility: eligibilityBlocked },
+        stack: [PICKER, { name: 'createSeries' }],
+      },
+    ],
+    ['myseries', { stack: [PICKER, { name: 'mySeries' }] }],
+    [
+      'settings',
+      {
+        stack: [PICKER, { name: 'mySeries' }, { name: 'seriesSettings', seriesId: homeSeries.id }],
+      },
+    ],
+    // Where "Choose another channel" leads from home-channel-gone while no
+    // admin has run /setup: the deleted channel is the only one on offer.
+    [
+      'settings-channel-unseen',
+      {
+        scenario: { series: seriesChannelGone, options: optionsChannelUnseen },
+        stack: [PICKER, home(homeSeries.id), { name: 'seriesSettings', seriesId: homeSeries.id }],
+      },
+    ],
+    // A link to a series this viewer can't see (hidden, removed, or never there).
+    ['unavailable', { stack: [PICKER, home(4242)] }],
+    ['expired', { scenario: { listFails: 'expired' }, stack: [PICKER] }],
+    ['load-error', { scenario: { listFails: 'unavailable' }, stack: [PICKER] }],
+    // Minimised: the same screens, in a viewport the size of Discord's tile
+    // (the screen viewer and the suites open them at one). The size is what
+    // turns them into the card; at a phone's they are the screens above.
+    ['tile-day', { stack: [PICKER, home(homeSeries.id), viewer(VIEWER_DAY)] }],
+    ['tile-series', { stack: [PICKER, home(homeSeries.id)] }],
+    ['tile-empty', { stack: [PICKER, home(8)] }],
+    ['tile-list', { stack: [PICKER] }],
+    ['tile-expired', { scenario: { listFails: 'expired' }, stack: [PICKER] }],
+  ] satisfies [ScreenId, GalleryScreen][]);
+
+  const gallery = $derived(GALLERY.get(id));
+  const boot = $derived(bootScreens.get(id));
+  // One screen per page (see ScreenViewer), so the switch is read once.
+  const long = untrack(() => longText);
+  const adminApi = createMockAdminApi(long);
+  const guild = long ? worstCase(guildDetail) : guildDetail;
   const noop = (): void => undefined;
 </script>
 
-{#snippet creatorHeader(title: string)}
-  <header class="vbar">
-    <IconButton ariaLabel="Back" variant="solid" onclick={noop}>←</IconButton>
-    <h1 class="vtitle">{title}</h1>
-  </header>
-{/snippet}
-
-{#if id === 'picker'}
-  <SeriesPicker
-    {series}
-    onSelect={noop}
-    eligibility={eligibilityOk}
-    eligibilityStatus="ready"
-    ownsSeries
-    onCreate={noop}
-    onManage={noop}
-  />
-{:else if id === 'picker-empty'}
-  <SeriesPicker
-    series={[]}
-    onSelect={noop}
-    eligibility={eligibilityOk}
-    eligibilityStatus="ready"
-    onCreate={noop}
-  />
-{:else if id === 'picker-blocked'}
-  <SeriesPicker
-    {series}
-    onSelect={noop}
-    eligibility={eligibilityBlocked}
-    eligibilityStatus="ready"
-  />
-{:else if id === 'home'}
-  <MockHome />
-{:else if id === 'home-empty'}
-  <MockHome empty />
-{:else if id === 'viewer'}
-  <MockViewer />
-{:else if id === 'create'}
-  <div class="view">
-    {@render creatorHeader('Start a series')}
-    <CreateWizard {options} submitting={false} error={null} onSubmit={noop} />
-  </div>
-{:else if id === 'myseries'}
-  <div class="view">
-    {@render creatorHeader('My series')}
-    <ul class="list">
-      {#each mySeries as s (s.id)}
-        <li><MySeriesCard series={s} onOpen={noop} /></li>
-      {/each}
-    </ul>
-  </div>
-{:else if id === 'settings'}
-  <div class="view">
-    {@render creatorHeader(seriesSettings.name)}
-    <SeriesSettingsForm
-      settings={seriesSettings}
-      {options}
-      saving={false}
-      saved={false}
-      error={null}
-      onSave={noop}
-    />
-  </div>
+{#if gallery}
+  <MockGallery scenario={{ ...gallery.scenario, longText: long }} stack={gallery.stack} />
+{:else if boot}
+  <MockBoot {boot} />
+{:else if id === 'landing'}
+  <Landing />
 {:else if id === 'admin-login'}
   <main class="admin">
-    <header class="abar"><span class="abrand">🍃 leaf admin</span></header>
-    <div class="acard">
-      <p>Sign in with Discord to manage your server’s leaf settings and series.</p>
-      <button class="aprimary">Sign in with Discord</button>
-    </div>
+    <header class="bar"><span class="brand">🍃 leaf admin</span></header>
+    <section class="card">
+      <h1 tabindex="-1">Manage leaf in your server</h1>
+      <p>Sign in with Discord to change your server’s leaf settings and manage its series.</p>
+      <!-- The real link leaves for Discord's sign-in; the mock stays put. -->
+      <a class="signin" href="/admin/login" onclick={(e) => e.preventDefault()}>
+        Sign in with Discord
+      </a>
+    </section>
   </main>
 {:else if id === 'admin-panel'}
   <main class="admin">
-    <header class="abar">
-      <span class="abrand">🍃 leaf admin</span>
-      <span class="aright">
-        <button class="aghost">Switch server</button>
-        <button class="aghost">Sign out</button>
-      </span>
+    <header class="bar">
+      <span class="brand">🍃 leaf admin</span>
+      <div class="right">
+        <Button size="sm" onclick={noop}>Switch server</Button>
+        <Button size="sm" variant="ghost" onclick={noop}>Sign out</Button>
+      </div>
     </header>
-    <GuildPanel api={mockAdminApi} guildId="900000000000000009" />
+    <GuildPanel api={adminApi} guildId={guild.guild_id} name={guild.name} onBack={noop} />
   </main>
-{:else if id === 'loading'}
-  <div class="boot">
-    <div class="center" role="status">
-      <span class="leaf" aria-hidden="true">🍃</span>
-      <p class="muted">Connecting to Discord…</p>
-    </div>
-  </div>
-{:else if id === 'error'}
-  <div class="boot">
-    <div class="center">
-      <span class="leaf" aria-hidden="true">🍂</span>
-      <p>Couldn’t start the gallery.</p>
-      <p class="muted small">The Discord handshake timed out.</p>
-      <Button variant="primary" onclick={noop}>Try again</Button>
-    </div>
-  </div>
+{:else}
+  <p class="unknown">There is no mock screen called “{id}”.</p>
 {/if}
 
 <style>
-  /* Reconstructed wrappers (creator header, admin chrome, boot) mirror the
-   * real views so each screen reads correctly in isolation. */
-  .view {
-    display: grid;
-    gap: var(--space-md);
-    width: 100%;
-    max-width: 40rem;
-    margin: 0 auto;
-    padding: var(--space-md);
-  }
-  .vbar {
-    display: flex;
-    gap: var(--space-sm);
-    align-items: center;
-    min-height: var(--appbar-h);
-  }
-  .vtitle {
-    margin: 0;
-    font-size: var(--fs-card-title);
-    font-weight: var(--fw-display);
-    letter-spacing: var(--tracking-display);
-  }
-  .list {
-    display: grid;
-    gap: var(--space-sm);
-    margin: 0;
-    padding: 0;
-    list-style: none;
-  }
-
+  /* The admin page's chrome, mirrored from views/admin/Admin.svelte (its
+   * header and sign-in card), which needs a stored token to mount. */
   .admin {
     width: 100%;
     max-width: 56rem;
     margin: 0 auto;
-    padding: var(--space-md);
+    padding: 0 var(--space-md) var(--space-xl);
   }
-  .abar {
+  .bar {
+    position: sticky;
+    top: 0;
+    z-index: 2;
     display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-xs) var(--space-sm);
     align-items: center;
     justify-content: space-between;
     min-height: var(--appbar-h);
+    margin-top: calc(-1 * var(--safe-top));
+    padding: calc(var(--safe-top) + var(--space-xs)) 0 var(--space-xs);
+    background: var(--canvas);
     border-bottom: 1px solid var(--hairline);
   }
-  .abrand {
+  .brand {
     font-family: var(--font-display);
-    font-size: var(--fs-subhead);
+    font-size: var(--fs-body);
     font-weight: var(--fw-display);
+    white-space: nowrap;
   }
-  .aright {
+  .right {
     display: flex;
+    flex-wrap: wrap;
     gap: var(--space-xs);
   }
-  .acard {
+  .card {
     display: grid;
     gap: var(--space-md);
     justify-items: center;
-    max-width: 28rem;
+    max-width: 30rem;
     margin: var(--space-xl) auto 0;
-    padding: var(--space-xl);
+    padding: var(--space-xl) var(--space-lg);
     text-align: center;
     background: var(--surface-1);
     border: 1px solid var(--hairline);
     border-radius: var(--radius-xl);
     box-shadow: var(--shadow-card);
   }
-  .aprimary {
-    padding: 12px 22px;
-    color: var(--inverse-ink);
-    font: inherit;
-    font-weight: var(--fw-display);
-    background: var(--inverse-canvas);
-    border: 0;
-    border-radius: var(--radius-pill);
-    box-shadow: var(--shadow-soft);
-    cursor: pointer;
-  }
-  .aghost {
-    padding: 8px 14px;
-    color: var(--ink);
-    font: inherit;
-    font-size: var(--fs-body-sm);
-    font-weight: var(--fw-emphasis);
-    background: var(--surface-2);
-    border: 1px solid var(--hairline);
-    border-radius: var(--radius-pill);
-    cursor: pointer;
-  }
-
-  .boot {
-    display: grid;
-    place-items: center;
-    min-height: 100vh;
-    padding: var(--space-lg);
-  }
-  .center {
-    display: grid;
-    gap: var(--space-sm);
-    justify-items: center;
-    text-align: center;
-  }
-  .leaf {
-    font-size: var(--fs-display);
-    line-height: 1;
-  }
-  .muted {
+  .card p {
     margin: 0;
     color: var(--ink-muted);
   }
-  .small {
-    font-size: var(--fs-body-sm);
+  h1 {
+    margin: 0;
+    font-size: var(--fs-card-title);
+    font-weight: var(--fw-display);
+    letter-spacing: var(--tracking-display);
+    line-height: 1.2;
+  }
+  h1:focus {
+    outline: none;
+  }
+  .signin,
+  .signin:visited {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: var(--control-height);
+    padding: 0 26px;
+    color: var(--inverse-ink);
+    font-weight: var(--fw-display);
+    text-decoration: none;
+    background: var(--inverse-canvas);
+    border-radius: var(--radius-pill);
+    box-shadow: var(--shadow-soft);
+  }
+  .signin:active {
+    transform: scale(0.98);
+  }
+  @media (max-width: 399px) {
+    .right :global(.btn) {
+      padding: 0 var(--space-sm);
+    }
+  }
+  @media (min-width: 560px) {
+    .brand {
+      font-size: var(--fs-subhead);
+    }
+  }
+  @media (hover: hover) {
+    .signin:hover {
+      filter: brightness(1.04);
+    }
+  }
+
+  .unknown {
+    margin: var(--space-xl) var(--space-md);
+    color: var(--ink-muted);
+    text-align: center;
   }
 </style>

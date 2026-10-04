@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+#
+# scripts/dev-down: stop what scripts/dev-up started, and nothing else.
+#
+# A process is signalled only when its pid is in dev-up's pid file and its
+# command line is still what dev-up started; a pid that has since gone to some
+# other process is left alone. The tunnel goes first, then leaf. The emulator
+# stays up (booting it is the slow part) unless --emulator is given.
+
+set -u
+
+# shellcheck source=scripts/dev-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/dev-lib.sh"
+
+usage() {
+  cat <<'EOF'
+Usage: scripts/dev-down [--emulator]
+
+Stops the tunnel and leaf that scripts/dev-up started. Anything it did not
+start is left running and named.
+
+  --emulator    also stop the Android emulator that dev-up booted
+EOF
+}
+
+want_emulator=0
+while [ $# -gt 0 ]; do
+  case $1 in
+  --emulator) want_emulator=1 ;;
+  -h | --help)
+    usage
+    exit 0
+    ;;
+  *)
+    usage >&2
+    dev_die "“${1}” is not an option."
+    ;;
+  esac
+  shift
+done
+
+# Stops one of the things dev-up records, killing it if it is still there
+# after `wait` seconds. Returns 1 when there was nothing of dev-up's to stop,
+# so the caller can say what else is there.
+down_stop() {
+  local name=$1 wait=$2 state pid other
+  dev_step "$name"
+  dev_component_state "$name"
+  state=$?
+  pid=$DEV_PID
+  case $state in
+  0)
+    dev_stop_recorded "$name" "$wait"
+    case $?:$DEV_STOP_HOW in
+    0:kill)
+      dev_ok "stopped (pid $pid). It did not stop when asked, so after ${wait}s it was killed."
+      ;;
+    0:changed)
+      other=$(dev_proc_name "$pid") || other="another process"
+      dev_ok "asked to stop (pid $pid). After ${wait}s that pid belongs to $other, which was left alone."
+      ;;
+    # 1: it exited between the look above and the signal.
+    0:* | 1:*) dev_ok "stopped (pid $pid)" ;;
+    *)
+      dev_failed "pid $pid is still running after SIGTERM and SIGKILL"
+      return 0
+      ;;
+    esac
+    dev_forget "$name"
+    return 0
+    ;;
+  1) dev_ok "nothing to stop" ;;
+  2)
+    dev_forget "$name"
+    dev_ok "nothing to stop: it had already exited"
+    ;;
+  *)
+    other=$(dev_proc_name "$pid") || other="another process"
+    dev_forget "$name"
+    dev_ok "nothing to stop: pid $pid, which dev-up recorded, now belongs to $other and was left alone"
+    ;;
+  esac
+  return 1
+}
+
+dev_load_settings ""
+dev_make_run_dir
+dev_lock
+trap dev_unlock EXIT
+trap 'printf "\ninterrupted. scripts/dev-status shows what is still running.\n" >&2; exit 130' INT TERM
+
+if ! down_stop tunnel "$DEV_WAIT_STOP" && [ -n "$DEV_TUNNEL_CONFIG" ]; then
+  other=$(dev_find_process "tunnel " "--config $DEV_TUNNEL_CONFIG " | head -n 1)
+  [ -n "$other" ] && dev_more "a cloudflared that dev-up did not start runs this tunnel (pid $other): left alone"
+fi
+
+# The port the running leaf was started on, which --port may have changed.
+recorded_port=$(dev_info_get leaf port)
+if ! down_stop leaf "$DEV_WAIT_STOP"; then
+  other=$(dev_port_holder "${recorded_port:-$DEV_PORT}")
+  if [ -n "$other" ]; then
+    name=$(dev_proc_name "$other") || name="a process"
+    dev_more "port ${recorded_port:-$DEV_PORT} is held by $name (pid $other), which dev-up did not start: left alone"
+  fi
+fi
+
+if [ "$want_emulator" -eq 1 ]; then
+  # Its own, longer wait: the emulator saves its snapshot before it exits.
+  if ! down_stop emulator "$DEV_WAIT_STOP_EMULATOR" && [ -n "$DEV_AVD" ]; then
+    other=$(dev_foreign_emulator)
+    [ -n "$other" ] && dev_more "an emulator that dev-up did not start runs $DEV_AVD (pid $other): left alone"
+  fi
+elif dev_component_state emulator; then
+  dev_step emulator
+  dev_skip "left running (pid $DEV_PID). scripts/dev-down --emulator stops it."
+fi
+
+[ "$DEV_FAILED" -eq 0 ] || exit 1
+exit 0

@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+#
+# Stand-in for cargo, for scripts/tests/run.
+#
+#   cargo build -p leaf   puts the stand-in leaf at <target dir>/debug/leaf.
+#                         The arguments and the directory it ran in go to
+#                         `cargo.args` and `cargo.cwd` in STUB_STATE.
+#   cargo metadata ...    prints one line of JSON with `target_directory`, as
+#                         cargo does. The arguments go to `cargo.metadata`.
+#
+# The target directory is CARGO_TARGET_DIR, then CARGO_BUILD_TARGET_DIR, then
+# ./target, as with cargo.
+#
+#   STUB_CARGO                `fail`: the build fails. `nobinary`: the build
+#                             finishes and leaves no binary
+#   STUB_CARGO_CONFIG_TARGET  a target directory set where only cargo sees
+#                             it, as one in a cargo config file is
+#   STUB_CARGO_METADATA       `fail`: a cargo that cannot answer `metadata`
+
+set -u
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+state=${STUB_STATE:?}
+target=${STUB_CARGO_CONFIG_TARGET:-${CARGO_TARGET_DIR:-${CARGO_BUILD_TARGET_DIR:-target}}}
+
+if [ "${1:-}" = metadata ]; then
+  printf '%s\n' "$*" >"$state/cargo.metadata"
+  if [ "${STUB_CARGO_METADATA:-ok}" = fail ]; then
+    echo "error: no such command: \`metadata\`" >&2
+    exit 101
+  fi
+  case $target in
+  /*) ;;
+  *) target=$(pwd -P)/$target ;;
+  esac
+  printf '{"packages":[],"workspace_members":[],"target_directory":"%s","version":1,"workspace_root":"%s"}\n' \
+    "$target" "$(pwd -P)"
+  exit 0
+fi
+
+printf '%s\n' "$*" >"$state/cargo.args"
+pwd -P >"$state/cargo.cwd"
+if [ "${STUB_CARGO:-ok}" = fail ]; then
+  echo "error[E0308]: mismatched types (stand-in cargo was told to fail)"
+  echo "error: could not compile \`leaf\` (bin \"leaf\") due to 1 previous error"
+  exit 101
+fi
+if [ "${STUB_CARGO:-ok}" != nobinary ]; then
+  mkdir -p "$target/debug"
+  cp "$here/leaf" "$target/debug/leaf"
+  chmod +x "$target/debug/leaf"
+fi
+echo "    Finished \`dev\` profile (stand-in)"

@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT reminder_error AS \"reason?: String\",\n                      reminder_error_at AS \"at?: i64\"\n               FROM series WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "reason?: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "at?: i64",
+        "ordinal": 1,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      true
+    ]
+  },
+  "hash": "77e13c9bcb0fe39832e84263d9d335848c778b2c9303139b965e1c55c674eeca"
+}

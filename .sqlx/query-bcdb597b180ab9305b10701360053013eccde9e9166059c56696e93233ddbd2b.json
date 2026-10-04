@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT\n                   (SELECT MAX(day) FROM posts WHERE series_id = ? AND day < ?) AS \"prev?: i64\",\n                   (SELECT MIN(day) FROM posts WHERE series_id = ? AND day > ?) AS \"next?: i64\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "prev?: i64",
+        "ordinal": 0,
+        "type_info": "Null"
+      },
+      {
+        "name": "next?: i64",
+        "ordinal": 1,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": [
+      true,
+      true
+    ]
+  },
+  "hash": "bcdb597b180ab9305b10701360053013eccde9e9166059c56696e93233ddbd2b"
+}

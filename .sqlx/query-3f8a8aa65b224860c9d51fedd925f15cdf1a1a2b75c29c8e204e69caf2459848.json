@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE series SET\n                   name = ?, description = ?, channels = ?, cadence = ?,\n                   detection_mode = ?, privacy = ?, privacy_role_id = ?,\n                   start_day = ?,\n                   reminder_enabled = ?, reminder_time = ?, reminder_timezone = ?,\n                   reminder_dm = ?, milestone_template = ?, emoji = ?\n               WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 15
+    },
+    "nullable": []
+  },
+  "hash": "3f8a8aa65b224860c9d51fedd925f15cdf1a1a2b75c29c8e204e69caf2459848"
+}

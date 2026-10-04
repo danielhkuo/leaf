@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE guild_settings SET\n                    timezone = COALESCE(?, timezone),\n                    creator_role_id = CASE WHEN ? THEN ? ELSE creator_role_id END,\n                    log_channel_id = CASE WHEN ? THEN ? ELSE log_channel_id END,\n                    max_series_per_user = COALESCE(?, max_series_per_user),\n                    min_account_age_days = COALESCE(?, min_account_age_days),\n                    min_membership_age_days = COALESCE(?, min_membership_age_days),\n                    sprout_enabled = COALESCE(?, sprout_enabled),\n                    sprout_threshold = COALESCE(?, sprout_threshold)\n               WHERE guild_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 11
+    },
+    "nullable": []
+  },
+  "hash": "bd66300f1b5bebb30ecbc807141266f6a0f32947a7750a524c66b54344af2712"
+}

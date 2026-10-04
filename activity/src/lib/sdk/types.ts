@@ -26,18 +26,28 @@ export interface AuthorizeArgs {
   scope: string[];
 }
 
-/** Result of `commands.authenticate` (a superset; we read `user`). */
+/** Result of `commands.authenticate` (a superset; we read `user` and the app's name). */
 export interface AuthenticateResult {
   access_token: string;
   user: DiscordUser;
   scopes: string[];
   expires: string;
+  /** The application the token was issued to. Not every client is known to send it. */
+  application?: { name?: string | null | undefined } | null | undefined;
 }
+
+/** Which Discord client hosts the Activity. There is no iOS/Android flag. */
+export type Platform = 'desktop' | 'mobile';
 
 /** The structural contract the handshake needs from the SDK. */
 export interface SdkLike {
+  /** `null` when launched from a DM or group DM. */
   readonly guildId: string | null;
   readonly channelId: string | null;
+  readonly platform: Platform;
+  /** The `custom_id` of the activity link that launched this instance. */
+  readonly customId: string | null;
+  /** Resolves once Discord answers the handshake. It never rejects. */
   ready(): Promise<void>;
   commands: {
     authorize(args: AuthorizeArgs): Promise<AuthorizeResult>;

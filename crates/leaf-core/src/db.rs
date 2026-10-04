@@ -11,10 +11,12 @@ pub use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 
 pub mod guilds;
+pub mod launch;
 pub mod posts;
 pub mod series;
 
-pub use guilds::GuildSettingsRepo;
+pub use guilds::{GuildSettingsRepo, PanelChange};
+pub use launch::LaunchIntentRepo;
 pub use posts::PostRepo;
 pub use series::SeriesRepo;
 

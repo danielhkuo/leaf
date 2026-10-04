@@ -20,6 +20,19 @@ axum.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+# `leaf doctor` (src/doctor.rs): its HTTP client, the read-only look at the
+# database, the temp dir a database copy is migrated in, and its JSON output.
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+tempfile.workspace = true
+
+[dev-dependencies]
+# tests/doctor_cli.rs serves the real router over an in-memory store, and
+# reads and writes pipes and sockets by hand.
+object_store.workspace = true
+tokio = { workspace = true, features = ["io-util"] }
 
 [lints]
 workspace = true

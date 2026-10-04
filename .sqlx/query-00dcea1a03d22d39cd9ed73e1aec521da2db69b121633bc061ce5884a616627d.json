@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE series SET state = 'active'\n               WHERE guild_id = ? AND state = 'sprout'\n                 AND (? IS NULL\n                      OR (SELECT COUNT(*) FROM posts p WHERE p.series_id = series.id) >= ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "00dcea1a03d22d39cd9ed73e1aec521da2db69b121633bc061ce5884a616627d"
+}

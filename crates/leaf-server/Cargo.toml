@@ -30,6 +30,16 @@ moka.workspace = true
 [dev-dependencies]
 tower = { workspace = true, features = ["util"] }
 tempfile.workspace = true
+# The e2e example logs the way the real binary does.
+tracing-subscriber.workspace = true
+
+# The real API over a seeded temp database, an in-memory object store and a
+# stub Discord, for the browser suites (see the file's own doc comment).
+# `test = true` runs the example's own tests under `cargo test`.
+[[example]]
+name = "e2e_server"
+path = "examples/e2e_server/main.rs"
+test = true
 
 [lints]
 workspace = true

@@ -5,11 +5,24 @@ target/
 node_modules/
 activity/dist/
 
+# Playwright (activity/e2e): each run's output and report. Screenshot
+# baselines depend on the OS's fonts, so only the macOS set is committed; one
+# made on another OS stays local.
+activity/test-results/
+activity/playwright-report/
+activity/e2e/**/__screenshots__/*/
+!activity/e2e/**/__screenshots__/darwin/
+
 # Local data (dev runs)
 data/
 *.db
 *.db-shm
 *.db-wal
+
+# The local dev environment (scripts/dev-up): this machine's settings, and
+# the runtime directory with the pid files and logs of what it started.
+scripts/dev.env
+.dev-run/
 
 # Planning & docs — kept local only, not committed.
 # (Includes docs/reference/, the vendored Svelte docs; restore with:
@@ -20,3 +33,15 @@ data/
 # Secrets
 leaf.conf
 .env
+
+# Copies of real data. An archive of the data volume holds leaf.conf (bot
+# token, OAuth client secret, R2 keys) and leaf.db; an export file holds a
+# real server's day index. Keep them outside the repo: these lines only stop
+# a `git add -A` from publishing one that was left here.
+*.tgz
+*.tar.gz
+walpurgis-export-*.json
+leaf-export-*.json
+
+# macOS
+.DS_Store

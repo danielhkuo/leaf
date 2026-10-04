@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT series_id, day FROM posts WHERE message_id = ?\n               ORDER BY series_id, day",
+  "describe": {
+    "columns": [
+      {
+        "name": "series_id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "day",
+        "ordinal": 1,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "55adfeacc67022782843de7aaa67257cb7361d7cab2a7c2a982fe7818ec82cd8"
+}

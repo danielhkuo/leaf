@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) AS \"n!: i64\" FROM media_attachments\n               WHERE series_id = ? AND day = ?\n                 AND (media_missing = 0 OR original_key IS NOT NULL OR thumb_key IS NOT NULL)",
+  "describe": {
+    "columns": [
+      {
+        "name": "n!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "b4c490fda6e3d04001190ded819e86bcf37c7333ddc96870da02b013ec754f03"
+}

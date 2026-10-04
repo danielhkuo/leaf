@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+#
+# Stand-in for npm, for scripts/tests/run: `npm --prefix <dir> run build`
+# writes <dir>/dist/index.html, or fails when STUB_NPM is `fail`. The
+# arguments go to `npm.args` in STUB_STATE.
+
+set -u
+printf '%s\n' "$*" >"${STUB_STATE:?}/npm.args"
+if [ "${STUB_NPM:-ok}" = fail ]; then
+  echo "vite v6 building for production..."
+  echo "error during build: stand-in npm was told to fail"
+  exit 1
+fi
+[ "${1:-}" = --prefix ] || exit 2
+mkdir -p "$2/dist"
+echo "<title>leaf</title>" >"$2/dist/index.html"
+echo "built in 1ms (stand-in)"

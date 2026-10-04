@@ -1,6 +1,7 @@
 <script lang="ts">
-  // Minimal ring spinner — transform-only animation, stops under
-  // prefers-reduced-motion (the global rule neutralizes the spin).
+  // Minimal ring spinner. Under prefers-reduced-motion the ring stops turning
+  // and breathes instead (opacity only), so it still reads as "working"
+  // rather than as a frozen frame.
   interface Props {
     size?: string;
     label?: string;
@@ -23,6 +24,18 @@
   @keyframes spin {
     to {
       transform: rotate(360deg);
+    }
+  }
+  @keyframes breathe {
+    to {
+      opacity: 0.35;
+    }
+  }
+  /* !important because app.css's reduced-motion reset is !important too: it
+   * would cut this to a single 0.01ms run and leave a static ring. */
+  @media (prefers-reduced-motion: reduce) {
+    .spinner {
+      animation: breathe 1.2s ease-in-out infinite alternate !important;
     }
   }
 </style>

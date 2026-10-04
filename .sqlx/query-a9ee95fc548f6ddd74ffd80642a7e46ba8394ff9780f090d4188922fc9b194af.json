@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT p.day AS \"day!: i64\", p.posted_at AS \"posted_at!: i64\",\n                      m.attachment_id AS \"first_attachment_id?: String\",\n                      (m.thumb_key IS NOT NULL) AS \"has_thumb!: i64\",\n                      COALESCE(a.media_count, 0) AS \"media_count!: i64\",\n                      COALESCE(a.stored_count, 0) AS \"stored_count!: i64\"\n               FROM posts p\n               LEFT JOIN (\n                   SELECT day, COUNT(*) AS media_count,\n                          SUM(media_missing = 0) AS stored_count,\n                          MIN(id) AS first_id,\n                          MIN(CASE WHEN thumb_key IS NOT NULL THEN id END) AS first_thumb_id\n                   FROM media_attachments WHERE series_id = ? GROUP BY day\n               ) a ON a.day = p.day\n               LEFT JOIN media_attachments m ON m.id = COALESCE(a.first_thumb_id, a.first_id)\n               WHERE p.series_id = ? ORDER BY p.day",
+  "describe": {
+    "columns": [
+      {
+        "name": "day!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "posted_at!: i64",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "first_attachment_id?: String",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "has_thumb!: i64",
+        "ordinal": 3,
+        "type_info": "Null"
+      },
+      {
+        "name": "media_count!: i64",
+        "ordinal": 4,
+        "type_info": "Null"
+      },
+      {
+        "name": "stored_count!: i64",
+        "ordinal": 5,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "a9ee95fc548f6ddd74ffd80642a7e46ba8394ff9780f090d4188922fc9b194af"
+}

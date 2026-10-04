@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT m.original_key, m.thumb_key FROM media_attachments m\n           WHERE m.original_key IN (SELECT value FROM json_each(?1))\n              OR m.thumb_key IN (SELECT value FROM json_each(?1))",
+  "describe": {
+    "columns": [
+      {
+        "name": "original_key",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "thumb_key",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      true
+    ]
+  },
+  "hash": "aebb2f56611ead54ee765a924198a9d65ad280ff2283b66d02fd71b79f65a6ae"
+}

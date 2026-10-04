@@ -21,43 +21,99 @@ pub struct CreationContext {
     pub has_creator_role: Option<bool>,
 }
 
-/// Why creation was refused. `Display` is the user-facing message.
+/// Why creation was refused. `Display` is the user-facing message: a full
+/// sentence that says what is in the way and what to do about it.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum PolicyViolation {
-    /// Too many live series already.
-    #[error("you already have {0} series here — the limit is {0}. Edit or remove one first")]
+    /// Too many live series already. Carries the guild's limit.
+    #[error(
+        "You've reached this server's limit of {0} series per member. \
+         Ask a server admin if you need another."
+    )]
     MaxSeries(i64),
-    /// Discord account is younger than the policy requires.
-    #[error("your Discord account must be at least {0} days old to start a series here")]
+    /// Discord account is younger than the policy requires (days).
+    #[error("Your Discord account needs to be at least {} old to start a series here.", days(*.0))]
     AccountTooNew(i64),
-    /// Guild membership is younger than the policy requires.
-    #[error("you need to have been a member here for at least {0} days to start a series")]
+    /// Guild membership is younger than the policy requires (days).
+    #[error(
+        "You need to have been a member of this server for at least {} to start a series.",
+        days(*.0)
+    )]
     MembershipTooNew(i64),
     /// The guild requires a creator role the user lacks.
-    #[error("starting a series here requires the creator role")]
+    #[error("Starting a series here needs the creator role. Ask a server admin for it.")]
     MissingCreatorRole,
     /// The chosen channel is not in the guild's watched list.
-    #[error("that channel isn't one this server archives from — an admin can add it with /setup")]
+    #[error(
+        "That channel isn't one this server allows for series. \
+         Pick another channel, or ask a server admin to add it with /setup."
+    )]
     ChannelNotWatched,
 }
 
+impl PolicyViolation {
+    /// Unix time at which this rule stops blocking `ctx`, for the two age
+    /// rules ("you can start a series on 14 Oct"). `None` for rules that
+    /// time alone will not lift, and for an unknown join date.
+    #[must_use]
+    pub fn eligible_at(&self, ctx: &CreationContext) -> Option<i64> {
+        match *self {
+            Self::AccountTooNew(required) => Some(
+                ctx.account_created_unix
+                    .saturating_add(required.saturating_mul(DAY_SECS)),
+            ),
+            Self::MembershipTooNew(required) => ctx
+                .joined_unix
+                .map(|joined| joined.saturating_add(required.saturating_mul(DAY_SECS))),
+            Self::MaxSeries(_) | Self::MissingCreatorRole | Self::ChannelNotWatched => None,
+        }
+    }
+}
+
 const DAY_SECS: i64 = 86_400;
+
+/// "1 day" / "30 days", for the age-rule messages.
+fn days(n: i64) -> String {
+    if n == 1 {
+        "1 day".to_owned()
+    } else {
+        format!("{n} days")
+    }
+}
 
 /// Checks every creation policy; first violation wins.
 pub fn check_creation(
     settings: &GuildSettings,
     ctx: &CreationContext,
 ) -> Result<(), PolicyViolation> {
+    creation_violations(settings, ctx)
+        .into_iter()
+        .next()
+        .map_or(Ok(()), Err)
+}
+
+/// Every creation policy `ctx` currently fails; empty when creation is
+/// allowed.
+///
+/// In the order [`check_creation`] reports them (role, limit, account age,
+/// membership age), so a surface can explain all blockers at once instead of
+/// revealing them one refusal at a time.
+#[must_use]
+pub fn creation_violations(
+    settings: &GuildSettings,
+    ctx: &CreationContext,
+) -> Vec<PolicyViolation> {
+    let mut violations = Vec::new();
     if ctx.has_creator_role == Some(false) {
-        return Err(PolicyViolation::MissingCreatorRole);
+        violations.push(PolicyViolation::MissingCreatorRole);
     }
     if ctx.live_series_count >= settings.max_series_per_user {
-        return Err(PolicyViolation::MaxSeries(settings.max_series_per_user));
+        violations.push(PolicyViolation::MaxSeries(settings.max_series_per_user));
     }
     if settings.min_account_age_days > 0 {
         let age_days = (ctx.now_unix - ctx.account_created_unix) / DAY_SECS;
         if age_days < settings.min_account_age_days {
-            return Err(PolicyViolation::AccountTooNew(
+            violations.push(PolicyViolation::AccountTooNew(
                 settings.min_account_age_days,
             ));
         }
@@ -65,12 +121,12 @@ pub fn check_creation(
     if settings.min_membership_age_days > 0 {
         let joined = ctx.joined_unix.unwrap_or(ctx.now_unix);
         if (ctx.now_unix - joined) / DAY_SECS < settings.min_membership_age_days {
-            return Err(PolicyViolation::MembershipTooNew(
+            violations.push(PolicyViolation::MembershipTooNew(
                 settings.min_membership_age_days,
             ));
         }
     }
-    Ok(())
+    violations
 }
 
 /// True when `channel_id` is one the guild archives from.
@@ -187,6 +243,99 @@ mod tests {
         assert_eq!(
             check_creation(&s, &c),
             Err(PolicyViolation::MembershipTooNew(1))
+        );
+    }
+
+    #[test]
+    fn all_failing_policies_are_listed_in_check_order() {
+        let mut s = settings();
+        s.min_account_age_days = 365;
+        s.min_membership_age_days = 60;
+        let mut c = ctx();
+        c.has_creator_role = Some(false);
+        c.live_series_count = 5;
+        let all = creation_violations(&s, &c);
+        assert_eq!(
+            all,
+            vec![
+                PolicyViolation::MissingCreatorRole,
+                PolicyViolation::MaxSeries(2),
+                PolicyViolation::AccountTooNew(365),
+                PolicyViolation::MembershipTooNew(60),
+            ]
+        );
+        // `check_creation` is the head of the same list.
+        assert_eq!(check_creation(&s, &c).err(), all.first().cloned());
+        assert!(creation_violations(&settings(), &ctx()).is_empty());
+    }
+
+    #[test]
+    fn age_rules_report_when_they_lift() {
+        let c = ctx();
+        // Account created on day 900; a 365-day rule lifts on day 1265.
+        assert_eq!(
+            PolicyViolation::AccountTooNew(365).eligible_at(&c),
+            Some(1_265 * DAY_SECS)
+        );
+        // Joined on day 950; a 60-day rule lifts on day 1010.
+        assert_eq!(
+            PolicyViolation::MembershipTooNew(60).eligible_at(&c),
+            Some(1_010 * DAY_SECS)
+        );
+        // The date is exactly when the check starts passing.
+        let mut s = settings();
+        s.min_membership_age_days = 60;
+        let mut later = ctx();
+        later.now_unix = 1_010 * DAY_SECS - 1;
+        assert!(check_creation(&s, &later).is_err());
+        later.now_unix = 1_010 * DAY_SECS;
+        assert_eq!(check_creation(&s, &later), Ok(()));
+
+        let mut unknown_join = ctx();
+        unknown_join.joined_unix = None;
+        assert_eq!(
+            PolicyViolation::MembershipTooNew(60).eligible_at(&unknown_join),
+            None
+        );
+        for v in [
+            PolicyViolation::MaxSeries(2),
+            PolicyViolation::MissingCreatorRole,
+            PolicyViolation::ChannelNotWatched,
+        ] {
+            assert_eq!(v.eligible_at(&c), None, "{v:?}");
+        }
+    }
+
+    #[test]
+    fn messages_are_actionable_sentences() {
+        let all = [
+            PolicyViolation::MaxSeries(3),
+            PolicyViolation::AccountTooNew(30),
+            PolicyViolation::MembershipTooNew(1),
+            PolicyViolation::MissingCreatorRole,
+            PolicyViolation::ChannelNotWatched,
+        ];
+        for v in &all {
+            let text = v.to_string();
+            assert!(text.starts_with(char::is_uppercase), "{text}");
+            assert!(text.ends_with('.'), "{text}");
+            // Creators cannot delete a series, so never tell them to.
+            assert!(!text.to_lowercase().contains("remove"), "{text}");
+        }
+        assert_eq!(
+            PolicyViolation::MaxSeries(3).to_string(),
+            "You've reached this server's limit of 3 series per member. \
+             Ask a server admin if you need another."
+        );
+        assert!(
+            PolicyViolation::AccountTooNew(30)
+                .to_string()
+                .contains("at least 30 days old")
+        );
+        assert!(
+            PolicyViolation::MembershipTooNew(1)
+                .to_string()
+                .contains("at least 1 day to")
         );
     }
 

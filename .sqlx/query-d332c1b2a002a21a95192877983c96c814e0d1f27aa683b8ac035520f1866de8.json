@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT MAX(posted_at) AS \"latest: i64\" FROM posts WHERE series_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "latest: i64",
+        "ordinal": 0,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "d332c1b2a002a21a95192877983c96c814e0d1f27aa683b8ac035520f1866de8"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE series SET reminder_error = NULL, reminder_error_at = NULL\n               WHERE id = ? AND reminder_error IS NOT NULL\n                 AND (reminder_enabled != ? OR reminder_dm != ?\n                      OR (reminder_dm = 0 AND channels != ?))",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "e240ebee83c3e34e4bd788abff8b3669fc1d3bce79b5dfa1acf5e0dbf9967f25"
+}

@@ -1,393 +1,317 @@
 <script lang="ts">
-  import type { AdminApi } from '../../lib/admin/client';
-  import type { AdminGuildDetail, AdminSeries } from '../../lib/admin/schemas';
-  import InfoTip from '../../lib/components/ui/InfoTip.svelte';
+  // One server's panel: its name, its settings form and its series. It loads
+  // the server and the pickers' lists, keeps both current as things are
+  // saved, and is the one place that notices an expired sign-in: unsaved
+  // settings are stashed first, so they are back after signing in again.
+  import { untrack } from 'svelte';
+
+  import { isUnauthorized, type AdminApi } from '../../lib/admin/client';
+  import { adminErrorMessage, canRetry, isGone } from '../../lib/admin/copy';
+  import type {
+    AdminGuildDetail,
+    AdminOptions,
+    AdminSeries,
+    AdminSettings,
+  } from '../../lib/admin/schemas';
+  import { stashDraft, takeDraft } from '../../lib/admin/session';
+  import { readDraft, type SettingsDraft } from '../../lib/admin/settingsForm';
+  import Callout from '../../lib/components/shared/Callout.svelte';
+  import ErrorState from '../../lib/components/shared/ErrorState.svelte';
+  import Skeleton from '../../lib/components/shared/Skeleton.svelte';
+  import GuildIcon from './GuildIcon.svelte';
+  import type { Choice } from './IdPicker.svelte';
+  import SeriesRow from './SeriesRow.svelte';
+  import SettingsForm from './SettingsForm.svelte';
 
   interface Props {
     api: AdminApi;
     guildId: string;
+    /** The server's name and icon from the server list, shown until its own details load. */
+    name?: string | undefined;
+    iconUrl?: string | undefined;
+    /** The admin token was refused. `draftKept` says unsaved settings were stashed. */
+    onUnauthorized?: ((draftKept: boolean) => void) | undefined;
+    /** Told whenever the settings form starts or stops having unsaved changes. */
+    onDirtyChange?: ((dirty: boolean) => void) | undefined;
+    /** Leaves a server that did not load, where there is a list to go back to. */
+    onBack?: (() => void) | undefined;
+    /** Starts a fresh sign-in, for a server this one can no longer manage. */
+    onSignIn?: (() => void) | undefined;
   }
-  let { api, guildId }: Props = $props();
+  let { api, guildId, name, iconUrl, onUnauthorized, onDirtyChange, onBack, onSignIn }: Props =
+    $props();
 
-  interface FormState {
-    timezone: string;
-    creator_role_id: string;
-    log_channel_id: string;
-    max_series_per_user: number;
-    min_account_age_days: number;
-    min_membership_age_days: number;
-    sprout_enabled: boolean;
-    sprout_threshold: number;
+  interface Failure {
+    message: string;
+    /** Trying again can help. */
+    retry: boolean;
+    /** This sign-in can't manage the server any more. */
+    gone: boolean;
   }
+
+  const uid = $props.id();
 
   let detail = $state<AdminGuildDetail | null>(null);
-  let error = $state('');
-  let saving = $state(false);
-  let saved = $state(false);
-  let form = $state<FormState>({
-    timezone: '',
-    creator_role_id: '',
-    log_channel_id: '',
-    max_series_per_user: 0,
-    min_account_age_days: 0,
-    min_membership_age_days: 0,
-    sprout_enabled: false,
-    sprout_threshold: 0,
+  let failure = $state<Failure | null>(null);
+  /** `undefined` while the pickers' lists load; `null` when leaf could not get them. */
+  let options = $state<AdminOptions | null | undefined>(undefined);
+  let restored = $state<SettingsDraft | null>(null);
+  /** Bumped to load the same server again. */
+  let attempt = $state(0);
+
+  // The settings form's unsaved fields, kept current so they can be stashed
+  // the moment a request comes back 401.
+  let draft: SettingsDraft | null = null;
+  /** Counts loads, so an answer for a server no longer on screen is dropped. */
+  let epoch = 0;
+  let signedOut = false;
+
+  const title = $derived(detail?.name ?? name ?? `Server ${guildId}`);
+  const roles = $derived.by((): Choice[] | null | undefined => {
+    if (options === undefined) return undefined;
+    if (options === null || options.roles === undefined || options.roles_unavailable) return null;
+    return options.roles.map((role) => ({ id: role.id, label: `@${role.name}` }));
   });
 
-  const errMsg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+  function expired(): void {
+    if (signedOut) return;
+    signedOut = true;
+    // Only what the browser really took is promised back on the sign-in card.
+    const kept = draft !== null && stashDraft(guildId, draft);
+    if (onUnauthorized) {
+      onUnauthorized(kept);
+      return;
+    }
+    detail = null;
+    failure = {
+      message: 'Your admin session has expired. Sign in again.',
+      retry: false,
+      gone: false,
+    };
+  }
 
-  // Load the guild and seed the form from its settings.
+  async function loadOptions(gid: string, mine: number): Promise<void> {
+    options = undefined;
+    try {
+      const loaded = await api.options(gid);
+      if (mine === epoch) options = loaded;
+    } catch (e) {
+      if (mine !== epoch) return;
+      if (isUnauthorized(e)) expired();
+      // An older server has no such route: the form falls back to text boxes.
+      else options = null;
+    }
+  }
+
+  async function load(gid: string, mine: number): Promise<void> {
+    detail = null;
+    failure = null;
+    setDraft(null);
+    void loadOptions(gid, mine);
+    try {
+      const loaded = await api.guild(gid);
+      if (mine !== epoch) return;
+      restored = readDraft(takeDraft(gid));
+      detail = loaded;
+    } catch (e) {
+      if (mine !== epoch) return;
+      if (isUnauthorized(e)) expired();
+      else failure = { message: adminErrorMessage(e), retry: canRetry(e), gone: isGone(e) };
+    }
+  }
+
+  // Load the server whenever it changes, or Try again is pressed.
   $effect(() => {
     const gid = guildId;
-    let cancelled = false;
-    detail = null;
-    error = '';
-    api
-      .guild(gid)
-      .then((d) => {
-        if (cancelled) return;
-        detail = d;
-        form = {
-          timezone: d.settings.timezone,
-          creator_role_id: d.settings.creator_role_id ?? '',
-          log_channel_id: d.settings.log_channel_id ?? '',
-          max_series_per_user: d.settings.max_series_per_user,
-          min_account_age_days: d.settings.min_account_age_days,
-          min_membership_age_days: d.settings.min_membership_age_days,
-          sprout_enabled: d.settings.sprout_enabled,
-          sprout_threshold: d.settings.sprout_threshold,
-        };
-      })
-      .catch((e: unknown) => {
-        if (!cancelled) error = errMsg(e);
-      });
+    void attempt;
+    epoch += 1;
+    const mine = epoch;
+    untrack(() => void load(gid, mine));
     return () => {
-      cancelled = true;
+      epoch += 1;
     };
   });
 
-  async function saveSettings(e: SubmitEvent): Promise<void> {
-    e.preventDefault();
-    saving = true;
-    saved = false;
-    error = '';
+  function setDraft(next: SettingsDraft | null): void {
+    draft = next;
+    onDirtyChange?.(next !== null);
+  }
+
+  /**
+   * Loads the rows again: after a save that published sprouts, and for a row
+   * whose change leaf never confirmed. Resolves to the fresh rows, or `null`
+   * when they could not be loaded and the list stays as it was.
+   */
+  async function refreshSeries(): Promise<AdminSeries[] | null> {
+    const mine = epoch;
     try {
-      const updated = await api.patchSettings(guildId, form);
-      if (detail) detail = { ...detail, settings: updated };
-      saved = true;
-    } catch (err) {
-      error = errMsg(err);
-    } finally {
-      saving = false;
+      const fresh = await api.guild(guildId);
+      if (mine !== epoch || !detail) return null;
+      detail = { ...detail, series: fresh.series };
+      return fresh.series;
+    } catch (e) {
+      if (mine === epoch && isUnauthorized(e)) expired();
+      return null;
     }
   }
 
-  async function setSeries(
-    s: AdminSeries,
-    patch: { privacy?: string; state?: string },
-  ): Promise<void> {
-    error = '';
-    try {
-      const updated = await api.patchSeries(guildId, s.id, patch);
-      if (detail) {
-        detail = {
-          ...detail,
-          series: detail.series.map((x) => (x.id === updated.id ? updated : x)),
-        };
-      }
-    } catch (err) {
-      error = errMsg(err);
-    }
+  /** One series as leaf stores it now; `null` when it could not be read or is gone. */
+  async function rereadSeries(id: number): Promise<AdminSeries | null> {
+    const fresh = await refreshSeries();
+    return fresh?.find((series) => series.id === id) ?? null;
+  }
+
+  function settingsSaved(updated: AdminSettings): void {
+    if (!detail) return;
+    detail = { ...detail, settings: updated };
+    if ((updated.sprouts_published ?? 0) > 0) void refreshSeries();
+  }
+
+  function seriesChanged(updated: AdminSeries): void {
+    if (!detail) return;
+    detail = {
+      ...detail,
+      series: detail.series.map((old) =>
+        old.id === updated.id
+          ? {
+              ...updated,
+              // A PATCH answer may leave out what the list carried.
+              creator_name: updated.creator_name ?? old.creator_name,
+              archived_days: updated.archived_days ?? old.archived_days,
+              privacy_role_name:
+                updated.privacy_role_name ??
+                (updated.privacy_role_id === old.privacy_role_id
+                  ? old.privacy_role_name
+                  : undefined),
+            }
+          : old,
+      ),
+    };
   }
 </script>
 
-{#if error}
-  <p class="error" role="alert">{error}</p>
-{/if}
+<div class="guild">
+  <div class="heading">
+    <GuildIcon name={title} url={detail?.icon_url ?? iconUrl} size={48} />
+    <h1 tabindex="-1">{title}</h1>
+  </div>
 
-{#if !detail}
-  <p class="muted pad">Loading server…</p>
-{:else}
-  <section class="block">
-    <p class="eyebrow">Settings</p>
-    <form class="settings" onsubmit={saveSettings}>
-      <label>
-        <span>
-          Timezone
-          <InfoTip
-            label="Timezone"
-            text="Time zone for daily reminders and the dates shown in the gallery. Use an IANA name like America/Chicago or Europe/London. Defaults to UTC."
-          />
-        </span>
-        <input type="text" bind:value={form.timezone} placeholder="UTC" />
-      </label>
-      <label>
-        <span>
-          Creator role id <em>(blank = anyone)</em>
-          <InfoTip
-            label="Creator role id"
-            text="Restrict who can start a series. With a role ID set, only members who hold that role can create a series in the gallery. Leave blank to let anyone create. (Enable Developer Mode in Discord, then right-click a role → Copy Role ID.)"
-          />
-        </span>
-        <input type="text" bind:value={form.creator_role_id} />
-      </label>
-      <label>
-        <span>
-          Log channel id
-          <InfoTip
-            label="Log channel id"
-            text="Channel where leaf posts a short audit line when a series is created, archived, or revoked. Paste a channel ID, or leave blank to turn logging off."
-          />
-        </span>
-        <input type="text" bind:value={form.log_channel_id} />
-      </label>
-      <label>
-        <span>
-          Max series per user
-          <InfoTip
-            label="Max series per user"
-            text="How many active series one member may own at once. Example: 3. Must be at least 1."
-          />
-        </span>
-        <input type="number" min="0" bind:value={form.max_series_per_user} />
-      </label>
-      <label>
-        <span>
-          Min account age (days)
-          <InfoTip
-            label="Minimum account age"
-            text="Block members whose Discord account is younger than this many days from creating a series — a spam guard. Example: 30. Use 0 to disable."
-          />
-        </span>
-        <input type="number" min="0" bind:value={form.min_account_age_days} />
-      </label>
-      <label>
-        <span>
-          Min membership age (days)
-          <InfoTip
-            label="Minimum membership age"
-            text="Block members who joined this server fewer than this many days ago from creating a series. Example: 7. Use 0 to disable."
-          />
-        </span>
-        <input type="number" min="0" bind:value={form.min_membership_age_days} />
-      </label>
-      <label class="check">
-        <input type="checkbox" bind:checked={form.sprout_enabled} />
-        <span>
-          Sprout probation for new series
-          <InfoTip
-            label="Sprout probation"
-            text="When on, a new series stays hidden as a 🌱 sprout until it reaches the post threshold below, then it appears in the gallery automatically. When off, new series are visible immediately."
-          />
-        </span>
-      </label>
-      <label>
-        <span>
-          Sprout threshold
-          <InfoTip
-            label="Sprout threshold"
-            text="How many posts a sprout needs before it graduates to a normal, visible series. Example: 3. Only applies when sprout probation is on."
-          />
-        </span>
-        <input type="number" min="0" bind:value={form.sprout_threshold} />
-      </label>
-      <div class="actions">
-        <button class="primary" type="submit" disabled={saving}>
-          {saving ? 'Saving…' : 'Save settings'}
-        </button>
-        {#if saved}<span class="ok">Saved</span>{/if}
-      </div>
-    </form>
-  </section>
-
-  <section class="block">
-    <p class="eyebrow">
-      Series
-      <InfoTip
-        label="Series controls"
-        text="Privacy sets who sees a series in the gallery — Public (everyone in the server), Role-gated (only a chosen role), or Creator only (just the creator and admins). Revoke hides a series and makes it read-only; its archive is kept and you can Restore it later."
-      />
-    </p>
-    {#if detail.series.length === 0}
-      <p class="muted">No series yet.</p>
-    {:else}
-      <ul class="series">
-        {#each detail.series as s (s.id)}
-          <li class="row" class:revoked={s.state === 'revoked'}>
-            <div class="meta">
-              <span class="name">{s.name}</span>
-              <span class="muted">by {s.creator_id} · {s.state}</span>
-            </div>
-            <select
-              aria-label={`Privacy for ${s.name}`}
-              value={s.privacy}
-              onchange={(e) => void setSeries(s, { privacy: e.currentTarget.value })}
-            >
-              <option value="public">Public</option>
-              <option value="role_gated">Role-gated</option>
-              <option value="creator_only">Creator only</option>
-            </select>
-            {#if s.state === 'revoked'}
-              <button class="ghost" onclick={() => void setSeries(s, { state: 'active' })}>
-                Restore
-              </button>
-            {:else}
-              <button class="danger" onclick={() => void setSeries(s, { state: 'revoked' })}>
-                Revoke
-              </button>
-            {/if}
-          </li>
-        {/each}
-      </ul>
+  {#if failure}
+    <ErrorState
+      title={failure.gone ? 'This server isn’t available' : 'Couldn’t load this server'}
+      message={failure.message}
+      onRetry={failure.gone ? onSignIn : failure.retry ? () => (attempt += 1) : undefined}
+      retryLabel={failure.gone ? 'Sign in again' : 'Try again'}
+      {onBack}
+      backLabel="Choose another server"
+    />
+  {:else if !detail}
+    <Skeleton height="18rem" radius="var(--radius-xl)" label="Loading this server" />
+  {:else}
+    {#if detail.setup_complete === false}
+      <Callout title="leaf isn’t set up in this server yet" tone="warning">
+        Run /setup in the server to choose the channels people can archive from. Until then nobody
+        can start a series. The settings below still save.
+      </Callout>
     {/if}
-  </section>
-{/if}
+
+    <section class="part" aria-labelledby="{uid}-settings">
+      <h2 id="{uid}-settings">Settings</h2>
+      <SettingsForm
+        settings={detail.settings}
+        {options}
+        {restored}
+        save={(patch) => api.patchSettings(guildId, patch)}
+        onSaved={settingsSaved}
+        onDraft={setDraft}
+        onUnauthorized={expired}
+        onReloadOptions={() => void loadOptions(guildId, epoch)}
+      />
+    </section>
+
+    <section class="part" aria-labelledby="{uid}-series">
+      <h2 id="{uid}-series">Series</h2>
+      <p class="lead">
+        Every series in this server, whatever its privacy. In the gallery itself, admins see what
+        any other member sees. Revoking hides a series from the gallery and stops new posts; its
+        archived days are kept, and you can restore it.
+      </p>
+      {#if detail.series.length === 0}
+        <p class="empty">No series yet. Members start one from leaf’s gallery in Discord.</p>
+      {:else}
+        <ul class="series">
+          {#each detail.series as series (series.id)}
+            <SeriesRow
+              {series}
+              {roles}
+              threshold={detail.settings.sprout_threshold}
+              save={(patch) => api.patchSeries(guildId, series.id, patch)}
+              onChanged={seriesChanged}
+              reread={() => rereadSeries(series.id)}
+              onUnauthorized={expired}
+            />
+          {/each}
+        </ul>
+      {/if}
+    </section>
+  {/if}
+</div>
 
 <style>
-  .block {
+  .guild {
+    /* The page pads its sides by this much; the settings form's sticky Save
+     * bar uses it to reach the screen edges. */
+    --form-bleed: var(--space-md);
+
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-lg);
     margin-top: var(--space-lg);
-    padding: var(--space-lg);
-    background: var(--surface-1);
-    border: 1px solid var(--hairline);
-    border-radius: var(--radius-xl);
-    box-shadow: var(--shadow-card);
   }
-  .eyebrow {
-    margin: 0 0 var(--space-sm);
-    color: var(--ink-subtle);
-    font-size: var(--fs-eyebrow);
-    font-weight: var(--fw-emphasis);
-    letter-spacing: 0.6px;
-    text-transform: uppercase;
-  }
-  .pad {
-    padding: var(--space-lg);
-  }
-  .muted {
-    color: var(--ink-muted);
-  }
-  .error {
-    margin: var(--space-md) 0 0;
-    padding: var(--space-sm) var(--space-md);
-    color: var(--ink);
-    background: color-mix(in srgb, var(--error) 25%, var(--surface-1));
-    border: 1px solid var(--error);
-    border-radius: var(--radius-md);
-  }
-  .settings {
-    display: grid;
-    gap: var(--space-md);
-    grid-template-columns: 1fr;
-  }
-  label {
-    display: grid;
-    gap: 4px;
-    font-size: var(--fs-body-sm);
-  }
-  label em {
-    color: var(--ink-subtle);
-    font-style: normal;
-  }
-  label.check {
-    grid-auto-flow: column;
-    justify-content: start;
+  .heading {
+    display: flex;
+    gap: var(--space-sm);
     align-items: center;
+    min-width: 0;
+  }
+  h1 {
+    min-width: 0;
+    margin: 0;
+    font-size: var(--fs-card-title);
+    font-weight: var(--fw-display);
+    letter-spacing: var(--tracking-display);
+    line-height: 1.2;
+    overflow-wrap: anywhere;
+  }
+  /* Focused by script when the panel opens; it is not a control. */
+  h1:focus {
+    outline: none;
+  }
+  .part {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
     gap: var(--space-sm);
   }
-  input[type='text'],
-  input[type='number'],
-  select {
-    padding: 12px 14px;
-    color: var(--ink);
-    font: inherit;
-    background: var(--surface-2);
-    border: 1px solid var(--hairline);
-    border-radius: var(--radius-lg);
+  h2 {
+    margin: 0;
+    font-size: var(--fs-subhead);
+    font-weight: var(--fw-display);
   }
-  input:focus,
-  select:focus {
-    outline: 2px solid var(--link);
-    outline-offset: -1px;
-  }
-  .actions {
-    display: flex;
-    gap: var(--space-md);
-    align-items: center;
-  }
-  .ok {
-    color: var(--success);
+  .lead,
+  .empty {
+    margin: 0;
+    color: var(--ink-muted);
     font-size: var(--fs-body-sm);
+  }
+  .lead {
+    max-width: 44rem;
   }
   .series {
     display: grid;
-    gap: var(--space-xs);
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-sm);
     margin: 0;
     padding: 0;
     list-style: none;
-  }
-  .row {
-    display: grid;
-    grid-template-columns: 1fr auto auto;
-    gap: var(--space-sm);
-    align-items: center;
-    padding: var(--space-sm) var(--space-md);
-    background: var(--surface-2);
-    border-radius: var(--radius-lg);
-  }
-  .row.revoked {
-    opacity: 0.6;
-  }
-  .meta {
-    display: grid;
-    gap: 2px;
-    min-width: 0;
-  }
-  .name {
-    font-weight: var(--fw-emphasis);
-  }
-  .primary {
-    padding: 12px 22px;
-    color: var(--inverse-ink);
-    font: inherit;
-    font-weight: var(--fw-display);
-    background: var(--inverse-canvas);
-    border: 0;
-    border-radius: var(--radius-pill);
-    box-shadow: var(--shadow-soft);
-    cursor: pointer;
-  }
-  .primary:disabled {
-    opacity: 0.6;
-  }
-  .ghost {
-    padding: 8px 14px;
-    color: var(--ink);
-    font: inherit;
-    font-size: var(--fs-body-sm);
-    font-weight: var(--fw-emphasis);
-    background: var(--surface-3);
-    border: 0;
-    border-radius: var(--radius-pill);
-    cursor: pointer;
-  }
-  .danger {
-    padding: 8px 14px;
-    color: var(--error);
-    font: inherit;
-    font-size: var(--fs-body-sm);
-    background: transparent;
-    border: 1px solid var(--error);
-    border-radius: var(--radius-pill);
-    cursor: pointer;
-  }
-  @media (min-width: 640px) {
-    .settings {
-      grid-template-columns: 1fr 1fr;
-    }
-    label.check,
-    .actions {
-      grid-column: 1 / -1;
-    }
   }
 </style>

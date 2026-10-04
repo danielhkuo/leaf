@@ -5,9 +5,77 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="theme-color" content="#f4efe7" />
     <title>leaf</title>
+    <!-- Headings use Fraunces, which the browser would otherwise only discover
+         once the first heading renders, after the whole boot. Vite rewrites the
+         path to the same fingerprinted file app.css points at. -->
+    <link
+      rel="preload"
+      href="/src/lib/fonts/fraunces-latin-wght.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin
+    />
+    <!-- Static boot shell: painted from the HTML alone, before the app's script
+         has downloaded. It mirrors the loading state in App.svelte so the swap
+         is not visible; main.ts removes it when it mounts a view. Styles only:
+         Discord's proxy does not allow inline scripts. -->
+    <style>
+      html {
+        background: #f4efe7;
+      }
+      .boot-shell {
+        display: grid;
+        place-items: center;
+        min-height: 100%;
+        margin: 0;
+        padding: var(--space-lg, 24px);
+        color: var(--ink-muted, #5c574e);
+        text-align: center;
+      }
+      .boot-shell-center {
+        display: grid;
+        gap: var(--space-sm, 12px);
+        justify-items: center;
+      }
+      .boot-shell-center p {
+        margin: 0;
+      }
+      .boot-shell-mark {
+        display: inline-block;
+        font-size: var(--fs-display, 2.75rem);
+        line-height: 1;
+        transform-origin: 50% 90%;
+        animation: boot-shell-sway 2.4s ease-in-out infinite alternate;
+      }
+      @keyframes boot-shell-sway {
+        from {
+          transform: rotate(-7deg);
+        }
+        to {
+          transform: rotate(7deg);
+        }
+      }
+      @keyframes boot-shell-breathe {
+        to {
+          opacity: 0.45;
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .boot-shell-mark {
+          animation: boot-shell-breathe 1.2s ease-in-out infinite alternate !important;
+        }
+      }
+    </style>
   </head>
   <body>
-    <div id="app"></div>
+    <div id="app">
+      <div class="boot-shell">
+        <div class="boot-shell-center" role="status">
+          <span class="boot-shell-mark" aria-hidden="true">🍃</span>
+          <p>Opening leaf…</p>
+        </div>
+      </div>
+    </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

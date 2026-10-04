@@ -24,8 +24,42 @@
   src: url('./lib/fonts/fraunces-latin-wght.woff2') format('woff2-variations');
 }
 
+/* Safe-area insets are registered as lengths so a value that fails to parse
+ * (Discord's variables have been empty until the first layout change) resolves
+ * to 0px instead of invalidating every calc()/max() that reads the token. */
+@property --safe-top {
+  syntax: '<length>';
+  inherits: true;
+  initial-value: 0px;
+}
+@property --safe-right {
+  syntax: '<length>';
+  inherits: true;
+  initial-value: 0px;
+}
+@property --safe-bottom {
+  syntax: '<length>';
+  inherits: true;
+  initial-value: 0px;
+}
+@property --safe-left {
+  syntax: '<length>';
+  inherits: true;
+  initial-value: 0px;
+}
+
 :root {
   color-scheme: light;
+
+  /* Safe area — Discord's own variables first (they account for its mobile
+   * chrome), env() as the fallback for iOS and local dev. `#app` pads all four
+   * edges; anything fixed or sticky that escapes that padding (the viewer
+   * overlay, sticky bars) reads these tokens itself. var() is live, so a value
+   * Discord sets late is picked up without any script. */
+  --safe-top: var(--discord-safe-area-inset-top, env(safe-area-inset-top, 0px));
+  --safe-right: var(--discord-safe-area-inset-right, env(safe-area-inset-right, 0px));
+  --safe-bottom: var(--discord-safe-area-inset-bottom, env(safe-area-inset-bottom, 0px));
+  --safe-left: var(--discord-safe-area-inset-left, env(safe-area-inset-left, 0px));
 
   /* Surfaces — warm cream base; white cards float on a soft shadow, with
    * outlines and color contrast carrying the rest of the hierarchy. */
@@ -37,21 +71,31 @@
   --hairline-strong: rgba(32, 32, 32, 0.22);
   --hairline-soft: rgba(32, 32, 32, 0.06);
   --border-strong: #202020; /* Ko-fi framed-card / chip outline */
+  --control-border: #8a8378; /* input / icon-button edge: 3:1 on every surface */
 
   /* Ink — charcoal; softer than pure black but crisp on cream. */
   --ink: #202020;
   --ink-muted: #5c574e;
-  --ink-subtle: #8a8378;
+  --ink-subtle: #6b655b;
   --on-accent-dark: #202020; /* dark text over bright/pastel accent fills */
   --inverse-canvas: #72a4f2; /* blue primary-button ground (Ko-fi CTA) */
   --inverse-ink: #202020; /* dark text on the blue CTA */
 
-  /* Links & semantics — tuned to stay legible on cream. */
-  --link: #3b6fb0;
+  /* Links & semantics — text colours, each at least 4.5:1 on canvas, white
+   * and surface-2 (guarded by utils/contrast.test.ts). The brighter `-fill`
+   * variants are for borders and tinted grounds only, never for text. */
+  --link: #2f5f9e;
   --visited: #6e5fb0;
-  --success: #2e9e6b;
-  --warning: #e08a3c;
-  --error: #e4572e;
+  --success: #1f7a50;
+  --warning: #96590f;
+  --warning-fill: #e08a3c;
+  --error: #b93f1c;
+  --error-fill: #e4572e;
+
+  /* Focus — a dark ring with a white halo, so it reads on cream, on white and
+   * over photos alike (the pastel accents are only ~2:1). */
+  --focus-ring: #202020;
+  --focus-halo: #ffffff;
 
   /* Categorical accent palette — one identity color assigned per series
    * (see utils/accent.ts). Ko-fi pastels: distinct as identity hues, legible
@@ -131,13 +175,21 @@
   box-sizing: border-box;
 }
 
-html,
-body,
-#app {
+html {
   height: 100%;
+  /* Phones: no text inflation in landscape, no rubber-banding under bars
+   * (which also turns off pull-to-refresh on the browser-hosted /admin). */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  overscroll-behavior-y: none;
 }
 
+/* body is a one-item flex row so `#app` stretches to at least the viewport
+ * (percentage heights inside it still resolve) yet grows with its content,
+ * which keeps the bottom inset after the last element of a long page. */
 body {
+  display: flex;
+  min-height: 100%;
   margin: 0;
   background: var(--canvas);
   color: var(--ink);
@@ -145,8 +197,47 @@ body {
   font-size: var(--fs-body);
   font-weight: var(--fw-body);
   line-height: 1.5;
+  /* Names, captions and channel names are other people's text and can be one
+   * long unbroken word: break it rather than let it widen the page. */
+  overflow-wrap: break-word;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
+}
+
+#app {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: var(--safe-top) var(--safe-right) var(--safe-bottom) var(--safe-left);
+}
+
+/* Touch baseline: no grey tap flash over rounded controls, no double-tap zoom
+ * delay, and a long-press on a control does not start a text selection. */
+a,
+button,
+input,
+select,
+textarea,
+label,
+summary,
+[role='button'] {
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+a,
+button,
+summary,
+[role='button'] {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* One focus ring for everything keyboard-reachable. Zero specificity, so a
+ * component can restyle it (an inset ring inside a clipped cell, say) without
+ * a fight. Script-only focus targets (tabindex="-1") are left alone. */
+:where(:focus-visible:not([tabindex='-1'])) {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 2px var(--focus-halo);
 }
 
 a {
@@ -154,6 +245,19 @@ a {
 }
 a:visited {
   color: var(--visited);
+}
+
+/* Text for assistive tech only: a status label, extra context for an icon. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  border: 0;
+  clip-path: inset(50%);
 }
 
 /* Editorial headlines use Fraunces; components keep their own size/weight. */
@@ -164,15 +268,17 @@ h2 {
 
 /* Shared form controls (Ko-fi input): white ground, soft outline, rounded —
  * one input style across creator forms and the admin panel so spacing/focus
- * never drift between screens. */
+ * never drift between screens. Text is never below 16px: iOS zooms the page
+ * into any smaller input on focus and stays zoomed after blur. */
 .control {
   width: 100%;
   min-height: var(--control-height);
   padding: 12px 14px;
   color: var(--ink);
   font: inherit;
+  font-size: max(16px, var(--fs-body));
   background: var(--surface-2);
-  border: 1px solid var(--hairline);
+  border: 1px solid var(--control-border);
   border-radius: var(--radius-lg);
 }
 .control:focus {
@@ -184,6 +290,36 @@ textarea.control {
   min-height: calc(var(--control-height) * 1.6);
   resize: vertical;
 }
+/* A select is drawn from this file in every engine, not by the platform.
+ * Left to itself, WebKit on a Mac keeps its own 26px pop-up button whatever
+ * min-height and padding say, and WebKit counts option text longer than the
+ * box towards the page's width (a 60-character channel name scrolled the
+ * settings screen sideways). So: no native appearance, the text clipped to
+ * the box, and a chevron made of two gradients, so there is no image to
+ * fetch. Tapping it still opens the platform's own picker. */
+select.control {
+  padding-right: 40px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--ink-muted) 50%),
+    linear-gradient(135deg, var(--ink-muted) 50%, transparent 50%);
+  background-repeat: no-repeat;
+  background-position:
+    right 20px center,
+    right 14px center;
+  background-size: 6px 6px;
+  -webkit-appearance: none;
+  appearance: none;
+}
+/* Forced colours (Windows contrast themes) drop every gradient, chevron
+ * included: there a select is the platform's own again, with its arrow. */
+@media (forced-colors: active) {
+  select.control {
+    -webkit-appearance: auto;
+    appearance: auto;
+  }
+}
 .field {
   display: grid;
   gap: 6px;
@@ -194,11 +330,25 @@ textarea.control {
   font-weight: var(--fw-emphasis);
 }
 
+/* Native boxes at a tappable size; the row around them supplies the 44px. */
+input[type='checkbox'],
+input[type='radio'] {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  margin: 0;
+  accent-color: var(--ink);
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
   *::after {
     animation-duration: 0.01ms !important;
+    /* Without this an `infinite` animation keeps looping at 0.01ms a turn and
+     * every painted frame lands on an arbitrary phase: a strobe, not a stop. */
+    animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM posts\n                   WHERE series_id = ? AND day = ? AND message_id = ? AND archived_at = ?\n                     AND NOT EXISTS (\n                         SELECT 1 FROM media_attachments m\n                         WHERE m.series_id = posts.series_id AND m.day = posts.day\n                           AND (m.media_missing = 0\n                                OR m.original_key IS NOT NULL\n                                OR m.thumb_key IS NOT NULL)\n                     )",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "cd73161f9daf1f690d8811b654fc5dd03356f4ea55803c9986038dc48c50afcb"
+}

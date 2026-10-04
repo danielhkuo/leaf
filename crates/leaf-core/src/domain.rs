@@ -289,6 +289,108 @@ pub struct NewMediaAttachment {
     pub media_missing: bool,
 }
 
+/// One archived day's headline for the gallery index: enough to draw a
+/// calendar tile without loading the day itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DaySummary {
+    /// Day number.
+    pub day: i64,
+    /// Original message timestamp, unix seconds.
+    pub posted_at: i64,
+    /// The attachment that represents the day on a tile: the first one with
+    /// a stored thumbnail, else the first media row. `None` when the day
+    /// has no media rows at all.
+    pub first_attachment_id: Option<String>,
+    /// Whether that attachment has a stored thumbnail to serve.
+    pub has_thumb: bool,
+    /// True when no media file is stored for the day: every media row is a
+    /// `media_missing` placeholder, or there are none.
+    pub missing: bool,
+    /// Number of media rows (stored and placeholder).
+    pub media_count: i64,
+}
+
+/// One archived day flattened for `/export`: the post plus the object keys
+/// of its stored originals, in attachment order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportRow {
+    /// Day number.
+    pub day: i64,
+    /// Source message snowflake.
+    pub message_id: String,
+    /// Source channel snowflake.
+    pub channel_id: String,
+    /// Caption (message content at archive time).
+    pub caption: String,
+    /// Original message timestamp, unix seconds.
+    pub posted_at: i64,
+    /// Object keys of the stored originals; placeholders contribute none.
+    pub media_keys: Vec<String>,
+}
+
+string_enum! {
+    /// Why a reminder could not be delivered.
+    ///
+    /// These texts are the whole vocabulary of `series.reminder_error`: the
+    /// scheduler writes [`Self::as_str`], the API passes the text through
+    /// unchanged, and the Activity picks its advice by it. Add a variant
+    /// here before writing a new reason anywhere.
+    ReminderFailureKind {
+        /// Discord refused the DM: the creator does not accept DMs from
+        /// this server, blocked the bot, or no longer shares a server with
+        /// it (codes 50007, 50278).
+        DmClosed => "dm_closed",
+        /// The channel to ping is gone (code 10003), or the series has no
+        /// usable channel to ping.
+        ChannelMissing => "channel_missing",
+        /// leaf cannot see or post in the channel (codes 50001, 50013).
+        NoPermission => "no_permission",
+    }
+}
+
+impl ReminderFailureKind {
+    /// Classifies a Discord JSON error code from a failed reminder send
+    /// (typed as serenity reports it). `None` means the failure is not one
+    /// of the permanent kinds and is not recorded.
+    #[must_use]
+    pub const fn from_discord_code(code: isize) -> Option<Self> {
+        match code {
+            50_007 | 50_278 => Some(Self::DmClosed),
+            10_003 => Some(Self::ChannelMissing),
+            50_001 | 50_013 => Some(Self::NoPermission),
+            _ => None,
+        }
+    }
+}
+
+/// Why a series' last reminder could not be delivered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReminderFailure {
+    /// The recorded reason: a [`ReminderFailureKind`] text.
+    pub reason: String,
+    /// When the failure was recorded, unix seconds.
+    pub at: i64,
+}
+
+impl ReminderFailure {
+    /// The recorded reason as a [`ReminderFailureKind`]; `None` when the
+    /// column holds a text outside the vocabulary (treat it as a generic
+    /// "could not deliver").
+    #[must_use]
+    pub fn kind(&self) -> Option<ReminderFailureKind> {
+        self.reason.parse().ok()
+    }
+}
+
+/// Where the gallery should open after a chat button launched it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LaunchIntent {
+    /// Series to open.
+    pub series_id: i64,
+    /// Day to open within the series; `None` opens the series itself.
+    pub day: Option<i64>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,6 +417,41 @@ mod tests {
         }
         for d in [DetectionMode::ContextMenu, DetectionMode::Passive] {
             assert_eq!(d.as_str().parse::<DetectionMode>().ok(), Some(d));
+        }
+    }
+
+    #[test]
+    fn reminder_failure_kinds_round_trip_and_classify() {
+        for (kind, text) in [
+            (ReminderFailureKind::DmClosed, "dm_closed"),
+            (ReminderFailureKind::ChannelMissing, "channel_missing"),
+            (ReminderFailureKind::NoPermission, "no_permission"),
+        ] {
+            assert_eq!(kind.as_str(), text);
+            assert_eq!(text.parse::<ReminderFailureKind>().ok(), Some(kind));
+            let failure = ReminderFailure {
+                reason: text.to_owned(),
+                at: 0,
+            };
+            assert_eq!(failure.kind(), Some(kind));
+        }
+        let unknown = ReminderFailure {
+            reason: "something else".to_owned(),
+            at: 0,
+        };
+        assert_eq!(unknown.kind(), None);
+
+        for (code, kind) in [
+            (50_007, Some(ReminderFailureKind::DmClosed)),
+            (50_278, Some(ReminderFailureKind::DmClosed)),
+            (10_003, Some(ReminderFailureKind::ChannelMissing)),
+            (50_001, Some(ReminderFailureKind::NoPermission)),
+            (50_013, Some(ReminderFailureKind::NoPermission)),
+            // Unknown message: not a delivery-route problem.
+            (10_008, None),
+            (0, None),
+        ] {
+            assert_eq!(ReminderFailureKind::from_discord_code(code), kind);
         }
     }
 

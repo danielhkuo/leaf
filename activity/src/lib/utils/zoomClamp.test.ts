@@ -16,6 +16,17 @@ describe('fitDimensions', () => {
     expect(height).toBeCloseTo(266.67, 1);
   });
 
+  it('leaves a small image at its own size unless asked to fill the frame', () => {
+    expect(fitDimensions(400, 800, 256, 128)).toEqual({ width: 256, height: 128 });
+    expect(fitDimensions(400, 800, 256, 128, true)).toEqual({ width: 400, height: 200 });
+  });
+
+  it('gives a thumbnail and its full photo the same box when filling', () => {
+    const thumb = fitDimensions(375, 500, 256, 192, true);
+    const full = fitDimensions(375, 500, 2048, 1536, true);
+    expect(thumb).toEqual(full);
+  });
+
   it('returns zero when inputs are missing', () => {
     expect(fitDimensions(0, 400, 800, 1200)).toEqual({ width: 0, height: 0 });
   });
@@ -51,6 +62,14 @@ describe('panLimits', () => {
     const letterboxed = panLimits(800, 600, 1600, 400, 2);
     const frameOnly = { maxX: 400, maxY: 150 };
     expect(letterboxed.maxY).toBeLessThan(frameOnly.maxY);
+  });
+});
+
+describe('panLimits when filling the frame', () => {
+  it('measures from the enlarged box', () => {
+    // 200×100 in 400×600 → shown 400×200; at 2× → 800×400.
+    expect(panLimits(400, 600, 200, 100, 2)).toEqual({ maxX: 0, maxY: 0 });
+    expect(panLimits(400, 600, 200, 100, 2, true)).toEqual({ maxX: 200, maxY: 0 });
   });
 });
 

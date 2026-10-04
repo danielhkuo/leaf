@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT MIN(day) AS \"min: i64\" FROM posts WHERE series_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "min: i64",
+        "ordinal": 0,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "43ce19a41c58649baaa65de61a583c8263114f0613c96676acb548e479db46a3"
+}
