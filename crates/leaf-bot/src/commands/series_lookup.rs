@@ -25,7 +25,7 @@ use serenity::futures::StreamExt as _;
 
 pub(crate) use crate::components::open_gallery_id;
 use crate::components::{self, NONCE};
-use crate::{Context, Data, Error, checks};
+use crate::{Context, Data, Error, checks, menus};
 
 /// The command context the lookups and answers run on.
 pub(crate) type App<'a> = poise::ApplicationContext<'a, Data, Error>;
@@ -389,7 +389,8 @@ pub(crate) async fn settle<'a>(
         }
         Lookup::Missing(known) => {
             let known = rank(known.clone(), asker, &recency(data, &known).await);
-            let mut answer = Answer::private(missing_text(input, &known, scope, asker.is_admin));
+            let text = missing_text(input, &known, scope, asker.is_admin, &data.app_name());
+            let mut answer = Answer::private(text);
             if known.is_empty() && matches!(scope, Scope::Viewable | Scope::Gallery) {
                 answer =
                     answer.button(open_gallery_button(None).style(serenity::ButtonStyle::Primary));
@@ -458,7 +459,8 @@ pub async fn resolve_series(
         Lookup::NotTheirs(series) => not_theirs_text(series),
         Lookup::Missing(known) => {
             let known = rank(known.clone(), &asker, &recency(ctx.data(), &known).await);
-            missing_text(Some(name), &known, scope, asker.is_admin)
+            let app = ctx.data().app_name();
+            missing_text(Some(name), &known, scope, asker.is_admin, &app)
         }
     };
     ctx.send(poise::CreateReply::default().content(text).ephemeral(true))
@@ -829,11 +831,18 @@ fn name_list(series: &[&Series], max: usize) -> String {
 }
 
 /// The reply when nothing in scope fits. `known` is everything in scope,
-/// best first: the names the invoker could have meant.
-fn missing_text(input: Option<&str>, known: &[&Series], scope: Scope, is_admin: bool) -> String {
+/// best first: the names the invoker could have meant. `app` is the name
+/// Discord lists leaf's app under (see [`empty_scope_text`]).
+fn missing_text(
+    input: Option<&str>,
+    known: &[&Series],
+    scope: Scope,
+    is_admin: bool,
+    app: &str,
+) -> String {
     let typed = input.map(str::trim).filter(|i| !i.is_empty());
     let (Some(typed), false) = (typed, known.is_empty()) else {
-        return empty_scope_text(scope, is_admin);
+        return empty_scope_text(scope, is_admin, app);
     };
     let names = name_list(known, NAMES_SHOWN_MAX);
     if scope == Scope::Deletable && !is_admin {
@@ -849,16 +858,19 @@ fn missing_text(input: Option<&str>, known: &[&Series], scope: Scope, is_admin: 
     }
 }
 
-/// The reply when the scope is empty.
-fn empty_scope_text(scope: Scope, is_admin: bool) -> String {
+/// The reply when the scope is empty. Someone with nothing of their own to
+/// delete is shown the way to Remove Archive Entry, through `app` (the name
+/// Discord lists leaf's app under).
+fn empty_scope_text(scope: Scope, is_admin: bool, app: &str) -> String {
     match scope {
         Scope::Viewable | Scope::Gallery => {
             "🌱 There's no series here you can view yet. Open the gallery to start one.".to_owned()
         }
-        Scope::Deletable if !is_admin => "🍂 You don't have a series here, so there's nothing \
-             of yours to delete. If one of your posts was archived into someone else's series, \
-             long-press the post (right-click on desktop), then Apps, then Remove Archive Entry."
-            .to_owned(),
+        Scope::Deletable if !is_admin => format!(
+            "🍂 You don't have a series here, so there's nothing of yours to delete. If one of \
+             your posts was archived into someone else's series, {}.",
+            menus::command_steps(app, menus::REMOVE_COMMAND)
+        ),
         Scope::Deletable | Scope::Any => "🍂 There are no series in this server yet.".to_owned(),
     }
 }
@@ -929,6 +941,9 @@ mod tests {
     use leaf_core::domain::{Cadence, DetectionMode, Privacy};
 
     use super::*;
+
+    /// What Discord lists the app as in these tests: not "leaf".
+    const APP: &str = "leaf-dev";
 
     fn series(id: i64, name: &str, creator: &str) -> Series {
         Series {
@@ -1314,33 +1329,44 @@ mod tests {
         let all = server();
         let known: Vec<&Series> = vec![&all[0], &all[4]];
         assert_eq!(
-            missing_text(Some(" daly johan "), &known, Scope::Viewable, false),
+            missing_text(Some(" daly johan "), &known, Scope::Viewable, false, APP),
             "🍂 I couldn't find a series called **daly johan**. Series here: **Daily Johan** \
              and **Bob Draws**."
         );
         assert_eq!(
-            missing_text(Some("x"), &known, Scope::Deletable, false),
+            missing_text(Some("x"), &known, Scope::Deletable, false, APP),
             "🍂 I couldn't find a series of yours called **x**. Yours: **Daily Johan** and \
              **Bob Draws**."
         );
         let many: Vec<Series> = (0..13).map(|i| series(i, &format!("S{i}"), "x")).collect();
         let many: Vec<&Series> = many.iter().collect();
-        let text = missing_text(Some("x"), &many, Scope::Viewable, false);
+        let text = missing_text(Some("x"), &many, Scope::Viewable, false, APP);
         assert!(text.ends_with("**S8**, **S9** and 3 more."), "{text}");
         // Typed markdown is shown literally, and long input is cut.
-        let text = missing_text(Some("**x**"), &known, Scope::Viewable, false);
+        let text = missing_text(Some("**x**"), &known, Scope::Viewable, false, APP);
         assert!(text.contains(r"**\*\*x\*\***"), "{text}");
         let long = "y".repeat(80);
-        let text = missing_text(Some(&long), &known, Scope::Viewable, false);
+        let text = missing_text(Some(&long), &known, Scope::Viewable, false, APP);
         assert!(text.contains(&format!("**{}…**", "y".repeat(ECHO_MAX_CHARS - 1))));
     }
 
     #[test]
     fn an_empty_scope_says_what_to_do_next() {
-        assert!(missing_text(Some("x"), &[], Scope::Viewable, false).contains("Open the gallery"));
-        assert!(missing_text(None, &[], Scope::Deletable, false).contains("Remove Archive Entry"));
         assert_eq!(
-            missing_text(None, &[], Scope::Deletable, true),
+            missing_text(Some("x"), &[], Scope::Viewable, false, APP),
+            "🌱 There's no series here you can view yet. Open the gallery to start one."
+        );
+        // Someone whose post sits in another person's series is shown the
+        // whole way to the command that removes it.
+        assert_eq!(
+            missing_text(None, &[], Scope::Deletable, false, APP),
+            "🍂 You don't have a series here, so there's nothing of yours to delete. If one of \
+             your posts was archived into someone else's series, on a phone, press and hold the \
+             post, tap **Apps** (scroll down to find it), **leaf-dev**, then **Remove Archive \
+             Entry**. On desktop: right-click it, **Apps**, **Remove Archive Entry**."
+        );
+        assert_eq!(
+            missing_text(None, &[], Scope::Deletable, true, APP),
             "🍂 There are no series in this server yet."
         );
     }

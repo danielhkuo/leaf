@@ -1,0 +1,182 @@
+#!/usr/bin/env python3
+"""Stand-in for the leaf binary, for scripts/tests/run.
+
+It speaks just enough of leaf for scripts/dev-up, dev-down and dev-status to
+be tested without building leaf or touching Discord: the two modes'
+addresses (`/setup` in setup mode; `/healthz` and `/api/status` in run mode),
+the setup-code log line, and a clean exit on SIGTERM. It listens on 127.0.0.1
+only. What it does is chosen by environment variables:
+
+  STUB_LEAF              setup (default), run, die (exit 1 at once) or hang
+                         (never listen)
+  STUB_SETUP_CODE        the code in the log line (default TEST-C0DE)
+  STUB_GATEWAY           what /api/status ends on: online (default), error or
+                         starting
+  STUB_GATEWAY_STARTING  how many /api/status answers say `starting` first
+  STUB_IGNORE_TERM       ignore SIGTERM when this names `leaf` (each one is
+                         logged, so a test can tell it has arrived)
+  STUB_TERM_EXEC         a program to turn into on SIGTERM: the pid stays and
+                         the command line changes, which is what a pid handed
+                         to another process looks like from outside
+  STUB_STATE             a directory: `leaf.env` is written there with the
+                         settings this process was started with and whether
+                         it was started ignoring SIGHUP (what nohup does).
+                         While a file `leaf.deaf` is there, every request
+                         gets 503: a leaf that runs and does not answer
+  STUB_READY_FIFO        a fifo that gets one line once the port is open (in
+                         `hang` mode, once it would have been)
+
+Like leaf, it exits on SIGINT even when started with SIGINT ignored: tokio
+installs its own handler, so only a process group of its own keeps Ctrl-C
+away from it.
+"""
+
+import http.server
+import json
+import os
+import signal
+import sys
+
+MODE = os.environ.get("STUB_LEAF", "setup")
+STATE = os.environ.get("STUB_STATE", "")
+GATEWAY = os.environ.get("STUB_GATEWAY", "online")
+starting_left = int(os.environ.get("STUB_GATEWAY_STARTING", "0"))
+
+# What leaf's `error` state carries: a sentence with quotes and a backslash,
+# so the scripts' unescaping is exercised.
+ERROR_DETAIL = 'Discord refused the bot token ("401 Unauthorized"). Path C:\\leaf.'
+NOTICE = "Discord has not accepted the command list yet."
+
+
+def log(message):
+    # Like leaf, whose lines here are all at info level.
+    if os.environ.get("LOG_LEVEL", "info") in ("warn", "error"):
+        return
+    line = "2026-10-03T12:00:00.000000Z  INFO leaf: " + message
+    if not os.environ.get("NO_COLOR"):
+        # What tracing prints to a file when nothing turns colour off.
+        line = "\x1b[2m2026-10-03T12:00:00.000000Z\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2mleaf\x1b[0m\x1b[2m:\x1b[0m " + message
+    print(line, flush=True)
+
+
+def on_term(_signum, _frame):
+    log("shut down cleanly")
+    sys.exit(0)
+
+
+def on_term_ignored(_signum, _frame):
+    log("stub: SIGTERM ignored")
+
+
+def on_term_exec(_signum, _frame):
+    program = os.environ.pop("STUB_TERM_EXEC")
+    os.environ["STUB_LEAF"] = "hang"
+    os.environ.pop("STUB_READY_FIFO", None)
+    sys.stdout.flush()
+    os.execv(program, [program])
+
+
+def on_int(_signum, _frame):
+    log("shutdown requested (SIGINT)")
+    sys.exit(0)
+
+
+def deaf():
+    return bool(STATE) and os.path.exists(os.path.join(STATE, "leaf.deaf"))
+
+
+def ready():
+    fifo = os.environ.get("STUB_READY_FIFO")
+    if fifo:
+        with open(fifo, "w", encoding="utf-8") as pipe:
+            pipe.write("ready\n")
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *_args):
+        pass
+
+    def answer(self, status, body="", content_type="text/plain", location=None):
+        payload = body.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(payload)))
+        if location:
+            self.send_header("Location", location)
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def do_GET(self):
+        global starting_left
+        path = self.path.split("?", 1)[0]
+        if deaf():
+            self.answer(503)
+        elif MODE == "setup":
+            if path == "/setup":
+                self.answer(200, "<title>Set up leaf</title>", "text/html")
+            elif path == "/":
+                self.answer(307, location="/setup")
+            else:
+                self.answer(404)
+        elif path == "/healthz":
+            self.answer(200, "ok")
+        elif path == "/setup":
+            self.answer(307, location="/admin")
+        elif path == "/api/status":
+            if starting_left > 0:
+                starting_left -= 1
+                body = {"gateway": "starting"}
+            elif GATEWAY == "error":
+                body = {"gateway": "error", "detail": ERROR_DETAIL, "notice": NOTICE}
+            else:
+                body = {"gateway": GATEWAY}
+            self.answer(200, json.dumps(body, separators=(",", ":")), "application/json")
+        else:
+            self.answer(200, "<title>leaf</title>", "text/html")
+
+
+def main():
+    if STATE:
+        with open(os.path.join(STATE, "leaf.env"), "w", encoding="utf-8") as record:
+            for key in ("DATA_DIR", "STATIC_DIR", "BIND_ADDR", "LOG_LEVEL", "DEV_GUILD_ID", "NO_COLOR"):
+                record.write(f"{key}={os.environ.get(key, '<unset>')}\n")
+            record.write(f"cwd={os.getcwd()}\n")
+            hup = "ignored" if signal.getsignal(signal.SIGHUP) == signal.SIG_IGN else "default"
+            record.write(f"SIGHUP={hup}\n")
+
+    if os.environ.get("STUB_TERM_EXEC"):
+        signal.signal(signal.SIGTERM, on_term_exec)
+    elif "leaf" in os.environ.get("STUB_IGNORE_TERM", ""):
+        signal.signal(signal.SIGTERM, on_term_ignored)
+    else:
+        signal.signal(signal.SIGTERM, on_term)
+    signal.signal(signal.SIGINT, on_int)
+
+    bind = os.environ.get("BIND_ADDR", "")
+    if MODE == "die":
+        print(f"Error: binding {bind}", flush=True)
+        print("Caused by: Address already in use (os error 48)", flush=True)
+        sys.exit(1)
+    if MODE == "hang":
+        log("stub: never listening")
+        ready()
+        while True:
+            signal.pause()
+
+    host, _, port = bind.rpartition(":")
+    if host != "127.0.0.1":
+        print(f"stub leaf: BIND_ADDR must be 127.0.0.1:<port>, not {bind!r}", flush=True)
+        sys.exit(1)
+    server = http.server.HTTPServer((host, int(port)), Handler)
+    if MODE == "setup":
+        log("no configuration found — starting in setup mode")
+        log(f"→ open http://localhost:{port}/setup (or your mapped host)")
+        log("→ setup code: " + os.environ.get("STUB_SETUP_CODE", "TEST-C0DE"))
+    else:
+        log(f"serving bind={bind}")
+    ready()
+    server.serve_forever()
+
+
+if __name__ == "__main__":
+    main()

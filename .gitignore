@@ -5,11 +5,24 @@ target/
 node_modules/
 activity/dist/
 
+# Playwright (activity/e2e): each run's output and report. Screenshot
+# baselines depend on the OS's fonts, so only the macOS set is committed; one
+# made on another OS stays local.
+activity/test-results/
+activity/playwright-report/
+activity/e2e/**/__screenshots__/*/
+!activity/e2e/**/__screenshots__/darwin/
+
 # Local data (dev runs)
 data/
 *.db
 *.db-shm
 *.db-wal
+
+# The local dev environment (scripts/dev-up): this machine's settings, and
+# the runtime directory with the pid files and logs of what it started.
+scripts/dev.env
+.dev-run/
 
 # Planning & docs — kept local only, not committed.
 # (Includes docs/reference/, the vendored Svelte docs; restore with:

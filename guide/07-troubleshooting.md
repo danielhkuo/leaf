@@ -4,7 +4,95 @@ Common failures and fixes. (Discord and Cloudflare dashboard layouts drift; see
 the note in the [guide index](README.md#dashboards-change) if a menu isn't where
 a guide says.)
 
-Most answers start in the log:
+## Start here: `leaf doctor`
+
+When something is off, ask leaf to check itself before reading further:
+
+```sh
+docker compose exec leaf leaf doctor
+```
+
+(With the container stopped: `docker compose run --rm leaf doctor`.)
+
+It checks a configured install live and prints one line per thing it checked:
+`ok`, `warn`, `FAIL` or `skip`, the name of the check, a sentence, and for a
+warning or a failure the next step to take.
+
+```
+ok    config    leaf.conf loads from /data.
+ok    config    The public address is https://leaf.example.com.
+ok    discord   Discord accepts the bot token (bot user “leaf”).
+ok    discord   The token belongs to application “leaf” (ID 123456789012345678), the client ID in leaf.conf.
+ok    discord   Discord accepts the client ID and client secret together, so sign-in can work.
+ok    commands  All 13 commands leaf registers are listed globally, and nothing else is.
+ok    commands  The Activity's Entry Point command (“launch”) is registered.
+ok    gateway   Discord's gateway answers, and 998 of 1000 session starts remain.
+FAIL  storage   The storage check failed at its write step. R2 has no bucket named “leaf-media” at this endpoint. […] Next: Correct it in the R2 dashboard, or enter new storage details with --reconfigure […]
+ok    database  leaf.db opens read-only, and its 3 migrations are exactly the ones this leaf has.
+10 checked: 9 ok, 0 warn, 1 FAIL, 0 skip.
+```
+
+It starts neither the web server nor the bot, writes nothing to the database,
+and never prints a credential, so it is safe to run beside a running leaf and
+to paste into a bug report. The one thing it writes is a small test object in
+the bucket (a test file, when storage is a folder), which it removes again. The exit status is `0` when nothing
+failed, `1` when a check failed, and `2` for a command line it can't read.
+
+(One file beside the database can change. While leaf is running, or after it
+was stopped without a clean shutdown, there is a `leaf.db-wal` file, and
+SQLite can't read it without its index, `leaf.db-shm`: the doctor's read-only
+connection creates that file if it is missing and rewrites it otherwise.
+`leaf.db` and `leaf.db-wal` themselves are not written.)
+
+| Check | What it confirms | When it fails |
+| --- | --- | --- |
+| `config` | `leaf.conf` loads from `DATA_DIR`. The Public URL is `https://` (plain `http://` only on localhost) and is the bare address, with no path. | [`--reconfigure`](01-install.md#changing-credentials-later---reconfigure) |
+| `discord` | Discord accepts the bot token (`GET /users/@me`). The token belongs to the application whose ID is configured (`GET /applications/@me`). Discord accepts the client ID and client secret together (what every sign-in needs). | [Bot offline](#bot-offline), [Admin panel](#admin-panel) |
+| `commands` | Every command leaf registers is in Discord's list (the global one, or the `DEV_GUILD_ID` server's), nothing is listed that leaf no longer has, and the Activity's Entry Point command exists. | [Commands](#commands) |
+| `gateway` | `GET /gateway/bot` answers and the bot has session starts left (each connection uses one of a daily allowance). | [Bot offline](#bot-offline) |
+| `storage` | A test object, `leaf-doctor-canary`, can be written, read back, read in part (a byte range, which video needs) and deleted in the bucket. It is removed even when a later step fails, and after a write that got no answer (it may have been stored all the same); if it can't be removed, the line says so. When storage is a folder on this machine, the same is done with a file in that folder (which is created if it is missing, as leaf itself does at start), and the line starts "Storage is a local folder" and names it. | The sentence is the one the [setup page](#setup-page) shows for the same problem. For a folder, see [Storage in a folder](#storage-in-a-folder). |
+| `database` | `leaf.db` opens read-only and holds exactly the migrations this version of leaf has. Migrations leaf hasn't applied yet are a `warn` (leaf applies them at its next start); ones it doesn't know, or that differ, are a `FAIL`. | [01 § Data, backups, and updates](01-install.md#data-backups-and-updates) |
+
+A check that depends on something that failed isn't made: it prints `skip`,
+and the failure is on a line of its own (a refused bot token is one `FAIL`
+under `discord`, and `commands` and `gateway` are skipped).
+
+Two more checks run when you ask for them:
+
+- **`--url [<address>]`** asks a running leaf over HTTP: `/healthz` answers,
+  `/api/status` says the bot is `online`, the gallery's page and the script it
+  loads are served, an unknown `/api/…` path answers a JSON 404 rather than
+  the gallery's page, and (once a day is archived) a stored file answers a
+  byte-range request with `206`. Without an address it asks the Public URL,
+  which goes through the tunnel like a browser does. To ask the container
+  directly, which tells a leaf problem from a tunnel problem:
+  ```sh
+  docker compose exec leaf leaf doctor --url http://127.0.0.1:3777
+  ```
+- **`--db-copy <path>`** copies that database file (with its `-wal` and `-shm`
+  files, if any) into a temporary directory, applies the migrations to the
+  copy, runs `PRAGMA integrity_check` and `PRAGMA foreign_key_check` on it,
+  and compares the number of series, posts and media files before and after.
+  The original is only ever read. Use it to try an upgrade's migrations before
+  the upgrade ([01 § Data, backups, and updates](01-install.md#data-backups-and-updates)).
+  If leaf is writing to the database during the copy, the copy can catch a
+  write half-way and fail its integrity check: run it again.
+
+`--only <check,...>` limits a run to the checks named, for example
+`--only storage` or `--only config,database`. `--json` prints one JSON object
+instead of lines, for a script or a CI job: `ok` (false when anything
+failed), `summary` (the four counts) and `results` (each with `check`,
+`status`, `message` and, for a warning or failure, `next`). `leaf doctor
+--help` lists all of this.
+
+The doctor reads `DATA_DIR` and `DEV_GUILD_ID` the way leaf does, so inside the
+container it looks at the install the container runs. The technical cause of a
+failure (R2's or the network's own error text, with the storage keys masked)
+is logged to stderr, apart from the lines above.
+
+## The log
+
+Most other answers start in the log:
 
 ```sh
 docker compose logs leaf
@@ -29,6 +117,10 @@ docker compose logs leaf
     exact, and that the API token has **Object Read & Write** for that bucket.
   - *Access key ID:* "This isn't an R2 access key ID": you pasted the token
     value or the secret; the Access Key ID is the 32-character one.
+  - *S3 endpoint:* "This is a folder, not an S3 endpoint": to keep media in a
+    folder, choose **A folder on this machine** at the top of the Media storage
+    section and enter the path there.
+  - *Folder path:* see [Storage in a folder](#storage-in-a-folder).
   - *Public URL:* the address only (`https://leaf.example.com`), no path.
 - **The success page stays on "Connecting the bot to Discord…"**, or says "The
   bot couldn't connect to Discord." The line under it gives the reason when
@@ -50,6 +142,44 @@ docker compose logs leaf
   writable by the non-root `leaf` user. The image pre-owns `/data`; if you
   bind-mount a host path instead of the named volume, `chown` it to the
   container's user or use the named volume from `docker-compose.yml`.
+
+## Storage in a folder
+
+For an install whose media is kept in **a folder on this machine** instead of
+R2 ([01 § Storage](01-install.md#storage-r2-or-a-folder-on-this-machine)). The
+log line `storing media in a folder on this machine` at each start names the
+folder in use.
+
+- **"Enter the folder's full path, starting with /"** (setup page). leaf needs
+  the whole path, such as `/data/media`. `media`, `./media` and `~/media` are
+  refused, and so is `/` alone.
+- **"leaf can't create this folder."** The folder isn't there and leaf couldn't
+  make it: a folder above it isn't writable by the user leaf runs as, or a
+  file already has that name. Create the folder yourself and make it writable
+  by that user, or pick a path inside the data directory.
+- **"leaf can't save files in this folder."** The folder exists, but the user
+  leaf runs as can't write in it, or the disk is full or mounted read-only. In
+  Docker, a folder inside the data volume (`/data/media`) is writable already;
+  a bind-mounted host folder has to be `chown`ed to the container's user.
+- **leaf stops at start with `storage folder: creating …` or `storage folder:
+  opening …`.** The same two causes, met when leaf starts: the line ends with
+  the system's own reason (for example `Permission denied`). Fix the folder,
+  or choose other storage with
+  [`--reconfigure`](01-install.md#changing-credentials-later---reconfigure).
+- **Every photo and video is missing after an update or a new container**, and
+  the gallery shows "This photo didn't load" for old days. The folder was
+  outside the mounted data volume, so it was inside the container that was
+  replaced, and the files went with it. They can't be brought back from leaf's
+  side: restore the folder from a backup. Then move it into the volume
+  (`/data/media`) and enter that path with `--reconfigure`.
+- **Old days lost their pictures after switching between a folder and R2.**
+  `--reconfigure` changes where leaf looks; it doesn't move the files. Copy
+  them from the old place to the new one
+  ([01 § Changing credentials later](01-install.md#changing-credentials-later---reconfigure)).
+- **`leaf.conf` has `bucket = "local"` (or any other text) under a `file://`
+  endpoint.** That is a config from before the setup page offered a folder. It
+  keeps working: with a `file://` endpoint the bucket and the two keys are not
+  read.
 
 ## Not reachable
 
@@ -80,6 +210,7 @@ curl -s https://leaf.example.com/api/status
 | --- | --- |
 | `{"gateway":"online"}` | The bot is connected. |
 | `{"gateway":"starting"}` | It is connecting. |
+| `{"gateway":"starting","notice":"…"}` | It is still connecting, and `notice` says why that is taking long: what the last attempt failed on, or that the bot hasn't connected after 30 seconds. |
 | `{"gateway":"error","detail":"…"}` | The last attempt failed; `detail` is a sentence saying why. |
 | `{"gateway":"online","notice":"…"}` | Connected, but something needs attention; `notice` says what (for example Discord has not accepted leaf's command list, so commands are missing or out of date). |
 
@@ -90,6 +221,9 @@ leaf does after a failure depends on the cause:
 | --- | --- |
 | `gateway exited with error` with `Sent invalid authentication`, then `gateway will not be retried` | The bot token was reset or revoked. leaf doesn't retry this one. Enter the new token with [`--reconfigure`](01-install.md#changing-credentials-later---reconfigure). |
 | `gateway exited with error` or `gateway stopped unexpectedly`, then `reconnecting to the gateway after a wait` | Discord or the network was unreachable. leaf reconnects by itself, after 5 seconds at first and at most every 5 minutes. If it never gets through, check the container's outbound network. |
+| `gateway exited with error` with `Discord did not answer within 30 seconds` | Nothing came back at all. Something between leaf and Discord is holding the connection: check the machine's network, and any firewall that filters outgoing connections (one that asks before it lets a new program out holds leaf until you allow it). leaf tries again by itself. |
+| `gateway exited with error` with `Discord rate-limited the bot` | Discord answered, and told the bot to wait longer than 30 seconds. Nothing on your machine is in the way. leaf tries again by itself; if it goes on for hours, the address leaf connects from has sent Discord too many requests (a shared host, or another bot on the same address). |
+| `gateway not connected yet; still trying`, and `/api/status` says `starting` with "The bot hasn't connected to Discord yet" | leaf's first requests to Discord went out, but the bot's live connection (a WebSocket to `gateway.discord.gg`) has not come up after 30 seconds. Check that a firewall or proxy lets WebSocket connections out. leaf keeps trying, and the notice goes away once it connects. |
 | A line starting `registering commands failed` | The bot is online, but Discord didn't take its command list, so new or changed commands don't work yet (Discord keeps the list of an earlier run). `/api/status` shows a `notice` while this lasts. leaf tries again by itself (after 30 seconds, then at growing intervals up to 30 minutes); the line's `error` field has Discord's reason. With `DEV_GUILD_ID` set, the usual cause is that the bot isn't in that server or the ID is wrong ([01](01-install.md#command-registration-and-dev_guild_id)). |
 
 ## Commands
@@ -109,6 +243,30 @@ leaf does after a failure depends on the cause:
   for `commands registered`, then restart your Discord app. If they stay, the
   log has `could not clear the global command list` or `could not clear
   guild-scoped commands` with Discord's reason.
+- **`leaf doctor` says commands are not registered, or lists commands leaf no
+  longer has.** leaf's last registration didn't go through, or another program
+  uses the same application. Restart leaf and wait for `commands registered`
+  in the log; if the log has `registering commands failed` instead, that row
+  under [Bot offline](#bot-offline) applies.
+- **`leaf doctor` says the Entry Point command is gone.** Activities is
+  enabled, but the command Discord created for it (Launch) was deleted, so leaf
+  is missing from the app launcher. leaf never creates this command; it only
+  sends the existing one back when it registers its own. Discord's guide
+  "Setting Up an Entry Point Command" gives the request that creates it again
+  (leaf itself has never sent it, so treat it as Discord's instructions, not a
+  tested path):
+  ```sh
+  read -rs TOKEN   # paste the bot token and press Enter; it isn't shown
+  printf 'Authorization: Bot %s\n' "$TOKEN" |
+    curl -X POST "https://discord.com/api/v10/applications/<application id>/commands" \
+      -H @- -H "Content-Type: application/json" \
+      -d '{"name":"launch","description":"Launch leaf","type":4,"handler":2,"integration_types":[0],"contexts":[0]}'
+  unset TOKEN
+  ```
+  The token reaches curl on its standard input (`-H @-` reads a header from
+  there; curl 7.55 or newer), not on its command line, where anyone else on
+  the machine could read it from the process list while curl runs. Then run
+  `leaf doctor --only commands` again.
 - **"That command is no longer part of leaf."** Your Discord app is showing a
   command from an older leaf. Restart Discord to refresh the list.
 - **"This command changed in an update and Discord hasn't caught up yet."**
@@ -127,8 +285,10 @@ leaf does after a failure depends on the cause:
   was slow, rate-limiting or unreachable for that one request. Trying again is
   the fix.
 - **"Archive to Series" isn't where I look.** On a phone: press and hold the
-  message, then **Apps**. On desktop: right-click the message, then **Apps**.
-  `/leaf` shows these steps to anyone.
+  message, tap **Apps** (scroll down in the menu to find it), then your bot's
+  name in the list of apps, then **Archive to Series**. On desktop: right-click
+  the message, choose **Apps**, then **Archive to Series**. `/leaf` shows these
+  steps to anyone.
 - **No greeting when leaf joined.** leaf greets a server once, the first time
   it sees it, in the system channel or else the top-most text channel it can
   post in. With no channel it can post in, the greeting is skipped (the log
@@ -162,6 +322,19 @@ leaf does after a failure depends on the cause:
   warns when leaf can't see or post in the chosen log channel. When you change
   the log channel, **Save** posts a test line there first and says what's wrong
   if it can't.
+- **"…and 1 that leaf can no longer see", or "one leaf can no longer see
+  (deleted, or hidden from leaf)".** A channel leaf has stored (a series
+  channel, the log channel, a series' own channel) is no longer in the list
+  Discord gives the bot: it was deleted, or it is hidden from leaf (Discord
+  stops listing a channel the bot may not view). leaf can't tell which, and it
+  doesn't mention such a channel, because Discord would show the mention as
+  `#unknown`. For a server's series channels or its log channel, run `/setup`:
+  the form drops the channel on **Save** (pick it again in the menu if it still
+  exists and you want to keep it). For one series, its creator picks another
+  channel in **Series settings**, in the gallery. leaf asks Discord for the
+  channel list each time it writes such a message; the log says `channel list
+  refused` or `channel list timed out` when it had to fall back on what the
+  gateway told it.
 - **A reminder never comes.** Reminders go out once per missing day, within 6
   hours of the chosen time. A DM needs the creator to allow direct messages
   from the server's members; a channel ping needs leaf to be able to post in

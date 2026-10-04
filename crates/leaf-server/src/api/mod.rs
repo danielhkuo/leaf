@@ -24,7 +24,6 @@ pub mod error;
 pub mod media;
 pub mod state;
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::Json;
@@ -299,22 +298,98 @@ pub(crate) async fn fresh_guild_channels<D: DiscordApi>(
     }
 }
 
-/// The guild's channels for naming `ids`. A channel made after the list was
-/// cached is missing from it, so when one of `ids` is absent the list is
-/// asked for again (at most once every few seconds per guild).
+/// The guild's channels as Discord lists them now, for naming channels:
+/// asked of Discord, and kept only for the few seconds a burst of requests
+/// takes (see [`state::channel_names_cache`]). The flag says whether this
+/// call is the one that asked. `None` when Discord could not supply the
+/// list: there is then no name to give, and no older list is used instead.
+async fn current_guild_channels<D: DiscordApi>(
+    st: &ApiState<D>,
+    gid: &str,
+) -> Option<(Arc<Vec<GuildChannel>>, bool)> {
+    let discord = Arc::clone(&st.discord);
+    let kept = st.channels.clone();
+    let g = gid.to_owned();
+    state::channel_names_cache()
+        .entry(g.clone())
+        .or_try_insert_with(async move {
+            let list = discord.guild_channels(&g).await.map(Arc::new)?;
+            // The longer-lived copy gets the newer list too.
+            kept.insert(g, Arc::clone(&list)).await;
+            Ok::<_, String>(list)
+        })
+        .await
+        .inspect_err(|e| tracing::warn!(error = %e, "guild channel lookup failed"))
+        .ok()
+        .map(|entry| {
+            let asked = entry.is_fresh();
+            (entry.into_value(), asked)
+        })
+}
+
+/// The guild's channels for naming `ids`: `None` when there is nothing to
+/// name or Discord could not supply the list.
+///
+/// The list that checks ids ([`guild_channels`]) is not good enough for
+/// names. A channel deleted since it was cached is still in it, under its
+/// old name, and the gallery would go on sending people there. Names come
+/// from the list as it is now ([`current_guild_channels`]). When that list
+/// is a few seconds old and lacks one of `ids`, the channel may have been
+/// made since, so Discord is asked once more (at most once every few
+/// seconds per guild).
+///
+/// Whoever names from the result must treat an id that is not in it as a
+/// channel with no name: there is no older name to fall back on.
 async fn guild_channels_naming<D: DiscordApi>(
     st: &ApiState<D>,
     gid: &str,
-    ids: impl Iterator<Item = &str> + Clone,
+    mut ids: impl Iterator<Item = &str> + Clone,
 ) -> Option<Arc<Vec<GuildChannel>>> {
-    let cached = guild_channels(st, gid).await?;
-    let all_known = ids
-        .clone()
-        .all(|id| cached.iter().any(|channel| channel.id == id));
-    if all_known || !state::refresh_allowed(state::GuildList::Channels, gid).await {
-        return Some(cached);
+    ids.clone().next()?;
+    let (current, just_asked) = current_guild_channels(st, gid).await?;
+    let all_known = ids.all(|id| current.iter().any(|channel| channel.id == id));
+    if just_asked || all_known || !state::refresh_allowed(state::GuildList::Channels, gid).await {
+        return Some(current);
     }
-    fresh_guild_channels(st, gid).await
+    match st.discord.guild_channels(gid).await {
+        Ok(list) => {
+            let list = Arc::new(list);
+            state::channel_names_cache()
+                .insert(gid.to_owned(), Arc::clone(&list))
+                .await;
+            st.channels.insert(gid.to_owned(), Arc::clone(&list)).await;
+            Some(list)
+        }
+        Err(e) => {
+            // The list of a moment ago still says what is there.
+            tracing::warn!(error = %e, "guild channel lookup failed");
+            Some(current)
+        }
+    }
+}
+
+/// How Discord's current channel list (see [`guild_channels_naming`]) has a
+/// stored channel.
+struct NamedChannel {
+    /// Its name; `None` when the list does not have it, or there is no
+    /// list.
+    name: Option<String>,
+    /// The list was obtained and the channel is not in it: deleted, or
+    /// hidden from leaf. False when Discord could not be asked, which says
+    /// nothing about the channel.
+    missing: bool,
+}
+
+impl NamedChannel {
+    fn of(id: &str, current: Option<&[GuildChannel]>) -> Self {
+        let name = current
+            .and_then(|list| list.iter().find(|channel| channel.id == id))
+            .map(|channel| channel.name.clone());
+        Self {
+            missing: current.is_some() && name.is_none(),
+            name,
+        }
+    }
 }
 
 /// Discord's own order for roles: highest position first, then by id.
@@ -893,20 +968,16 @@ async fn series_options<D: DiscordApi>(
         .await?
         .ok_or_else(guild_not_setup)?;
 
-    // Series channels, labelled by Discord names where available.
+    // Series channels, labelled by Discord's current names where available.
     let watched = settings.watched_channels.iter().map(String::as_str);
-    let all = guild_channels_naming(&st, &gid, watched).await;
-    let names: HashMap<&str, &str> = all
-        .iter()
-        .flat_map(|list| list.iter())
-        .map(|c| (c.id.as_str(), c.name.as_str()))
-        .collect();
+    let current = guild_channels_naming(&st, &gid, watched).await;
+    let current = current.as_ref().map(|list| list.as_slice());
     let channels = settings
         .watched_channels
         .iter()
         .map(|id| ChannelOptionDto {
             id: id.clone(),
-            name: names.get(id.as_str()).map(|n| (*n).to_owned()),
+            name: NamedChannel::of(id, current).name,
         })
         .collect();
 
@@ -1053,7 +1124,15 @@ struct MySeriesDto {
     state: String,
     cadence: String,
     channel_id: Option<String>,
+    /// The channel's name as Discord has it now; `null` when Discord no
+    /// longer lists the channel or could not be asked. Never a name from
+    /// before the channel was deleted.
     channel_name: Option<String>,
+    /// True when Discord was asked and no longer lists the series' channel
+    /// (deleted, or hidden from leaf): nothing can be posted there until
+    /// the creator picks another. False when there is no channel, and when
+    /// Discord could not be asked.
+    channel_missing: bool,
     archived_days: i64,
     reminder_enabled: bool,
     /// Why the last reminder could not be delivered (`dm_closed`,
@@ -1075,22 +1154,17 @@ async fn list_my_series<D: DiscordApi>(
     let channel_ids = mine
         .iter()
         .filter_map(|s| s.channels.first().map(String::as_str));
-    let all = guild_channels_naming(&st, &gid, channel_ids).await;
-    let names: HashMap<&str, &str> = all
-        .iter()
-        .flat_map(|list| list.iter())
-        .map(|c| (c.id.as_str(), c.name.as_str()))
-        .collect();
+    let current = guild_channels_naming(&st, &gid, channel_ids).await;
+    let current = current.as_ref().map(|list| list.as_slice());
 
     let mut out = Vec::with_capacity(mine.len());
     for s in mine {
         let archived_days = st.posts.count(s.id).await?;
         let reminder_error = st.series.reminder_error(s.id).await?.map(|f| f.reason);
         let channel_id = s.channels.first().cloned();
-        let channel_name = channel_id
+        let channel = channel_id
             .as_deref()
-            .and_then(|id| names.get(id))
-            .map(|n| (*n).to_owned());
+            .map(|id| NamedChannel::of(id, current));
         out.push(MySeriesDto {
             id: s.id,
             name: s.name,
@@ -1098,7 +1172,8 @@ async fn list_my_series<D: DiscordApi>(
             state: s.state.as_str().to_owned(),
             cadence: s.cadence.as_str().to_owned(),
             channel_id,
-            channel_name,
+            channel_missing: channel.as_ref().is_some_and(|c| c.missing),
+            channel_name: channel.and_then(|c| c.name),
             archived_days,
             reminder_enabled: s.reminder_enabled,
             reminder_error,
@@ -1320,7 +1395,7 @@ mod tests {
         reason = "tests may panic; JSON indexing is fine in assertions"
     )]
 
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     use axum::body::Body;
@@ -1351,6 +1426,12 @@ mod tests {
         /// the fixed ones from the next lookup on.
         extra_roles: Arc<Mutex<Vec<auth::GuildRole>>>,
         extra_channels: Arc<Mutex<Vec<auth::GuildChannel>>>,
+        /// Channels "deleted in Discord" during a test: no longer listed.
+        gone_channels: Arc<Mutex<Vec<String>>>,
+        /// While set, the channel list cannot be had.
+        channels_down: Arc<AtomicBool>,
+        /// Counts `guild_channels` calls.
+        channel_lists: Arc<AtomicUsize>,
     }
 
     /// A member whose lookup Discord never answers in time.
@@ -1395,6 +1476,10 @@ mod tests {
                 }))
         }
         async fn guild_channels(&self, _guild_id: &str) -> Result<Vec<auth::GuildChannel>, String> {
+            self.channel_lists.fetch_add(1, Ordering::Relaxed);
+            if self.channels_down.load(Ordering::Relaxed) {
+                return Err("channel list returned 502".to_owned());
+            }
             let ch = |id: &str, name: &str, kind: u8, position: i64| auth::GuildChannel {
                 id: id.to_owned(),
                 name: name.to_owned(),
@@ -1408,6 +1493,9 @@ mod tests {
                 ch("n1", "news", auth::CHANNEL_KIND_ANNOUNCEMENT, 3),
             ];
             channels.extend(self.extra_channels.lock().unwrap().iter().cloned());
+            let gone = self.gone_channels.lock().unwrap();
+            channels.retain(|channel| !gone.contains(&channel.id));
+            drop(gone);
             Ok(channels)
         }
         async fn guild_roles(&self, _guild_id: &str) -> Result<Vec<auth::GuildRole>, String> {
@@ -1458,12 +1546,17 @@ mod tests {
     /// Everything a test may want to reach into.
     struct Fixture {
         app: Router,
+        /// What the router was built over: the same caches and stub.
+        state: ApiState<MockDiscord>,
         key: SessionKey,
         calls: Arc<AtomicUsize>,
         sent: Arc<Mutex<Vec<(String, String)>>>,
         pool: SqlitePool,
         extra_roles: Arc<Mutex<Vec<auth::GuildRole>>>,
         extra_channels: Arc<Mutex<Vec<auth::GuildChannel>>>,
+        gone_channels: Arc<Mutex<Vec<String>>>,
+        channels_down: Arc<AtomicBool>,
+        channel_lists: Arc<AtomicUsize>,
     }
 
     /// The seeded app + key + the membership-lookup counter.
@@ -1564,6 +1657,9 @@ mod tests {
         members.insert(("g3".to_owned(), MEMBER.to_owned()), vec![]);
         // Guilds some tests set up for themselves (see `own_guild`).
         members.insert(("g-fresh-channels".to_owned(), MEMBER.to_owned()), vec![]);
+        for gid in ["g-gone-channel", "g-names-down", "g-names-burst"] {
+            members.insert((gid.to_owned(), CREATOR.to_owned()), vec![]);
+        }
         members.insert(("g-slow".to_owned(), "quick".to_owned()), vec![]);
 
         // CREATOR manages the guild; MEMBER manages nothing.
@@ -1575,6 +1671,9 @@ mod tests {
         let sent = Arc::new(Mutex::new(Vec::new()));
         let extra_roles = Arc::new(Mutex::new(Vec::new()));
         let extra_channels = Arc::new(Mutex::new(Vec::new()));
+        let gone_channels = Arc::new(Mutex::new(Vec::new()));
+        let channels_down = Arc::new(AtomicBool::new(false));
+        let channel_lists = Arc::new(AtomicUsize::new(0));
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         // Seed only the original (not the thumb), so the streaming test gets
         // bytes while the signature-gate test still 404s on the absent thumb.
@@ -1598,6 +1697,9 @@ mod tests {
                 sent: Arc::clone(&sent),
                 extra_roles: Arc::clone(&extra_roles),
                 extra_channels: Arc::clone(&extra_channels),
+                gone_channels: Arc::clone(&gone_channels),
+                channels_down: Arc::clone(&channels_down),
+                channel_lists: Arc::clone(&channel_lists),
             }),
             membership: crate::api::state::membership_cache(),
             channels: crate::api::state::channels_cache(),
@@ -1605,13 +1707,17 @@ mod tests {
             client_id: "client-123".to_owned(),
         };
         Fixture {
-            app: router(state),
+            app: router(state.clone()),
+            state,
             key,
             calls,
             sent,
             pool,
             extra_roles,
             extra_channels,
+            gone_channels,
+            channels_down,
+            channel_lists,
         }
     }
 
@@ -2193,6 +2299,7 @@ mod tests {
         assert_eq!(mine.len(), 1);
         assert_eq!(mine[0]["name"].as_str().unwrap(), "Member Daily");
         assert_eq!(mine[0]["channel_name"].as_str().unwrap(), "daily-photos");
+        assert_eq!(mine[0]["channel_missing"], false);
 
         // A duplicate name (CREATOR already owns "public") is a 409.
         let (status, v) = post_json(
@@ -3254,6 +3361,234 @@ mod tests {
             named,
             [("c1", Some("daily-photos")), ("c-new", Some("comics"))]
         );
+    }
+
+    /// A series of `CREATOR`'s in guild `gid` that posts in `channels`.
+    async fn series_in(f: &Fixture, gid: &str, name: &str, channels: &[&str]) -> i64 {
+        let mut new = seeded(gid, CREATOR, name, Privacy::Public, None);
+        new.channels = channels.iter().map(|c| (*c).to_owned()).collect();
+        SeriesRepo::new(f.pool.clone())
+            .create(&new, 0)
+            .await
+            .unwrap()
+            .id
+    }
+
+    #[tokio::test]
+    async fn a_deleted_series_channel_has_no_name_and_is_flagged_missing() {
+        let f = fixture().await;
+        let gid = "g-gone-channel";
+        own_guild(&f, gid).await;
+        series_in(&f, gid, "Daily", &["c1"]).await;
+        series_in(&f, gid, "Unbound", &[]).await;
+        let creator = token_for(&f.key, CREATOR);
+        let mine = format!("/api/guilds/{gid}/series/mine");
+        let options = format!("/api/guilds/{gid}/series/options");
+        let row = |list: &[serde_json::Value], name: &str| -> serde_json::Value {
+            list.iter().find(|s| s["name"] == name).unwrap().clone()
+        };
+
+        // While the channel is there it is named, and not missing.
+        let before = router_json(&f.app, &mine, &creator).await;
+        let daily = row(&before, "Daily");
+        assert_eq!(daily["channel_id"], "c1");
+        assert_eq!(daily["channel_name"], "daily-photos");
+        assert_eq!(daily["channel_missing"], false);
+        // A series with no channel has none to miss.
+        let unbound = row(&before, "Unbound");
+        assert!(unbound["channel_id"].is_null() && unbound["channel_name"].is_null());
+        assert_eq!(unbound["channel_missing"], false);
+
+        // The channel is deleted in Discord, and the few seconds a list is
+        // good for names go by. The list kept for checking ids still has
+        // the channel, under its old name, for minutes.
+        f.gone_channels.lock().unwrap().push("c1".to_owned());
+        state::channel_names_cache().invalidate(gid).await;
+        let kept = f.state.channels.get(gid).await.unwrap();
+        assert!(
+            kept.iter()
+                .any(|c| c.id == "c1" && c.name == "daily-photos")
+        );
+
+        // The old name is never served: no name, and the flag.
+        let after = router_json(&f.app, &mine, &creator).await;
+        let daily = row(&after, "Daily");
+        assert_eq!(daily["channel_id"], "c1");
+        assert!(daily["channel_name"].is_null(), "{daily}");
+        assert_eq!(daily["channel_missing"], true);
+        assert_eq!(row(&after, "Unbound")["channel_missing"], false);
+        // The create form and Series settings say the same of it.
+        let v = router_json_value(&f.app, &options, &creator).await;
+        assert_eq!(
+            v["channels"],
+            serde_json::json!([{ "id": "c1", "name": null }])
+        );
+
+        // The channel is back (or leaf can see it again): named again.
+        f.gone_channels.lock().unwrap().clear();
+        state::channel_names_cache().invalidate(gid).await;
+        let back = router_json(&f.app, &mine, &creator).await;
+        let daily = row(&back, "Daily");
+        assert_eq!(daily["channel_name"], "daily-photos");
+        assert_eq!(daily["channel_missing"], false);
+    }
+
+    #[tokio::test]
+    async fn a_name_is_never_taken_from_a_list_cached_before_the_channel_was_deleted() {
+        let f = fixture().await;
+        let gid = "g-gone-channel-cached";
+        own_guild(&f, gid).await;
+        // Something caches the channel list while the channel exists.
+        let admin = admin_token(&f.key, CREATOR, &[gid]);
+        router_json_value(&f.app, &format!("/api/admin/guilds/{gid}/options"), &admin).await;
+        assert_eq!(f.channel_lists.load(Ordering::Relaxed), 1);
+
+        // The channel is deleted; nothing has asked for names yet.
+        f.gone_channels.lock().unwrap().push("c1".to_owned());
+        let v = current_names(&f, gid, &["c1", "c2"]).await;
+
+        // Discord was asked again rather than the cached list trusted. Once:
+        // an answer that fresh cannot be missing a channel for being old.
+        assert_eq!(f.channel_lists.load(Ordering::Relaxed), 2);
+        let expected = [
+            ("c1".to_owned(), None),
+            ("c2".to_owned(), Some("sketches".to_owned())),
+        ];
+        assert_eq!(v, expected);
+        // Asking again within seconds says the same. The list is no longer
+        // brand new, so the absent channel is looked for once more, and
+        // then no more.
+        assert_eq!(current_names(&f, gid, &["c1", "c2"]).await, expected);
+        assert_eq!(f.channel_lists.load(Ordering::Relaxed), 3);
+        assert_eq!(current_names(&f, gid, &["c1", "c2"]).await, expected);
+        assert_eq!(f.channel_lists.load(Ordering::Relaxed), 3);
+    }
+
+    #[tokio::test]
+    async fn a_channel_made_seconds_after_names_were_asked_for_is_named_at_once() {
+        let f = fixture().await;
+        let gid = "g-names-new";
+        own_guild(&f, gid).await;
+        // The gallery has just asked for names: the list is seconds old.
+        assert_eq!(
+            current_names(&f, gid, &["c1"]).await,
+            [("c1".to_owned(), Some("daily-photos".to_owned()))]
+        );
+
+        // A channel is made and chosen with /setup.
+        f.extra_channels.lock().unwrap().push(auth::GuildChannel {
+            id: "c-new".to_owned(),
+            name: "comics".to_owned(),
+            kind: auth::CHANNEL_KIND_TEXT,
+            position: 9,
+        });
+
+        // It is not called missing for being newer than the list.
+        let st = f.state.clone();
+        let current = guild_channels_naming(&st, gid, ["c1", "c-new"].into_iter()).await;
+        let made = NamedChannel::of("c-new", current.as_ref().map(|list| list.as_slice()));
+        assert_eq!(made.name.as_deref(), Some("comics"));
+        assert!(!made.missing);
+        assert_eq!(f.channel_lists.load(Ordering::Relaxed), 2);
+    }
+
+    /// What the naming lookup makes of `ids` in guild `gid`: each with its
+    /// current name.
+    async fn current_names(f: &Fixture, gid: &str, ids: &[&str]) -> Vec<(String, Option<String>)> {
+        let st = f.state.clone();
+        let current = guild_channels_naming(&st, gid, ids.iter().copied()).await;
+        ids.iter()
+            .map(|id| {
+                let channel = NamedChannel::of(id, current.as_ref().map(|list| list.as_slice()));
+                ((*id).to_owned(), channel.name)
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_channel_cannot_be_called_missing_when_discord_cannot_be_asked() {
+        let f = fixture().await;
+        let gid = "g-names-down";
+        own_guild(&f, gid).await;
+        series_in(&f, gid, "Daily", &["c1"]).await;
+        let creator = token_for(&f.key, CREATOR);
+        // The list kept for checking ids has the channel, from a minute ago.
+        let admin = admin_token(&f.key, CREATOR, &[gid]);
+        router_json_value(&f.app, &format!("/api/admin/guilds/{gid}/options"), &admin).await;
+        assert!(f.state.channels.get(gid).await.is_some());
+        f.channels_down.store(true, Ordering::Relaxed);
+
+        // No current list: no name, not even the one from a minute ago, and
+        // nothing is said about the channel.
+        let mine = router_json(&f.app, &format!("/api/guilds/{gid}/series/mine"), &creator).await;
+        assert_eq!(mine[0]["channel_id"], "c1");
+        assert!(mine[0]["channel_name"].is_null());
+        assert_eq!(mine[0]["channel_missing"], false);
+        let v = router_json_value(
+            &f.app,
+            &format!("/api/guilds/{gid}/series/options"),
+            &creator,
+        )
+        .await;
+        assert_eq!(
+            v["channels"],
+            serde_json::json!([{ "id": "c1", "name": null }])
+        );
+
+        // A failure is not remembered: the next request asks again.
+        f.channels_down.store(false, Ordering::Relaxed);
+        let mine = router_json(&f.app, &format!("/api/guilds/{gid}/series/mine"), &creator).await;
+        assert_eq!(mine[0]["channel_name"], "daily-photos");
+        assert_eq!(mine[0]["channel_missing"], false);
+    }
+
+    #[tokio::test]
+    async fn a_burst_of_requests_for_names_costs_one_discord_call() {
+        let f = fixture().await;
+        let gid = "g-names-burst";
+        own_guild(&f, gid).await;
+        series_in(&f, gid, "Daily", &["c1"]).await;
+        let creator = token_for(&f.key, CREATOR);
+        let mine = format!("/api/guilds/{gid}/series/mine");
+        let options = format!("/api/guilds/{gid}/series/options");
+
+        for _ in 0..3 {
+            router_json(&f.app, &mine, &creator).await;
+            router_json_value(&f.app, &options, &creator).await;
+        }
+        assert_eq!(f.channel_lists.load(Ordering::Relaxed), 1);
+
+        // Nothing to name, nothing asked: a member with no series.
+        let before = f.channel_lists.load(Ordering::Relaxed);
+        let st = f.state.clone();
+        let nothing = std::iter::empty::<&str>();
+        assert!(
+            guild_channels_naming(&st, "g-names-nothing", nothing)
+                .await
+                .is_none()
+        );
+        assert_eq!(f.channel_lists.load(Ordering::Relaxed), before);
+    }
+
+    #[test]
+    fn a_stored_channel_is_named_only_from_the_current_list() {
+        let list = [GuildChannel {
+            id: "c1".to_owned(),
+            name: "daily-photos".to_owned(),
+            kind: auth::CHANNEL_KIND_TEXT,
+            position: 1,
+        }];
+        let there = NamedChannel::of("c1", Some(&list));
+        assert_eq!(there.name.as_deref(), Some("daily-photos"));
+        assert!(!there.missing);
+        // Not in the list Discord gave: gone, or hidden from leaf.
+        let gone = NamedChannel::of("c9", Some(&list));
+        assert_eq!(gone.name, None);
+        assert!(gone.missing);
+        // No list: nothing is known about the channel either way.
+        let unknown = NamedChannel::of("c1", None);
+        assert_eq!(unknown.name, None);
+        assert!(!unknown.missing);
     }
 
     #[tokio::test]

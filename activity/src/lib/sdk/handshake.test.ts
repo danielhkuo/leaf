@@ -97,12 +97,36 @@ describe('runHandshake', () => {
       guildId: 'g1',
       channelId: 'c1',
       platform: 'mobile',
+      appName: 'leaf',
       customId: 's7d3',
       token: 'leaf-tok',
       expiresAt: 1000 + 3600 * 1000,
     });
     // The Discord access token (not our session token) authenticates the SDK.
     expect(authenticate).toHaveBeenCalledWith({ access_token: 'discord-at' });
+  });
+
+  it('carries the application’s name as Discord gives it, and "leaf" when it gives none', async () => {
+    const named = (application: AuthenticateResult['application']): Promise<string> => {
+      const { sdk } = fakeSdk([], {
+        authenticate: (args) =>
+          Promise.resolve({
+            access_token: args.access_token,
+            user: USER,
+            scopes: ['identify'],
+            expires: '',
+            application,
+          }),
+      });
+      return runHandshake(deps({ sdk })).then((session) => session.appName);
+    };
+
+    // What the owner called their application is what the Apps menu lists.
+    await expect(named({ name: 'Sketchbook Archive' })).resolves.toBe('Sketchbook Archive');
+    await expect(named({ name: '  leaf (dev) ' })).resolves.toBe('leaf (dev)');
+    for (const missing of [undefined, null, {}, { name: null }, { name: '' }, { name: '   ' }]) {
+      await expect(named(missing)).resolves.toBe('leaf');
+    }
   });
 
   it('asks for the identify scope and nothing else', async () => {

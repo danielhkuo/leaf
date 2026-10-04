@@ -54,11 +54,18 @@ const FOREGROUND_GAP_MS = 1_000;
  * single signal is dependable on every client, so all three are watched and
  * a burst of them counts once. It is not called for the state at subscribe.
  *
+ * `onLayoutMode` hears every layout mode Discord reports, the one at
+ * subscribe included, from the same subscription (Discord tells a second
+ * subscriber nothing until the mode changes).
+ *
  * Returns a function that stops listening. Discord has no "left the
  * Activity" event, and a phone may fire none of these, so pair this with a
  * refresh control.
  */
-export function onForeground(callback: () => void): () => void {
+export function onForeground(
+  callback: () => void,
+  onLayoutMode?: (mode: number) => void,
+): () => void {
   let stopped = false;
   let lastFired = Number.NEGATIVE_INFINITY;
   const fire = (): void => {
@@ -78,8 +85,10 @@ export function onForeground(callback: () => void): () => void {
   // to focused counts.
   let mode: number | null = null;
   const onLayout = (update: { layout_mode: number }): void => {
+    if (stopped) return;
     const before = mode;
     mode = update.layout_mode;
+    onLayoutMode?.(mode);
     if (mode === LAYOUT_FOCUSED && before !== null && before !== LAYOUT_FOCUSED) fire();
   };
   let unsubscribe: (() => void) | null = null;

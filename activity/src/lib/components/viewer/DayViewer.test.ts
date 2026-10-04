@@ -1,5 +1,6 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { describe, expect, it, vi } from 'vitest';
+import { tick } from 'svelte';
 
 import type { Day } from '../../types/api';
 import DayViewer from './DayViewer.svelte';
@@ -64,6 +65,23 @@ describe('DayViewer', () => {
     expect(p.onNext).toHaveBeenCalledOnce();
     expect(p.onPrev).toHaveBeenCalledOnce();
     expect(p.onClose).toHaveBeenCalledOnce();
+  });
+
+  it('leaves the keys alone while it is put away behind the tile', async () => {
+    const p = props();
+    const { container } = render(DayViewer, { props: p });
+    // As Minimisable marks the screens while leaf is a tile.
+    container.setAttribute('inert', '');
+    await fireEvent.keyDown(window, { key: 'ArrowRight' });
+    await fireEvent.keyDown(window, { key: 'ArrowLeft' });
+    await fireEvent.keyDown(window, { key: 'Escape' });
+    expect(p.onNext).not.toHaveBeenCalled();
+    expect(p.onPrev).not.toHaveBeenCalled();
+    expect(p.onClose).not.toHaveBeenCalled();
+
+    container.removeAttribute('inert');
+    await fireEvent.keyDown(window, { key: 'ArrowRight' });
+    expect(p.onNext).toHaveBeenCalledOnce();
   });
 
   it('does not navigate past the ends', async () => {
@@ -331,21 +349,193 @@ describe('DayViewer caption and actions', () => {
     }
   });
 
+  it('measures a resized caption in the next frame, not inside the observer', async () => {
+    // The observers the viewer makes, and the frames it asks for.
+    const observers: ResizeObserverCallback[] = [];
+    const frames = new Map<number, FrameRequestCallback>();
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        constructor(told: ResizeObserverCallback) {
+          observers.push(told);
+        }
+        observe = vi.fn();
+        unobserve = vi.fn();
+        disconnect = vi.fn();
+      },
+    );
+    vi.stubGlobal('requestAnimationFrame', (run: FrameRequestCallback) => {
+      frames.set(frames.size + 1, run);
+      return frames.size;
+    });
+    vi.stubGlobal('cancelAnimationFrame', (id: number) => frames.delete(id));
+    let captionHeight = 0;
+    const heights = vi
+      .spyOn(HTMLElement.prototype, 'scrollHeight', 'get')
+      .mockImplementation(function (this: HTMLElement) {
+        return this.classList.contains('caption') ? captionHeight : 0;
+      });
+    const resized = (): void => {
+      for (const told of observers) told([], {} as ResizeObserver);
+    };
+    try {
+      render(DayViewer, { props: props() });
+      await tick();
+      expect(screen.queryByRole('button', { name: 'More' })).toBeNull();
+
+      // The viewer got narrower and the caption no longer fits. Told twice
+      // before a frame: one measurement is waiting, not two.
+      captionHeight = 200;
+      resized();
+      resized();
+      await tick();
+      // Nothing on the page has changed size while observers are being told.
+      expect(screen.queryByRole('button', { name: 'More' })).toBeNull();
+      expect(frames.size).toBe(1);
+
+      for (const run of frames.values()) run(0);
+      await tick();
+      expect(screen.getByRole('button', { name: 'More' })).toBeInTheDocument();
+    } finally {
+      heights.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('has no More for a caption that fits', () => {
     render(DayViewer, { props: props() });
     expect(screen.queryByRole('button', { name: 'More' })).toBeNull();
   });
 
-  it('opens the original post, and stays quiet when it opened or was declined', async () => {
-    for (const outcome of ['opened', 'cancelled']) {
-      const p = props({ openLink: vi.fn().mockResolvedValue(outcome) });
-      const { unmount } = render(DayViewer, { props: p });
-      await fireEvent.click(screen.getByRole('button', { name: 'Open original post' }));
-      expect(p.openLink).toHaveBeenCalledOnce();
-      expect(p.openLink).toHaveBeenCalledWith(DAY.jump_url);
-      await Promise.resolve();
-      expect(screen.queryByText(DAY.jump_url)).toBeNull();
-      unmount();
+  /**
+   * The line that says what became of "Open original post". A photo that is
+   * still loading is a status too, so this one is found by its class.
+   */
+  function linkStatus(): HTMLElement {
+    const found = screen.getAllByRole('status').filter((el) => el.matches('.link-status'));
+    expect(found).toHaveLength(1);
+    return found[0]!;
+  }
+  const openPost = () =>
+    fireEvent.click(screen.getByRole('button', { name: 'Open original post' }));
+
+  it('hands the post’s address to Discord, with a status line waiting for the answer', async () => {
+    const p = props();
+    render(DayViewer, { props: p });
+    // In the page before there is anything to say, so the text is announced.
+    expect(linkStatus()).toBeEmptyDOMElement();
+
+    await openPost();
+    expect(p.openLink).toHaveBeenCalledOnce();
+    expect(p.openLink).toHaveBeenCalledWith(DAY.jump_url);
+  });
+
+  it('on a phone says the post is open behind leaf, and how to get to it', async () => {
+    render(DayViewer, { props: props({ platform: 'mobile' }) });
+    await openPost();
+
+    await waitFor(() =>
+      expect(linkStatus()).toHaveTextContent(
+        'Opened in the channel, behind leaf. Minimise leaf to see it: tap the arrow at the top left, or press Back on Android.',
+      ),
+    );
+    // It opened: the link itself is not needed.
+    expect(screen.queryByText(DAY.jump_url)).toBeNull();
+  });
+
+  it('on desktop says only that it opened', async () => {
+    render(DayViewer, { props: props({ platform: 'desktop' }) });
+    await openPost();
+
+    await waitFor(() => expect(linkStatus()).toHaveTextContent(/^Opened in the channel\.$/));
+  });
+
+  it('says nothing when the person stayed on Discord’s prompt', async () => {
+    const p = props({ platform: 'mobile', openLink: vi.fn().mockResolvedValue('cancelled') });
+    render(DayViewer, { props: p });
+    await openPost();
+    await waitFor(() => expect(p.openLink).toHaveBeenCalledOnce());
+    await Promise.resolve();
+
+    expect(linkStatus()).toBeEmptyDOMElement();
+    expect(screen.queryByText(DAY.jump_url)).toBeNull();
+  });
+
+  it('takes the line down after a few seconds', async () => {
+    vi.useFakeTimers();
+    try {
+      render(DayViewer, { props: props({ platform: 'mobile' }) });
+      await openPost();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(linkStatus()).toHaveTextContent(/^Opened in the channel/);
+
+      await vi.advanceTimersByTimeAsync(7_999);
+      expect(linkStatus()).toHaveTextContent(/^Opened in the channel/);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(linkStatus()).toBeEmptyDOMElement();
+
+      // A later press says it again, for its own few seconds.
+      await openPost();
+      await vi.advanceTimersByTimeAsync(7_999);
+      expect(linkStatus()).toHaveTextContent(/^Opened in the channel/);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(linkStatus()).toBeEmptyDOMElement();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('takes the line down when the day changes', async () => {
+    const p = props({ platform: 'mobile' });
+    const { rerender } = render(DayViewer, { props: p });
+    await openPost();
+    await waitFor(() => expect(linkStatus()).toHaveTextContent(/^Opened in the channel/));
+
+    await rerender({ ...p, dayNumber: 6, day: { ...DAY, day: 6 } });
+    expect(linkStatus()).toBeEmptyDOMElement();
+    // Gone, not hidden: it does not come back with the day.
+    await rerender({ ...p, dayNumber: 5, day: DAY });
+    expect(linkStatus()).toBeEmptyDOMElement();
+  });
+
+  it('does not say a post opened on a day the person has left by the time Discord answers', async () => {
+    let answer: (outcome: string) => void = () => undefined;
+    const p = props({ openLink: vi.fn(() => new Promise<string>((r) => (answer = r))) });
+    const { rerender } = render(DayViewer, { props: p });
+    await openPost();
+    await rerender({ ...p, dayNumber: 6, day: { ...DAY, day: 6 } });
+
+    answer('opened');
+    // Long enough for the answer to be taken in and drawn.
+    await new Promise((done) => setTimeout(done, 0));
+    await tick();
+    expect(linkStatus()).toBeEmptyDOMElement();
+    // Nor when the person pages back to it.
+    await rerender({ ...p, dayNumber: 5, day: DAY });
+    expect(linkStatus()).toBeEmptyDOMElement();
+  });
+
+  it('keeps the line up for its few seconds after the later of two presses', async () => {
+    vi.useFakeTimers();
+    try {
+      const answers: ((outcome: string) => void)[] = [];
+      const openLink = vi.fn(() => new Promise<string>((r) => answers.push(r)));
+      render(DayViewer, { props: props({ openLink }) });
+      // Two presses before Discord answers either.
+      await openPost();
+      await openPost();
+      expect(answers).toHaveLength(2);
+
+      answers[0]!('opened');
+      await vi.advanceTimersByTimeAsync(5_000);
+      answers[1]!('opened');
+      await vi.advanceTimersByTimeAsync(7_999);
+      // The first answer's timer ran out 4.999s ago; the line is the second's.
+      expect(linkStatus()).toHaveTextContent(/^Opened in the channel/);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(linkStatus()).toBeEmptyDOMElement();
+    } finally {
+      vi.useRealTimers();
     }
   });
 
@@ -354,11 +544,23 @@ describe('DayViewer caption and actions', () => {
     const { rerender } = render(DayViewer, { props: p });
     await fireEvent.click(screen.getByRole('button', { name: 'Open original post' }));
     expect(await screen.findByText(DAY.jump_url)).toBeInTheDocument();
-    expect(screen.getByText(/Discord didn’t open the post/)).toBeInTheDocument();
+    expect(linkStatus()).toHaveTextContent(/Discord didn’t open the post/);
+    expect(linkStatus()).not.toHaveTextContent(/Opened in the channel/);
 
     // The notice belongs to that day.
     await rerender({ ...p, dayNumber: 6, day: { ...DAY, day: 6 } });
     await waitFor(() => expect(screen.queryByText(DAY.jump_url)).toBeNull());
+  });
+
+  it('swaps the link for the opened line once Discord does open it', async () => {
+    const openLink = vi.fn().mockResolvedValueOnce('failed').mockResolvedValue('opened');
+    render(DayViewer, { props: props({ openLink }) });
+    await openPost();
+    expect(await screen.findByText(DAY.jump_url)).toBeInTheDocument();
+
+    await openPost();
+    await waitFor(() => expect(linkStatus()).toHaveTextContent(/^Opened in the channel\.$/));
+    expect(screen.queryByText(DAY.jump_url)).toBeNull();
   });
 
   it('hides Random when there is no other day', () => {

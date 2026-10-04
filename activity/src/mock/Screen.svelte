@@ -21,7 +21,10 @@
     guildDetail,
     homeSeries,
     MISSING_DAY,
+    optionsChannelUnseen,
     series,
+    seriesChannelGone,
+    VIDEO_DAY,
     VIEWER_DAY,
     worstCase,
   } from './fixtures';
@@ -66,7 +69,13 @@
     ['home-empty', { stack: [PICKER, home(8)] }],
     // The viewer's own sprout, two days in.
     ['home-sprout', { stack: [PICKER, home(1)] }],
+    // The viewer's own series after its channel was deleted in Discord.
+    [
+      'home-channel-gone',
+      { scenario: { series: seriesChannelGone }, stack: [PICKER, home(homeSeries.id)] },
+    ],
     ['viewer', { stack: [PICKER, home(homeSeries.id), viewer(VIEWER_DAY)] }],
+    ['viewer-video', { stack: [PICKER, home(homeSeries.id), viewer(VIDEO_DAY)] }],
     [
       'viewer-loading',
       { scenario: { holdDays: true }, stack: [PICKER, home(homeSeries.id), viewer(VIEWER_DAY)] },
@@ -88,10 +97,27 @@
         stack: [PICKER, { name: 'mySeries' }, { name: 'seriesSettings', seriesId: homeSeries.id }],
       },
     ],
+    // Where "Choose another channel" leads from home-channel-gone while no
+    // admin has run /setup: the deleted channel is the only one on offer.
+    [
+      'settings-channel-unseen',
+      {
+        scenario: { series: seriesChannelGone, options: optionsChannelUnseen },
+        stack: [PICKER, home(homeSeries.id), { name: 'seriesSettings', seriesId: homeSeries.id }],
+      },
+    ],
     // A link to a series this viewer can't see (hidden, removed, or never there).
     ['unavailable', { stack: [PICKER, home(4242)] }],
     ['expired', { scenario: { listFails: 'expired' }, stack: [PICKER] }],
     ['load-error', { scenario: { listFails: 'unavailable' }, stack: [PICKER] }],
+    // Minimised: the same screens, in a viewport the size of Discord's tile
+    // (the screen viewer and the suites open them at one). The size is what
+    // turns them into the card; at a phone's they are the screens above.
+    ['tile-day', { stack: [PICKER, home(homeSeries.id), viewer(VIEWER_DAY)] }],
+    ['tile-series', { stack: [PICKER, home(homeSeries.id)] }],
+    ['tile-empty', { stack: [PICKER, home(8)] }],
+    ['tile-list', { stack: [PICKER] }],
+    ['tile-expired', { scenario: { listFails: 'expired' }, stack: [PICKER] }],
   ] satisfies [ScreenId, GalleryScreen][]);
 
   const gallery = $derived(GALLERY.get(id));

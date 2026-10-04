@@ -36,7 +36,7 @@
   onMount(() => focusHeading(root));
 </script>
 
-<div bind:this={root}>
+<main bind:this={root}>
   <SeriesPicker
     series={gallery.series}
     onSelect={select}
@@ -47,4 +47,4 @@
     onCreate={() => nav.push({ name: 'createSeries' })}
     onManage={() => nav.push({ name: 'mySeries' })}
   />
-</div>
+</main>

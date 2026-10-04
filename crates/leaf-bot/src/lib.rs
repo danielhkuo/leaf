@@ -7,6 +7,8 @@
 //! Where the connection stands is recorded in [`leaf_core::status`], which
 //! the HTTP server shows on `GET /api/status`.
 
+use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -17,12 +19,16 @@ use leaf_core::status::{self, GatewayState};
 use poise::serenity_prelude as serenity;
 use tracing::{error, info, warn};
 
+mod channels;
 pub mod checks;
 pub mod commands;
 pub mod components;
 pub mod error;
 pub mod events;
+mod menus;
 pub mod reminders;
+#[cfg(test)]
+mod stub;
 
 /// Shared state available to every command and event handler.
 pub struct Data {
@@ -46,6 +52,65 @@ pub struct Data {
     /// a message that can afford to may wait for it (see
     /// [`checks::setup_mention_once_registered`]).
     pub setup_command: tokio::sync::watch::Receiver<u64>,
+    /// The bot's own name, read with [`Data::app_name`].
+    app_name: AppName,
+}
+
+impl Data {
+    /// The name Discord's menus list leaf's app under: the bot's own name
+    /// as Discord shows it, which is "leaf" only when whoever hosts it called
+    /// it that. Messages that walk someone through those menus name it (the
+    /// `menus` module).
+    ///
+    /// It is what the gateway last said: at connect, and again when the bot
+    /// is renamed (see [`events::handle`]).
+    #[must_use]
+    pub fn app_name(&self) -> String {
+        self.app_name.get()
+    }
+}
+
+/// The bot's own name, kept to what the gateway last said it is.
+///
+/// One can only be made from the bot user the gateway describes
+/// ([`AppName::of`]), so there is no [`Data`] that was never named. It is
+/// the writing end of a watch: the reminder scheduler, which starts before
+/// the gateway has connected, holds the reading end and learns the name
+/// with everyone else.
+///
+/// Discord's Android app was seen to list the app under this name with the
+/// bot and its application named alike. Which of the two the list follows
+/// when they are named differently has not been checked; if it is the
+/// application, [`AppName::rename`] is the one place that chooses.
+pub(crate) struct AppName(tokio::sync::watch::Sender<String>);
+
+impl AppName {
+    /// The name of `bot`, published on `names`.
+    fn of(names: tokio::sync::watch::Sender<String>, bot: &serenity::CurrentUser) -> Self {
+        let name = Self(names);
+        name.rename(bot);
+        name
+    }
+
+    /// Takes the name `bot` has now: its display name where Discord gives
+    /// it one, else its username, which is how Discord shows a bot. Whoever
+    /// waits on the name is woken only when it is a new one: the gateway
+    /// says the same name again at every reconnect.
+    pub(crate) fn rename(&self, bot: &serenity::CurrentUser) {
+        let name = bot.display_name();
+        self.0.send_if_modified(|current| {
+            let renamed = current != name;
+            if renamed {
+                name.clone_into(current);
+            }
+            renamed
+        });
+    }
+
+    /// The name as it stands.
+    fn get(&self) -> String {
+        self.0.borrow().clone()
+    }
 }
 
 /// Error type carried by all commands.
@@ -73,6 +138,26 @@ const RETRY_MAX: Duration = Duration::from_mins(5);
 /// A connection that lasted this long counts as having worked: the next
 /// failure starts again from [`RETRY_MIN`].
 const STABLE_AFTER: Duration = Duration::from_mins(10);
+/// How long Discord has to answer, twice over: while the client is built
+/// (a question or two over HTTP), and then for the gateway to say the bot is
+/// connected. With no answer at all (a firewall holding the connection, a
+/// dead route) leaf would wait for ever with its status on "starting" and
+/// nothing beside it to say why.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+/// What the server owner is told when Discord gives no answer at all.
+const NO_ANSWER: &str = "Discord didn't answer the bot. Check this machine's network, and any \
+     firewall that filters outgoing connections. leaf keeps trying.";
+/// What they are told when Discord did answer, with a rate limit longer
+/// than [`CONNECT_TIMEOUT`]. Nothing on this machine is in the way.
+const TOLD_TO_WAIT: &str =
+    "Discord told the bot to wait before it connects (too many requests). leaf keeps trying.";
+/// Shown beside "starting" when the gateway has not said the bot is
+/// connected [`CONNECT_TIMEOUT`] after it was asked. It says no more than
+/// leaf knows: serenity keeps trying on its own and does not say why.
+const NOT_CONNECTED_YET: &str = "The bot hasn't connected to Discord yet. Check this machine's \
+     network, and any firewall that filters outgoing connections. leaf keeps trying.";
+/// What they are told when a connection that was up ends by itself.
+const STOPPED: &str = "The bot's connection to Discord stopped. leaf is reconnecting.";
 /// Wait before the first repeat of a failed command registration.
 const REGISTER_RETRY_MIN: Duration = Duration::from_secs(30);
 /// Longest wait between registration attempts.
@@ -97,16 +182,34 @@ pub async fn supervise(
     media: MediaPipeline,
     shutdown: tokio::sync::watch::Receiver<bool>,
 ) {
-    let mut wait = RETRY_MIN;
+    let connect = || run(cfg.clone(), pool.clone(), media.clone(), shutdown.clone());
+    keep_connected(connect, shutdown.clone(), RETRY_MIN).await;
+}
+
+/// [`supervise`], given what one connection attempt is (`connect`, which
+/// records its own failure in [`leaf_core::status`], as [`run`] does) and
+/// the wait before the first reconnect.
+async fn keep_connected<C, A>(
+    mut connect: C,
+    shutdown: tokio::sync::watch::Receiver<bool>,
+    first_wait: Duration,
+) where
+    C: FnMut() -> A + Send,
+    A: Future<Output = anyhow::Result<()>> + Send,
+{
+    let mut wait = first_wait;
+    // Why the last attempt ended, kept beside "starting" while leaf tries
+    // again: an attempt can take minutes, and "starting" alone says nothing.
+    let mut last_failure: Option<&'static str> = None;
     loop {
         if *shutdown.borrow() {
             return;
         }
         status::set_gateway(GatewayState::Starting);
         // A notice is about one connection; this is a new one.
-        status::set_notice(None);
+        status::set_notice(last_failure.map(str::to_owned));
         let began = Instant::now();
-        let outcome = run(cfg.clone(), pool.clone(), media.clone(), shutdown.clone()).await;
+        let outcome = connect().await;
         if *shutdown.borrow() {
             return;
         }
@@ -114,13 +217,13 @@ pub async fn supervise(
             Ok(()) => {
                 // The shards stopped although nobody asked them to.
                 warn!("gateway stopped unexpectedly; reconnecting");
-                status::set_gateway(GatewayState::Error(
-                    "The bot's connection to Discord stopped. leaf is reconnecting.".to_owned(),
-                ));
+                status::set_gateway(GatewayState::Error(STOPPED.to_owned()));
+                last_failure = Some(STOPPED);
                 false
             }
             Err(e) => {
                 error!(error = format!("{e:#}"), "gateway exited with error");
+                last_failure = Some(failure_text(&e));
                 is_permanent(&e)
             }
         };
@@ -129,7 +232,7 @@ pub async fn supervise(
             return;
         }
         if began.elapsed() >= STABLE_AFTER {
-            wait = RETRY_MIN;
+            wait = first_wait;
         }
         info!(
             seconds = wait.as_secs(),
@@ -165,9 +268,142 @@ fn is_permanent(e: &anyhow::Error) -> bool {
     )
 }
 
+/// Discord gave no answer at all within [`CONNECT_TIMEOUT`].
+#[derive(Debug)]
+struct NoAnswer;
+
+impl std::fmt::Display for NoAnswer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Discord did not answer within {} seconds",
+            CONNECT_TIMEOUT.as_secs()
+        )
+    }
+}
+
+impl std::error::Error for NoAnswer {}
+
+/// Discord answered within [`CONNECT_TIMEOUT`], and what it said was to
+/// wait longer than that (a rate limit).
+#[derive(Debug)]
+struct ToldToWait;
+
+impl std::fmt::Display for ToldToWait {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Discord rate-limited the bot for more than {} seconds",
+            CONNECT_TIMEOUT.as_secs()
+        )
+    }
+}
+
+impl std::error::Error for ToldToWait {}
+
+/// Whether Discord has told the bot to wait before it asks again (a rate
+/// limit), on one connection attempt.
+///
+/// serenity waits a rate limit out by itself, for as long as Discord says,
+/// and tells nobody but its event handlers. From outside, that wait looks
+/// like a connection nothing answers; this is how leaf tells them apart.
+#[derive(Debug, Default)]
+struct RateLimits(AtomicBool);
+
+impl RateLimits {
+    /// Discord said to wait.
+    fn note(&self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+
+    /// Why a wait for Discord ran out: it said to wait longer, or it said
+    /// nothing.
+    fn silence(&self) -> anyhow::Error {
+        if self.0.load(Ordering::Relaxed) {
+            anyhow::Error::new(ToldToWait)
+        } else {
+            anyhow::Error::new(NoAnswer)
+        }
+    }
+}
+
+#[poise::async_trait]
+impl serenity::EventHandler for RateLimits {
+    async fn ratelimit(&self, _limit: serenity::RatelimitInfo) {
+        self.note();
+    }
+}
+
+/// Whether the gateway has said the bot is connected, on one connection
+/// attempt.
+///
+/// The gateway's word arrives on one task and the timer that waits for it
+/// runs on another. The lock makes "is it connected?" and what
+/// [`leaf_core::status`] is then told a single step, so a timer that runs
+/// out as the gateway answers cannot write over "online".
+#[derive(Debug, Default)]
+struct Connected(Mutex<bool>);
+
+impl Connected {
+    /// The gateway said so: the bot is online, and whatever stood beside
+    /// "starting" (the last attempt's failure, a slow connection) is over.
+    fn now(&self) {
+        // The lock is held until the status is written (see the type).
+        let mut connected = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        status::set_gateway(GatewayState::Online);
+        status::set_notice(None);
+        *connected = true;
+    }
+
+    /// Waits `patience`, and if the gateway has still said nothing, says so
+    /// beside "starting". Nothing is stopped: serenity keeps trying to
+    /// connect on its own, and [`Connected::now`] clears this when it does.
+    async fn or_say_so_after(&self, patience: Duration) {
+        tokio::time::sleep(patience).await;
+        let connected = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if !*connected {
+            warn!(
+                seconds = patience.as_secs(),
+                "gateway not connected yet; still trying"
+            );
+            status::set_notice(Some(NOT_CONNECTED_YET.to_owned()));
+        }
+    }
+}
+
+/// Waits for the gateway client to be built (`building`), but for no longer
+/// than `patience`, and not at all once `shutdown` is raised: `None` then,
+/// since stopping must not wait for an answer that may never come.
+///
+/// Running out of patience is a failure of its own, named by what `limits`
+/// saw: Discord said to wait ([`ToldToWait`]) or said nothing ([`NoAnswer`]).
+async fn build_within<B, T>(
+    building: B,
+    patience: Duration,
+    limits: &RateLimits,
+    shutdown: tokio::sync::watch::Receiver<bool>,
+) -> anyhow::Result<Option<T>>
+where
+    B: Future<Output = Result<T, serenity::Error>> + Send,
+{
+    tokio::select! {
+        built = tokio::time::timeout(patience, building) => match built {
+            Ok(built) => built.map(Some).context("building gateway client"),
+            Err(_elapsed) => Err(limits.silence()),
+        },
+        () = flag_raised(shutdown) => Ok(None),
+    }
+}
+
 /// What the server owner is told about a failed connection attempt: a full
 /// sentence, with nothing from the error itself (it may quote a URL).
 fn failure_text(e: &anyhow::Error) -> &'static str {
+    if e.chain().any(<dyn std::error::Error>::is::<NoAnswer>) {
+        return NO_ANSWER;
+    }
+    if e.chain().any(<dyn std::error::Error>::is::<ToldToWait>) {
+        return TOLD_TO_WAIT;
+    }
     match serenity_error(e) {
         Some(serenity::Error::Gateway(serenity::GatewayError::InvalidAuthentication)) => {
             "Discord rejected the bot token. Restart leaf with --reconfigure and enter the \
@@ -209,10 +445,17 @@ pub async fn run(
     let sched_shutdown = shutdown.clone();
     let register_shutdown = shutdown.clone();
     let public_url = cfg.public_url.clone();
+    // Empty until the gateway says who the bot is. The scheduler gets the
+    // reading end now: it starts before that.
+    let (app_names, sched_app_name) = tokio::sync::watch::channel(String::new());
     // The registration retry of this connection attempt, so it can be
     // stopped with it: the next attempt starts its own.
     let registering: Arc<Mutex<Option<tokio::task::AbortHandle>>> = Arc::default();
     let registering_slot = Arc::clone(&registering);
+    // Whether the gateway has said the bot is connected, for the timer
+    // below that waits for it.
+    let connected = Arc::new(Connected::default());
+    let said_so = Arc::clone(&connected);
 
     let framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
@@ -226,10 +469,9 @@ pub async fn run(
         .setup(move |ctx, ready, framework| {
             Box::pin(async move {
                 let (setup_command_tx, setup_command) = tokio::sync::watch::channel(0);
-                let builders =
-                    poise::builtins::create_application_commands(&framework.options().commands);
+                let builders = command_builders(&framework.options().commands);
                 info!(user = %ready.user.name, "gateway connected");
-                status::set_gateway(GatewayState::Online);
+                said_so.now();
                 // Registration never takes the gateway down: it is tried
                 // again, and the commands Discord already lists stay.
                 let task = tokio::spawn(keep_registering(
@@ -253,6 +495,8 @@ pub async fn run(
                     started: Instant::now(),
                     public_url,
                     setup_command,
+                    // Named as it is made, so no handler sees it unnamed.
+                    app_name: AppName::of(app_names, &ready.user),
                 })
             })
         })
@@ -263,25 +507,37 @@ pub async fn run(
     let http = serenity::HttpBuilder::new(&cfg.token)
         .default_allowed_mentions(serenity::CreateAllowedMentions::new())
         .build();
-    let built = serenity::ClientBuilder::new_with_http(http, intents)
+    // serenity tells a rate limit to its event handlers and to nobody else.
+    let limits = Arc::new(RateLimits::default());
+    let building = serenity::ClientBuilder::new_with_http(http, intents)
         .framework(framework)
-        .await
-        .context("building gateway client");
-    let mut client = match built {
-        Ok(client) => client,
+        .event_handler_arc(Arc::clone(&limits))
+        .into_future();
+    let mut client = match build_within(building, CONNECT_TIMEOUT, &limits, shutdown.clone()).await
+    {
+        Ok(Some(client)) => client,
+        // leaf is stopping.
+        Ok(None) => return Ok(()),
         Err(e) => {
             status::set_gateway(GatewayState::Error(failure_text(&e).to_owned()));
             return Err(e);
         }
     };
 
-    // Reminder scheduler: shares the gateway's HTTP client, stops on the
-    // same shutdown signal, and does not outlive this connection attempt.
+    // Reminder scheduler: shares the gateway's HTTP client and its cache,
+    // stops on the same shutdown signal, and does not outlive this
+    // connection attempt.
     let reminders = tokio::spawn(reminders::run(
         client.http.clone(),
+        client.cache.clone(),
         sched_series,
+        sched_app_name,
         sched_shutdown,
     ));
+    // `client.start()` below says nothing until it fails for good, and a
+    // gateway nothing answers is retried inside serenity for ever. This
+    // puts a reason beside "starting" when that goes on.
+    let overdue = tokio::spawn(async move { connected.or_say_so_after(CONNECT_TIMEOUT).await });
 
     // The shutdown signal ends the session here rather than through
     // `client.start()` returning: serenity only makes it return when a shard
@@ -296,9 +552,10 @@ pub async fn run(
             Ok(())
         }
     };
-    // Neither task outlives this connection attempt: the next one starts
-    // its own.
+    // None of these tasks outlives this connection attempt: the next one
+    // starts its own.
     reminders.abort();
+    overdue.abort();
     let registration = registering
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -310,6 +567,52 @@ pub async fn run(
         status::set_gateway(GatewayState::Error(failure_text(e).to_owned()));
     }
     ended
+}
+
+/// The builders registration submits for `commands`: one per slash command
+/// and one per context menu.
+fn command_builders(commands: &[poise::Command<Data, Error>]) -> Vec<serenity::CreateCommand> {
+    poise::builtins::create_application_commands(commands)
+}
+
+/// A command as Discord's command lists identify it: by type and name.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CommandKey {
+    /// Discord's command type: 1 slash command, 2 user menu, 3 message menu.
+    pub kind: u8,
+    /// The name it is registered under.
+    pub name: String,
+}
+
+/// Discord's type for a command submitted without one: a slash command.
+const SLASH_COMMAND_KIND: u8 = 1;
+
+/// The commands leaf registers, read from the builders registration submits
+/// (see [`register`]). `leaf doctor` compares Discord's lists against this
+/// without connecting to the gateway.
+pub fn registered_commands() -> anyhow::Result<Vec<CommandKey>> {
+    command_builders(&commands::all())
+        .iter()
+        .map(command_key)
+        .collect()
+}
+
+/// The type and name a builder is submitted with.
+fn command_key(builder: &serenity::CreateCommand) -> anyhow::Result<CommandKey> {
+    let sent = serenity::json::to_value(builder).context("reading a command as it is sent")?;
+    let name = sent
+        .get("name")
+        .and_then(serenity::json::Value::as_str)
+        .context("a command is submitted without a name")?
+        .to_owned();
+    let kind = match sent.get("type") {
+        None => SLASH_COMMAND_KIND,
+        Some(kind) => kind
+            .as_u64()
+            .and_then(|kind| u8::try_from(kind).ok())
+            .with_context(|| format!("command `{name}` is submitted with an unreadable type"))?,
+    };
+    Ok(CommandKey { kind, name })
 }
 
 /// Registers the commands, repeating with a growing wait until it works or
@@ -508,6 +811,94 @@ mod tests {
     }
 
     #[test]
+    fn registered_commands_are_what_registration_submits() {
+        let keys = registered_commands().unwrap();
+        // One key per builder, in the order they are submitted.
+        let builders = command_builders(&commands::all());
+        assert_eq!(keys.len(), builders.len());
+        for (key, builder) in keys.iter().zip(&builders) {
+            let sent = serenity::json::to_value(builder).unwrap();
+            assert_eq!(sent["name"], key.name.as_str());
+        }
+        // A slash command carries no type (Discord's default, 1); a message
+        // menu says 3.
+        let has = |kind: u8, name: &str| keys.iter().any(|k| k.kind == kind && k.name == name);
+        assert!(has(1, "gallery"), "{keys:?}");
+        assert!(has(1, "setup"), "{keys:?}");
+        assert!(has(3, "Archive to Series"), "{keys:?}");
+        assert!(!has(1, "Archive to Series"), "{keys:?}");
+        // Discord identifies a command by type and name: no two may collide.
+        let mut unique = keys.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), keys.len(), "{keys:?}");
+    }
+
+    #[test]
+    fn a_command_key_reads_the_type_the_builder_sends() {
+        let slash = serenity::CreateCommand::new("ping").description("x");
+        assert_eq!(
+            command_key(&slash).unwrap(),
+            CommandKey {
+                kind: 1,
+                name: "ping".to_owned()
+            }
+        );
+        let menu = serenity::CreateCommand::new("Who is this").kind(serenity::CommandType::User);
+        assert_eq!(
+            command_key(&menu).unwrap(),
+            CommandKey {
+                kind: 2,
+                name: "Who is this".to_owned()
+            }
+        );
+    }
+
+    /// The bot user as the gateway describes it. `shown` is the display
+    /// name, where Discord gives the bot one.
+    fn bot(username: &str, shown: Option<&str>) -> serenity::CurrentUser {
+        serenity::json::from_value(serenity::json::json!({
+            "id": "901", "username": username, "global_name": shown, "bot": true,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn the_app_is_named_after_the_bot_from_the_moment_it_connects() {
+        // The scheduler has held its end since before the gateway connected.
+        let (names, mut scheduler) = tokio::sync::watch::channel(String::new());
+        assert_eq!(*scheduler.borrow_and_update(), "");
+
+        let name = AppName::of(names, &bot("leaf-dev", None));
+        assert_eq!(name.get(), "leaf-dev");
+        assert!(scheduler.has_changed().unwrap());
+        assert_eq!(*scheduler.borrow_and_update(), "leaf-dev");
+
+        // Said again at every reconnect: nothing to wake anyone for.
+        name.rename(&bot("leaf-dev", None));
+        assert!(!scheduler.has_changed().unwrap());
+
+        // The bot was renamed in the Developer Portal.
+        name.rename(&bot("Daily Art Bot", None));
+        assert!(scheduler.has_changed().unwrap());
+        assert_eq!(*scheduler.borrow_and_update(), "Daily Art Bot");
+        assert_eq!(name.get(), "Daily Art Bot");
+    }
+
+    #[test]
+    fn the_app_s_name_is_the_one_discord_shows_for_the_bot() {
+        let (names, _scheduler) = tokio::sync::watch::channel(String::new());
+        // A display name, where the bot has one, is what Discord shows; the
+        // username under it is not.
+        let name = AppName::of(names, &bot("daily_art_bot", Some("Daily Art")));
+        assert_eq!(name.get(), "Daily Art");
+        name.rename(&bot("daily_art_bot", None));
+        assert_eq!(name.get(), "daily_art_bot");
+        name.rename(&bot("daily_art_bot", Some("Daily Art Bot")));
+        assert_eq!(name.get(), "Daily Art Bot");
+    }
+
+    #[test]
     fn setup_command_id_is_the_slash_command_s() {
         let registered = [slash("4", "ping"), entry_point(), slash("5", "setup")];
         assert_eq!(
@@ -535,14 +926,234 @@ mod tests {
 
         let passing = anyhow::anyhow!("connection reset").context("gateway connection failed");
         assert!(!is_permanent(&passing));
+
+        // No answer at all is its own case: it is retried, and the owner is
+        // pointed at the network rather than at Discord.
+        let silent = anyhow::Error::new(NoAnswer);
+        assert!(!is_permanent(&silent));
+        assert!(failure_text(&silent).contains("firewall"));
+        assert_ne!(failure_text(&silent), failure_text(&passing));
+
+        // A rate limit is an answer: nothing on this machine is in the way.
+        let limited = anyhow::Error::new(ToldToWait).context("gateway connection failed");
+        assert!(!is_permanent(&limited));
+        assert_eq!(failure_text(&limited), TOLD_TO_WAIT);
+        assert!(!TOLD_TO_WAIT.contains("firewall"));
+        assert!(!TOLD_TO_WAIT.contains("network"));
+
         // Shown verbatim on the setup page: a sentence, ending in a period.
         for text in [
             failure_text(&rejected),
             failure_text(&passing),
+            failure_text(&silent),
+            failure_text(&limited),
+            NOT_CONNECTED_YET,
+            STOPPED,
             REGISTRATION_FAILED,
         ] {
             assert!(text.ends_with('.'), "{text}");
         }
+    }
+
+    /// A client that is never built: nothing answers.
+    fn never_built() -> std::future::Pending<Result<u8, serenity::Error>> {
+        std::future::pending()
+    }
+
+    /// Longer than any test waits. Whatever is given this much patience is
+    /// expected to end for another reason.
+    const FOR_EVER: Duration = Duration::from_hours(1);
+
+    #[tokio::test]
+    async fn building_the_client_is_given_up_on_when_nothing_answers() {
+        let (_stop, shutdown) = tokio::sync::watch::channel(false);
+        let patience = Duration::from_millis(20);
+
+        let limits = RateLimits::default();
+        let silent = build_within(never_built(), patience, &limits, shutdown.clone())
+            .await
+            .unwrap_err();
+        assert!(silent.is::<NoAnswer>(), "{silent:#}");
+        assert_eq!(failure_text(&silent), NO_ANSWER);
+        // It may pass, so it is tried again.
+        assert!(!is_permanent(&silent));
+
+        // Discord did answer, and said to wait longer than leaf does: the
+        // owner is not sent to look at a firewall.
+        limits.note();
+        let limited = build_within(never_built(), patience, &limits, shutdown.clone())
+            .await
+            .unwrap_err();
+        assert!(limited.is::<ToldToWait>(), "{limited:#}");
+        assert_eq!(failure_text(&limited), TOLD_TO_WAIT);
+        assert!(!is_permanent(&limited));
+    }
+
+    #[tokio::test]
+    async fn a_client_built_in_time_is_handed_back() {
+        let (_stop, shutdown) = tokio::sync::watch::channel(false);
+        let limits = RateLimits::default();
+
+        let built = build_within(async { Ok(7_u8) }, FOR_EVER, &limits, shutdown.clone())
+            .await
+            .unwrap();
+        assert_eq!(built, Some(7));
+
+        // A build that fails is that failure, not a silence.
+        let refusing = async { Err::<u8, _>(serenity::Error::Other("refused")) };
+        let refused = build_within(refusing, FOR_EVER, &limits, shutdown)
+            .await
+            .unwrap_err();
+        assert!(!refused.is::<NoAnswer>(), "{refused:#}");
+        assert!(serenity_error(&refused).is_some(), "{refused:#}");
+        assert_eq!(
+            failure_text(&refused),
+            "The bot couldn't reach Discord. leaf keeps trying."
+        );
+    }
+
+    #[tokio::test]
+    async fn stopping_does_not_wait_for_discord_to_answer() {
+        let limit = Duration::from_secs(5);
+
+        // Raised before the build began.
+        let (_stop, shutdown) = tokio::sync::watch::channel(true);
+        let limits = RateLimits::default();
+        let stopped = tokio::time::timeout(
+            limit,
+            build_within(never_built(), FOR_EVER, &limits, shutdown),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(stopped, None);
+
+        // Raised while it waits.
+        let (stop, shutdown) = tokio::sync::watch::channel(false);
+        let waiting = tokio::spawn(async move {
+            build_within(never_built(), FOR_EVER, &RateLimits::default(), shutdown).await
+        });
+        stop.send(true).unwrap();
+        let stopped = tokio::time::timeout(limit, waiting)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(stopped, None);
+    }
+
+    /// Held by every test that writes [`leaf_core::status`]: it is one
+    /// value for the whole process, and tests run side by side.
+    static STATUS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// What `GET /api/status` would show now: the state and the notice.
+    fn shown() -> (GatewayState, Option<String>) {
+        (status::gateway(), status::notice())
+    }
+
+    #[tokio::test]
+    async fn the_last_failure_stands_beside_starting_until_the_bot_is_online() {
+        let _status = STATUS.lock().await;
+        let (stop, shutdown) = tokio::sync::watch::channel(false);
+        // What was shown as each attempt began, and once the second was up.
+        let began = Mutex::new(Vec::new());
+        let online = Mutex::new(None);
+        let (began_in, online_in, stop_in) = (&began, &online, &stop);
+        let connect = || {
+            let attempt = {
+                let mut began = began_in.lock().unwrap();
+                began.push(shown());
+                began.len()
+            };
+            async move {
+                match attempt {
+                    // Nothing answers.
+                    1 => Err(anyhow::Error::new(NoAnswer)),
+                    // The gateway says the bot is connected, and later the
+                    // connection ends by itself.
+                    2 => {
+                        Connected::default().now();
+                        *online_in.lock().unwrap() = Some(shown());
+                        Ok(())
+                    }
+                    // leaf is stopped during the third.
+                    _ => {
+                        stop_in.send(true).unwrap();
+                        Ok(())
+                    }
+                }
+            }
+        };
+
+        let supervising = keep_connected(connect, shutdown, Duration::from_millis(1));
+        tokio::time::timeout(Duration::from_secs(5), supervising)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            began.into_inner().unwrap(),
+            [
+                (GatewayState::Starting, None),
+                (GatewayState::Starting, Some(NO_ANSWER.to_owned())),
+                (GatewayState::Starting, Some(STOPPED.to_owned())),
+            ]
+        );
+        assert_eq!(
+            online.into_inner().unwrap(),
+            Some((GatewayState::Online, None))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rejected_token_is_not_tried_again() {
+        let _status = STATUS.lock().await;
+        let (_stop, shutdown) = tokio::sync::watch::channel(false);
+        let attempts = Mutex::new(0_u32);
+        let attempts_in = &attempts;
+        let connect = || {
+            *attempts_in.lock().unwrap() += 1;
+            async {
+                Err(anyhow::Error::new(serenity::Error::Gateway(
+                    serenity::GatewayError::InvalidAuthentication,
+                )))
+            }
+        };
+
+        // It returns by itself, with nobody stopping it.
+        let supervising = keep_connected(connect, shutdown, Duration::from_millis(1));
+        tokio::time::timeout(Duration::from_secs(5), supervising)
+            .await
+            .unwrap();
+
+        assert_eq!(attempts.into_inner().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_connection_that_is_slow_to_come_up_says_so_beside_starting() {
+        let _status = STATUS.lock().await;
+        status::set_gateway(GatewayState::Starting);
+        status::set_notice(None);
+        let patience = Duration::from_millis(5);
+
+        // The wait runs out and the gateway has said nothing: the state is
+        // still "starting", now with a reason.
+        let connected = Connected::default();
+        connected.or_say_so_after(patience).await;
+        assert_eq!(
+            shown(),
+            (GatewayState::Starting, Some(NOT_CONNECTED_YET.to_owned()))
+        );
+
+        // Then it connects after all.
+        connected.now();
+        assert_eq!(shown(), (GatewayState::Online, None));
+
+        // A connection that came up in time: the wait running out changes
+        // nothing.
+        let prompt = Connected::default();
+        prompt.now();
+        prompt.or_say_so_after(patience).await;
+        assert_eq!(shown(), (GatewayState::Online, None));
     }
 
     #[tokio::test]

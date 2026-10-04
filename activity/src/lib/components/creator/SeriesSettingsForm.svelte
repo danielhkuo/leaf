@@ -92,6 +92,13 @@
       ? settings.channel_id
       : null,
   );
+  /**
+   * The chosen channel is one the server still lists and leaf cannot see: it
+   * was deleted, or hidden from leaf, and no admin has run /setup since.
+   */
+  const unseenChannel = $derived(options.channels.some((c) => c.id === form.channelId && !c.name));
+  /** Whether the server lists another channel, one leaf can see, to move to. */
+  const otherChannel = $derived(options.channels.some((c) => c.id !== form.channelId && c.name));
   const reminderChannel = $derived.by(() => {
     if (form.channelId === '') return null;
     const channel = options.channels.find((c) => c.id === form.channelId);
@@ -348,6 +355,20 @@
             This channel is no longer one this server allows for series, so posts there can’t be
             archived. Choose another channel, or ask a server admin to add it back with /setup. Your
             other settings still save.
+          </p>
+        {:else if unseenChannel}
+          <!-- A missing name can also be Discord not answering just now, so
+               this does not say the channel is gone. -->
+          <p class="hint caution">
+            {#if otherChannel}
+              leaf can’t see this channel. If it was deleted or hidden, posts there can’t be
+              archived: choose another, or ask a server admin to choose new series channels with
+              /setup.
+            {:else}
+              leaf can’t see this channel, and this server has no other series channel it can see.
+              If it was deleted or hidden, ask a server admin to choose new series channels with
+              /setup.
+            {/if}
           </p>
         {/if}
         {@render problem('channel')}

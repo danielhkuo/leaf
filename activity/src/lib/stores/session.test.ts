@@ -16,6 +16,7 @@ const SESSION: Session = {
   guildId: 'g1',
   channelId: 'c1',
   platform: 'mobile',
+  appName: 'leaf',
   customId: null,
   token: 'tok',
   expiresAt: 1_000_000,

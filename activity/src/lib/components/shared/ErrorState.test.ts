@@ -14,6 +14,15 @@ describe('ErrorState', () => {
     expect(alert).toHaveTextContent('Check your connection.');
   });
 
+  it('makes its title the page’s heading only when it is the whole screen', () => {
+    const inline = render(ErrorState, { props: { title: 'Couldn’t load the stats' } });
+    expect(screen.queryByRole('heading')).not.toBeInTheDocument();
+    inline.unmount();
+
+    render(ErrorState, { props: { title: 'Your session has ended', page: true } });
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Your session has ended');
+  });
+
   it('shows no buttons when there is nothing to do', () => {
     render(ErrorState, { props: { title: 'Open leaf inside a server' } });
     expect(screen.queryByRole('button')).not.toBeInTheDocument();

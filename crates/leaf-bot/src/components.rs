@@ -26,7 +26,7 @@ use leaf_core::policy::{self, Viewer};
 use leaf_core::series_ops;
 use poise::serenity_prelude as serenity;
 
-use crate::{Data, Error, checks, reminders};
+use crate::{Data, Error, checks, menus, reminders};
 
 // ---------------------------------------------------------------------------
 // Ids
@@ -47,11 +47,6 @@ const SCOPED_PREFIXES: [&str; 2] = ["arc", "qry"];
 
 /// Id of the Open gallery button with no destination.
 const OPEN_ID: &str = "leaf:open";
-
-/// Shown when the Activity cannot be launched from a button.
-pub(crate) const OPEN_GALLERY_FALLBACK: &str = "🍂 I couldn't open the gallery from here. On \
-     mobile, tap + next to the message box, then Apps, then leaf. On desktop, open the app \
-     launcher in the message box and choose leaf.";
 
 /// Shown on a press of a prompt nothing listens for any more: an earlier
 /// run of leaf sent it, or its command stopped waiting.
@@ -328,7 +323,7 @@ async fn open_gallery(
         press.create_response(&ctx.http, reply).await?;
         return Ok(());
     }
-    launch_or_explain(&ctx.http, press).await
+    launch_or_explain(&ctx.http, press, &data.app_name()).await
 }
 
 /// Whether the gallery lists `series` for this member.
@@ -413,17 +408,19 @@ async fn leave_intent(
 }
 
 /// Answers `press` by launching the Activity, or, when Discord refuses
-/// that, by saying where the gallery is.
+/// that, by saying where the gallery is: in the app launcher, under `app`
+/// (the name Discord lists leaf's app under).
 pub(crate) async fn launch_or_explain(
     http: &serenity::Http,
     press: &serenity::ComponentInteraction,
+    app: &str,
 ) -> Result<(), Error> {
     let launch = serenity::CreateInteractionResponse::LaunchActivity;
     if let Err(e) = press.create_response(http, launch).await {
         tracing::warn!(error = %e, "could not launch the Activity");
         let fallback = serenity::CreateInteractionResponse::Message(
             serenity::CreateInteractionResponseMessage::new()
-                .content(OPEN_GALLERY_FALLBACK)
+                .content(menus::open_gallery_fallback(app))
                 .ephemeral(true),
         );
         press.create_response(http, fallback).await?;
@@ -590,16 +587,21 @@ async fn try_log(
         .map_err(|e| (Some(channel), LogProblem::Refused(e)))
 }
 
+/// Discord error: the channel does not exist.
+const UNKNOWN_CHANNEL: isize = 10_003;
+
 /// Writes `line` to the server's log channel, if one is set.
 ///
 /// The line notifies nobody: mentions show as names but never ping, and the
 /// message arrives silently. Returns a note for someone who can fix it (an
 /// admin) when the line could not be written; the caller decides whether
-/// the person in front of it is one.
+/// the person in front of it is one. `setup` is how the note writes the
+/// `/setup` command (see [`crate::checks::setup_mention`]).
 pub(crate) async fn log_line(
     http: &serenity::Http,
     settings: &GuildSettings,
     line: &str,
+    setup: &str,
 ) -> Option<String> {
     let raw = settings.log_channel_id.as_deref()?;
     match try_log(http, settings, raw, line).await {
@@ -614,14 +616,21 @@ pub(crate) async fn log_line(
                 channel = raw,
                 "log line skipped: the log channel is not in this server"
             );
-            Some(
+            Some(format!(
                 "The log channel isn't a channel of this server, so I didn't write to it. \
-                 Pick a log channel again with `/setup`."
-                    .to_owned(),
-            )
+                 Pick a log channel again with {setup}."
+            ))
         }
         Err((channel, LogProblem::Refused(e))) => {
             tracing::warn!(channel = raw, error = %e, "log-channel write failed");
+            if discord_code(&e) == Some(UNKNOWN_CHANNEL) {
+                // No mention of a channel that is gone: it would read
+                // "#unknown".
+                return Some(format!(
+                    "{}, so the log line wasn't written. Pick a new one with {setup}.",
+                    crate::channels::lost("the log channel")
+                ));
+            }
             channel.map(|channel| {
                 format!(
                     "I couldn't write to the log channel <#{channel}>. Check that I can view it \
@@ -632,11 +641,108 @@ pub(crate) async fn log_line(
     }
 }
 
+/// Discord's JSON error code, when `error` is a refused request.
+pub(crate) const fn discord_code(error: &serenity::Error) -> Option<isize> {
+    match error {
+        serenity::Error::Http(serenity::HttpError::UnsuccessfulRequest(response)) => {
+            Some(response.error.code)
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, reason = "tests may panic")]
 
     use super::*;
+    use crate::stub;
+
+    /// Server 900, logging to `channel`.
+    fn logging_to(channel: &str) -> GuildSettings {
+        let mut settings = GuildSettings::defaults_for("900");
+        settings.log_channel_id = Some(channel.to_owned());
+        settings
+    }
+
+    #[tokio::test]
+    async fn a_log_line_that_cannot_be_written_tells_an_admin_what_to_do() {
+        let discord = stub::stub(&[
+            (
+                "GET /api/v10/channels/7001 ",
+                404,
+                r#"{"message":"Unknown Channel","code":10003}"#,
+            ),
+            (
+                "GET /api/v10/channels/7002 ",
+                403,
+                r#"{"message":"Missing Access","code":50001}"#,
+            ),
+            (
+                "GET /api/v10/channels/7003 ",
+                200,
+                r#"{"id":"7003","type":0,"guild_id":"999","name":"log","position":0}"#,
+            ),
+        ])
+        .await;
+        let http = stub::http(&discord.base);
+        let note = async |channel: &str, setup: &str| {
+            log_line(&http, &logging_to(channel), "a line", setup).await
+        };
+
+        // Gone: described, never mentioned (the mention would read
+        // "#unknown"), with the command to pick another as a chip.
+        assert_eq!(
+            note("7001", "</setup:42>").await.unwrap(),
+            "leaf can no longer see the log channel (deleted, or hidden from leaf), so the log \
+             line wasn't written. Pick a new one with </setup:42>."
+        );
+        // Until the command's id is known, its plain name.
+        assert!(
+            note("7001", "`/setup`")
+                .await
+                .unwrap()
+                .ends_with("Pick a new one with `/setup`.")
+        );
+        // There, but closed to leaf: an admin can see it, so it is named.
+        assert_eq!(
+            note("7002", "</setup:42>").await.unwrap(),
+            "I couldn't write to the log channel <#7002>. Check that I can view it and send \
+             messages there."
+        );
+        // Another server's channel.
+        assert_eq!(
+            note("7003", "</setup:42>").await.unwrap(),
+            "The log channel isn't a channel of this server, so I didn't write to it. Pick a \
+             log channel again with </setup:42>."
+        );
+        // Nothing was posted anywhere.
+        let posted = discord
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(line, _)| line.starts_with("POST"))
+            .count();
+        assert_eq!(posted, 0);
+    }
+
+    #[tokio::test]
+    async fn no_log_channel_and_a_stored_id_that_is_not_one_ask_discord_nothing() {
+        let discord = stub::stub(&[]).await;
+        let http = stub::http(&discord.base);
+        let unset = GuildSettings::defaults_for("900");
+        assert_eq!(log_line(&http, &unset, "a line", "</setup:42>").await, None);
+        for not_an_id in ["", "0", "general", "12/../3"] {
+            let settings = logging_to(not_an_id);
+            assert_eq!(
+                log_line(&http, &settings, "a line", "</setup:42>").await,
+                None,
+                "{not_an_id:?}"
+            );
+        }
+        assert!(discord.requests.lock().unwrap().is_empty());
+    }
 
     #[test]
     fn open_ids_round_trip() {

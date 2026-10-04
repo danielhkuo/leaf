@@ -1355,6 +1355,12 @@ dependencies = [
  "leaf-bot",
  "leaf-core",
  "leaf-server",
+ "object_store",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -1439,6 +1445,7 @@ dependencies = [
  "tower",
  "tower-http",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

@@ -6,7 +6,9 @@ it day to day, and migrate an old archive into it.
 leaf is **one self-hosted process** — the Discord bot, the REST API, the
 embedded-app gallery, and the admin panel all in a single container sharing one
 SQLite database. The only external pieces are a **public HTTPS origin** (Discord
-requires one for embedded apps) and **Cloudflare R2** for media storage. The
+requires one for embedded apps) and **Cloudflare R2** for media storage (or,
+for development and one-machine installs, a folder on the machine itself:
+[01 § Storage](01-install.md#storage-r2-or-a-folder-on-this-machine)). The
 supported deployment is Docker on a box you control plus a Cloudflare account.
 It is the only supported shape because the bot and the web server share one
 SQLite file, which can't be split across machines.
@@ -22,8 +24,8 @@ Read in this order — each step produces credentials the next one needs:
    redirects and install settings; enable Activities **for iOS and Android
    too**; add the URL mapping; invite the bot.
 3. **[03-cloudflare.md](03-cloudflare.md)** — put leaf on a public hostname
-   (Cloudflare Tunnel), create the **R2 bucket + API keys**, and add the cache
-   rule for media.
+   (Cloudflare Tunnel), create the **R2 bucket + API keys** (skip that part if
+   you keep media in a folder), and add the cache rule for media.
 4. Back to **[01-install.md § First-run setup](01-install.md#first-run-setup)** —
    paste everything into the setup page; leaf validates it and starts.
 5. **[04-usage.md](04-usage.md)** — using leaf in Discord: `/setup`, starting

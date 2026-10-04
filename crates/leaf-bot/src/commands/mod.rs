@@ -13,8 +13,8 @@ use std::time::Duration;
 use leaf_core::db::LaunchIntentRepo;
 use poise::serenity_prelude as serenity;
 
-use crate::components::OPEN_GALLERY_FALLBACK;
-use crate::{Context, Data, Error, checks};
+use crate::channels::Sight;
+use crate::{Context, Data, Error, checks, menus};
 
 pub mod archive;
 pub mod query;
@@ -114,7 +114,7 @@ pub async fn gallery(
             tracing::warn!(error = %e, "could not launch the Activity");
             ctx.send(
                 poise::CreateReply::default()
-                    .content(OPEN_GALLERY_FALLBACK)
+                    .content(menus::open_gallery_fallback(&ctx.data().app_name()))
                     .ephemeral(true),
             )
             .await?;
@@ -130,20 +130,22 @@ pub async fn leaf(ctx: Context<'_>) -> Result<(), Error> {
         return Ok(());
     };
     let settings = ctx.data().guilds.get(&guild_id).await?;
-    let reply = settings.filter(|s| s.setup_complete).map_or_else(
-        || {
-            let setup = checks::setup_mention(ctx.data());
-            poise::CreateReply::default()
-                .content(checks::not_set_up_text(checks::is_admin(&ctx), &setup))
-        },
-        |settings| {
-            poise::CreateReply::default()
-                .content(setup::how_to_text(&settings))
-                .components(vec![serenity::CreateActionRow::Buttons(vec![
+    let is_admin = checks::is_admin(&ctx);
+    let setup = checks::setup_mention(ctx.data());
+    let reply = match settings.filter(|s| s.setup_complete) {
+        None => poise::CreateReply::default().content(checks::not_set_up_text(is_admin, &setup)),
+        Some(settings) => {
+            // The how-to names the series channels: only those still there.
+            let sight = Sight::before_first_answer(&ctx).await;
+            let text =
+                setup::how_to_text(&settings, &ctx.data().app_name(), &sight, is_admin, &setup);
+            poise::CreateReply::default().content(text).components(vec![
+                serenity::CreateActionRow::Buttons(vec![
                     open_gallery_button(None).style(serenity::ButtonStyle::Primary),
-                ])])
-        },
-    );
+                ]),
+            ])
+        }
+    };
     ctx.send(reply.ephemeral(true)).await?;
     Ok(())
 }

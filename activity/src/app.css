@@ -290,6 +290,36 @@ textarea.control {
   min-height: calc(var(--control-height) * 1.6);
   resize: vertical;
 }
+/* A select is drawn from this file in every engine, not by the platform.
+ * Left to itself, WebKit on a Mac keeps its own 26px pop-up button whatever
+ * min-height and padding say, and WebKit counts option text longer than the
+ * box towards the page's width (a 60-character channel name scrolled the
+ * settings screen sideways). So: no native appearance, the text clipped to
+ * the box, and a chevron made of two gradients, so there is no image to
+ * fetch. Tapping it still opens the platform's own picker. */
+select.control {
+  padding-right: 40px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--ink-muted) 50%),
+    linear-gradient(135deg, var(--ink-muted) 50%, transparent 50%);
+  background-repeat: no-repeat;
+  background-position:
+    right 20px center,
+    right 14px center;
+  background-size: 6px 6px;
+  -webkit-appearance: none;
+  appearance: none;
+}
+/* Forced colours (Windows contrast themes) drop every gradient, chevron
+ * included: there a select is the platform's own again, with its arrow. */
+@media (forced-colors: active) {
+  select.control {
+    -webkit-appearance: auto;
+    appearance: auto;
+  }
+}
 .field {
   display: grid;
   gap: 6px;

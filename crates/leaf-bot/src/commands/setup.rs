@@ -6,6 +6,10 @@
 //! put text between menus, so the message text is a numbered list in the
 //! order of the menus, rewritten after every pick.
 //!
+//! Channels are listed by what leaf can see of them (`crate::channels`):
+//! a saved channel that was deleted, or hidden from leaf, is counted and
+//! never mentioned, and comes off the list when the form opens.
+//!
 //! Nothing is written until Save. A Save that cannot go through (no series
 //! channel, a log channel leaf cannot post in) says why and leaves the form
 //! up. Save writes only what this form owns, and the role and the timezone
@@ -34,8 +38,9 @@ use serenity::futures::{Stream, StreamExt as _};
 use tokio::time::Instant;
 
 use super::series_lookup::{and_list, bold, clip, open_gallery_button, scoped_id};
-use crate::components::{self, OPEN_GALLERY_FALLBACK};
-use crate::{Context, Data, Error, checks};
+use crate::channels::{self, HIDDEN_CHANNEL_NAME, Listed, Sight, Style};
+use crate::components::{self, discord_code};
+use crate::{Context, Data, Error, checks, menus};
 
 /// How long the form waits after the last press before it closes.
 const IDLE: Duration = Duration::from_mins(10);
@@ -82,10 +87,6 @@ const ZONE_INPUT_LABEL: &str = "City, or a timezone name";
 
 /// What the empty timezone field shows.
 const ZONE_INPUT_PLACEHOLDER: &str = "Paris, New York, Europe/Paris, Asia/Tokyo";
-
-/// The name Discord gives a channel the bot may not view (gateway
-/// obfuscation, mandatory from 2026-11-16).
-const HIDDEN_CHANNEL_NAME: &str = "___hidden___";
 
 /// Discord error: the channel does not exist.
 const UNKNOWN_CHANNEL: isize = 10003;
@@ -140,10 +141,6 @@ const COMMON_ZONES: [(&str, &str); 24] = [
     ("Australia/Sydney", "Sydney, Melbourne"),
     ("Pacific/Auckland", "New Zealand: Auckland"),
 ];
-
-/// The gesture that archives a post, worded as in reminders and refusals.
-const ARCHIVE_GESTURE: &str =
-    "long-press the post (right-click on desktop), then Apps, then Archive to Series";
 
 /// Shown while Save checks the log channel and writes.
 const SAVING: &str = "⏳ Saving…";
@@ -308,10 +305,11 @@ struct Draft {
 }
 
 /// Saved values the form dropped on opening because they point at nothing
-/// any more. Each is said in the form, so Save removes nothing unannounced.
+/// leaf can see any more. Each is said in the form, so Save removes nothing
+/// unannounced.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct Stale {
-    /// Series channels that no longer exist.
+    /// Series channels leaf can no longer see.
     channels: usize,
     log_channel: bool,
     creator_role: bool,
@@ -320,22 +318,22 @@ struct Stale {
 }
 
 impl Draft {
-    /// What the form opens with: the saved settings, less what no longer
-    /// exists. Without `facts` nothing can be checked, so everything is
-    /// kept.
-    fn open(settings: &GuildSettings, facts: Option<&GuildFacts>) -> (Self, Stale) {
+    /// What the form opens with: the saved settings, less the channels leaf
+    /// can no longer see (`sight`) and a role that no longer exists
+    /// (`facts`). What cannot be checked is kept: every channel when the
+    /// sight is unknown, the role without `facts`.
+    fn open(settings: &GuildSettings, facts: Option<&GuildFacts>, sight: &Sight) -> (Self, Stale) {
         let mut stale = Stale::default();
-        let channel_exists = |id: &String| facts.is_none_or(|f| f.channels.contains_key(id));
 
         let watched: Vec<String> = settings
             .watched_channels
             .iter()
-            .filter(|id| channel_exists(id))
+            .filter(|id| sight.sees(id))
             .cloned()
             .collect();
         stale.channels = settings.watched_channels.len() - watched.len();
 
-        let log_channel = settings.log_channel_id.clone().filter(channel_exists);
+        let log_channel = settings.log_channel_id.clone().filter(|id| sight.sees(id));
         stale.log_channel = settings.log_channel_id.is_some() && log_channel.is_none();
 
         let creator_role = settings
@@ -370,9 +368,14 @@ fn snowflake(id: &str) -> Option<u64> {
 /// The channels a menu opens with: those of `ids` the menu can show. A
 /// default that names a deleted channel, or one of a kind the menu does not
 /// offer, makes Discord refuse the whole message.
-fn channel_defaults(ids: &[String], facts: Option<&GuildFacts>) -> Vec<serenity::ChannelId> {
+fn channel_defaults(
+    ids: &[String],
+    facts: Option<&GuildFacts>,
+    sight: &Sight,
+) -> Vec<serenity::ChannelId> {
     let mut seen = HashSet::new();
     ids.iter()
+        .filter(|id| sight.sees(id))
         .filter(|id| facts.is_none_or(|f| f.channels.get(*id).is_some_and(|c| c.selectable)))
         .filter_map(|id| snowflake(id))
         .filter(|id| seen.insert(*id))
@@ -623,12 +626,10 @@ fn days(n: i64) -> String {
     }
 }
 
-/// Every channel of `ids` as a mention, in order.
-fn channel_mentions(ids: &[String]) -> String {
-    ids.iter()
-        .map(|id| format!("<#{id}>"))
-        .collect::<Vec<_>>()
-        .join(" ")
+/// The channels of `ids` for a line of the form or the summary: each one
+/// leaf can see as a mention, in order, and the others counted.
+fn channel_line<S: AsRef<str>>(ids: &[S], sight: &Sight) -> String {
+    sight.sort(ids).text(Style::Spaces)
 }
 
 /// "#a", "#a and #b", "#a, #b and 3 more": channels inside a sentence.
@@ -646,14 +647,16 @@ fn channel_list<S: AsRef<str>>(ids: &[S]) -> String {
 
 /// Where to post, for the how-to: "#a", "#a or #b", "one of the series
 /// channels (#a, #b, #c)". A creator posts in one of them, so the channels
-/// are never joined with "and".
-fn post_in_text<S: AsRef<str>>(ids: &[S]) -> String {
-    let mention = |id: &S| format!("<#{}>", id.as_ref());
-    match ids {
-        [] => "a series channel".to_owned(),
-        [only] => mention(only),
-        [a, b] => format!("{} or {}", mention(a), mention(b)),
-        many => {
+/// are never joined with "and". Only channels leaf can see are named; the
+/// others are counted inside the brackets, and when it can see none the
+/// how-to says so on a line of its own (see [`how_to_text`]).
+fn post_in_text(listed: &Listed<'_>) -> String {
+    let mention = |id: &&str| format!("<#{id}>");
+    match (listed.seen.as_slice(), listed.unseen) {
+        ([], _) => "a series channel".to_owned(),
+        ([only], 0) => mention(only),
+        ([a, b], 0) => format!("{} or {}", mention(a), mention(b)),
+        (many, 0) => {
             let mut shown: Vec<String> =
                 many.iter().take(CHANNELS_SHOWN_MAX).map(mention).collect();
             if many.len() > CHANNELS_SHOWN_MAX {
@@ -661,23 +664,30 @@ fn post_in_text<S: AsRef<str>>(ids: &[S]) -> String {
             }
             format!("one of the series channels ({})", shown.join(", "))
         }
+        _ => format!(
+            "one of the series channels ({})",
+            listed.text(Style::Commas {
+                cap: CHANNELS_SHOWN_MAX
+            })
+        ),
     }
 }
 
-/// The series channels on the old list, still in the server, that the new
+/// The series channels on the old list, still in leaf's sight, that the new
 /// list leaves out although live series post there: each with the names of
 /// those series.
 fn dropped_in_use(
     saved: &[String],
     watched: &[String],
     series: &[Series],
-    facts: Option<&GuildFacts>,
+    sight: &Sight,
 ) -> Vec<(String, Vec<String>)> {
     saved
         .iter()
         .filter(|id| !watched.contains(id))
-        // A deleted channel takes no posts either way.
-        .filter(|id| facts.is_none_or(|f| f.channels.contains_key(*id)))
+        // A channel that is gone takes no posts either way, and its series
+        // get a line of their own (see `out_of_sight`).
+        .filter(|id| sight.sees(id))
         .filter_map(|id| {
             let users: Vec<String> = series
                 .iter()
@@ -689,14 +699,49 @@ fn dropped_in_use(
         .collect()
 }
 
+/// The live series that post in a channel leaf can no longer see, by name,
+/// and how many such channels there are between them.
+fn out_of_sight(series: &[Series], sight: &Sight) -> (Vec<String>, usize) {
+    let mut names = Vec::new();
+    let mut lost: HashSet<&str> = HashSet::new();
+    for s in series.iter().filter(|s| s.state != SeriesState::Revoked) {
+        let unseen: Vec<&str> = s
+            .channels
+            .iter()
+            .map(String::as_str)
+            .filter(|id| !sight.sees(id))
+            .collect();
+        if !unseen.is_empty() {
+            names.push(s.name.clone());
+            lost.extend(unseen);
+        }
+    }
+    (names, lost.len())
+}
+
+/// Up to [`SERIES_SHOWN_MAX`] series names in bold, then "N more".
+fn series_names(names: &[String]) -> String {
+    let mut shown: Vec<String> = names
+        .iter()
+        .take(SERIES_SHOWN_MAX)
+        .map(|name| bold(name))
+        .collect();
+    if names.len() > SERIES_SHOWN_MAX {
+        shown.push(format!("{} more", names.len() - SERIES_SHOWN_MAX));
+    }
+    and_list(&shown)
+}
+
 /// What the admin should know before (and after) saving `draft`, the most
 /// consequential first: a role nobody holds, series left without their
-/// channel, a log leaf cannot write, channels leaf cannot fully use.
+/// channel (taken off the list, or out of leaf's sight), a log leaf cannot
+/// write, channels leaf cannot fully use.
 fn warnings(
     draft: &Draft,
     saved_watched: &[String],
     series: &[Series],
     facts: Option<&GuildFacts>,
+    sight: &Sight,
 ) -> Vec<String> {
     let mut lines = Vec::new();
 
@@ -709,15 +754,7 @@ fn warnings(
         ));
     }
 
-    for (channel, users) in dropped_in_use(saved_watched, &draft.watched, series, facts) {
-        let mut names: Vec<String> = users
-            .iter()
-            .take(SERIES_SHOWN_MAX)
-            .map(|name| bold(name))
-            .collect();
-        if users.len() > SERIES_SHOWN_MAX {
-            names.push(format!("{} more", users.len() - SERIES_SHOWN_MAX));
-        }
+    for (channel, users) in dropped_in_use(saved_watched, &draft.watched, series, sight) {
         let (verb, their) = if users.len() == 1 {
             ("posts", "Its")
         } else {
@@ -727,7 +764,23 @@ fn warnings(
             "⚠️ {} {verb} in <#{channel}>, which is not on the list. {their} posts there can't \
              be archived until it is added back or the creator picks another channel in Series \
              settings.",
-            and_list(&names)
+            series_names(&users)
+        ));
+    }
+
+    // Nothing the admin can pick fixes these: only the creator can move a
+    // series, so the line says where.
+    let (users, lost) = out_of_sight(series, sight);
+    if !users.is_empty() {
+        let (verb, their) = if users.len() == 1 {
+            ("posts", "Its creator")
+        } else {
+            ("post", "Their creators")
+        };
+        lines.push(format!(
+            "⚠️ {} {verb} in {}. {their} can pick another in Series settings, in the gallery.",
+            series_names(&users),
+            channels::unseen_place(lost > 1)
         ));
     }
 
@@ -875,6 +928,8 @@ const fn panel_note(has_link: bool) -> &'static str {
 struct FormView<'a> {
     first_run: bool,
     draft: &'a Draft,
+    /// Which channels leaf can see: the lists mention only those.
+    sight: &'a Sight,
     stale: &'a Stale,
     warnings: &'a [String],
     notice: Option<&'a str>,
@@ -899,11 +954,11 @@ fn form_text(view: &FormView<'_>) -> String {
          their threads."
             .to_owned()
     } else {
-        channel_mentions(&draft.watched)
+        channel_line(&draft.watched, view.sight)
     };
-    let log = draft.log_channel.as_deref().map_or_else(
+    let log = draft.log_channel.as_ref().map_or_else(
         || "none. Optional: one quiet line per archived or removed day.".to_owned(),
-        |id| format!("<#{id}>"),
+        |id| channel_line(std::slice::from_ref(id), view.sight),
     );
     let role = draft.creator_role.as_deref().map_or_else(
         || "none, so anyone can start a series.".to_owned(),
@@ -954,22 +1009,26 @@ fn form_text(view: &FormView<'_>) -> String {
 /// goes away once the admin has picked a replacement.
 fn stale_notes(stale: &Stale, draft: &Draft) -> Vec<String> {
     let mut notes = Vec::new();
+    // A channel that is only hidden from leaf is still there to be picked.
     match stale.channels {
         0 => {}
-        1 => notes.push(
-            "One saved series channel no longer exists, so it comes off the list when you save."
-                .to_owned(),
-        ),
+        1 => notes.push(format!(
+            "{}, so it comes off the list when you save. If it is only hidden, pick it again in \
+             the 1st menu.",
+            channels::lost("one saved series channel")
+        )),
         n => notes.push(format!(
-            "{n} saved series channels no longer exist, so they come off the list when you save."
+            "{}, so they come off the list when you save. If they are only hidden, pick them \
+             again in the 1st menu.",
+            channels::lost(&format!("{n} saved series channels"))
         )),
     }
     if stale.log_channel && draft.log_channel.is_none() {
-        notes.push(
-            "The saved log channel no longer exists, so the log is switched off when you save. \
-             Pick another in the 2nd menu to keep it."
-                .to_owned(),
-        );
+        notes.push(format!(
+            "{}, so the log is switched off when you save. Pick another in the 2nd menu to \
+             keep it.",
+            channels::lost("the saved log channel")
+        ));
     }
     if stale.creator_role && draft.creator_role.is_none() {
         notes.push(
@@ -1008,10 +1067,11 @@ enum HowTo {
     NoChannel,
 }
 
-/// The first series channel leaf can post in.
-fn how_to_target(watched: &[String], facts: Option<&GuildFacts>) -> Option<Target> {
+/// The first series channel leaf can see and post in.
+fn how_to_target(watched: &[String], facts: Option<&GuildFacts>, sight: &Sight) -> Option<Target> {
     watched
         .iter()
+        .filter(|id| sight.sees(id))
         .find(|id| footing(facts, id, POSTING_NEEDS) == Footing::Fine)
         .map(|id| Target {
             id: id.clone(),
@@ -1023,8 +1083,11 @@ fn how_to_target(watched: &[String], facts: Option<&GuildFacts>) -> Option<Targe
 
 /// The line under the saved summary about telling the members. With `live`
 /// false the form has stopped listening and its buttons are gone, so the
-/// line names the way back to them instead.
-fn how_to_line(how_to: &HowTo, live: bool) -> String {
+/// line names the way back to them instead: `setup`, the command as the
+/// admin can tap it (see [`checks::setup_mention`]). `app` is the name
+/// Discord lists leaf's app under, for the steps an admin has to pass on
+/// themselves.
+fn how_to_line(how_to: &HowTo, live: bool, app: &str, setup: &str) -> String {
     match how_to {
         HowTo::Offered(target) if live => format!(
             "Want members to know how leaf works? **Post a how-to** puts a short public guide \
@@ -1033,33 +1096,35 @@ fn how_to_line(how_to: &HowTo, live: bool) -> String {
         ),
         HowTo::Posting(target) if live => format!("⏳ Posting the how-to in <#{}>…", target.id),
         HowTo::Offered(_) | HowTo::Posting(_) => {
-            "To post a public how-to for members, run `/setup` and press **Save** again.".to_owned()
+            format!("To post a public how-to for members, run {setup} and press **Save** again.")
         }
         HowTo::Posted(link) => format!("✅ The how-to is posted: {link}"),
         HowTo::Failed(target, reason) => format!(
             "⚠️ leaf couldn't post the how-to in <#{}>. {reason} {}",
             target.id,
             if live {
-                "Press the button to try again."
+                "Press the button to try again.".to_owned()
             } else {
-                "To try again, run `/setup` and press **Save**."
+                format!("To try again, run {setup} and press **Save**.")
             }
         ),
         HowTo::NoChannel => format!(
             "leaf can't post in any series channel, so telling members is up to you: they \
-             start a series from the gallery, and to archive a post they {ARCHIVE_GESTURE}."
+             start a series from the gallery. To archive a post: {}.",
+            menus::archive_steps(app)
         ),
     }
 }
 
-/// The summary after Save, from the settings as stored. `live` is whether
-/// its buttons still answer.
+/// The summary after Save, from the settings as stored. The channels are
+/// listed by what leaf can see of them (`sight`). `telling` is the line
+/// about telling the members (see [`how_to_line`]).
 fn saved_text(
     settings: &GuildSettings,
+    sight: &Sight,
     first_run: bool,
     warnings: &[String],
-    how_to: &HowTo,
-    live: bool,
+    telling: &str,
     has_link: bool,
     now_unix: i64,
 ) -> String {
@@ -1068,15 +1133,15 @@ fn saved_text(
     } else {
         "🍃 **Setup saved.**"
     };
-    let log = settings
-        .log_channel_id
-        .as_deref()
-        .map_or_else(|| "none".to_owned(), |id| format!("<#{id}>"));
+    let log = settings.log_channel_id.as_ref().map_or_else(
+        || "none".to_owned(),
+        |id| channel_line(std::slice::from_ref(id), sight),
+    );
     let mut head = vec![
         heading.to_owned(),
         format!(
             "**Series channels**: {}",
-            channel_mentions(&settings.watched_channels)
+            channel_line(&settings.watched_channels, sight)
         ),
         format!("**Log channel**: {log}"),
         format!("**Who can start a series**: {}", policy_text(settings)),
@@ -1091,7 +1156,7 @@ fn saved_text(
     }
     let tail = vec![
         String::new(),
-        how_to_line(how_to, live),
+        telling.to_owned(),
         panel_note(has_link).to_owned(),
     ];
     assemble(head, warnings, tail)
@@ -1129,7 +1194,19 @@ fn starters_text(settings: &GuildSettings) -> Option<String> {
 }
 
 /// The public how-to: what leaf is, how to start a series, how to archive.
-pub(crate) fn how_to_text(settings: &GuildSettings) -> String {
+/// `app` is the name Discord lists leaf's app under: the steps go through it.
+///
+/// It names the series channels leaf can see (`sight`). When it can see
+/// none, the steps stand without a channel and a line under them says what
+/// happened and who can fix it: the reader with `setup`, when they are an
+/// admin (see [`channels::choose_new_text`]).
+pub(crate) fn how_to_text(
+    settings: &GuildSettings,
+    app: &str,
+    sight: &Sight,
+    is_admin: bool,
+    setup: &str,
+) -> String {
     let start = starters_text(settings).map_or_else(
         || "closed for now. This server's limit is 0 series per member.".to_owned(),
         // On a narrow screen the gallery may open on a series page, where
@@ -1141,17 +1218,28 @@ pub(crate) fn how_to_text(settings: &GuildSettings) -> String {
             )
         },
     );
+    let listed = sight.sort(&settings.watched_channels);
+    let nowhere = if listed.none_seen() {
+        format!(
+            "⚠️ {} {}\n",
+            channels::none_seen_text(listed.unseen),
+            channels::choose_new_text(is_admin, setup)
+        )
+    } else {
+        String::new()
+    };
     format!(
         "🍃 **leaf is ready in this server.**\n\
          leaf keeps a gallery of ongoing series: one numbered post at a time (Day 1, Day 2, and \
          so on).\n\n\
          **Start a series**: {start}\n\
-         **Archive a post**: post your photo or video in {}, then {ARCHIVE_GESTURE}.\n\
+         **Archive a post**: post your photo or video in {}. Then, {}.\n\
+         {nowhere}\
          **Browse**: the gallery shows every public series as a calendar.\n\
-         -# If the button doesn't open the gallery: on mobile, tap + next to the message box, \
-         then Apps, then leaf. On desktop, open the app launcher in the message box and choose \
-         leaf.",
-        post_in_text(&settings.watched_channels)
+         -# If the button doesn't open the gallery: on a phone, {}",
+        post_in_text(&listed),
+        menus::archive_steps(app),
+        menus::launcher_steps(app)
     )
 }
 
@@ -1184,6 +1272,14 @@ const fn send_refusal(code: Option<isize>) -> &'static str {
 
 /// The notice when the new log channel fails its test line.
 fn log_refusal_text(channel: &str, code: Option<isize>) -> String {
+    if code == Some(UNKNOWN_CHANNEL) {
+        // Gone since it was picked: a mention would read "#unknown".
+        return format!(
+            "⚠️ {}, so nothing was saved. Pick another log channel in the 2nd menu, then press \
+             **Save**.",
+            channels::lost("the log channel you picked")
+        );
+    }
     format!(
         "⚠️ leaf couldn't post a test line in <#{channel}>, so nothing was saved. {} Press \
          **Save** to try again, or pick another log channel in the 2nd menu.",
@@ -1191,21 +1287,25 @@ fn log_refusal_text(channel: &str, code: Option<isize>) -> String {
     )
 }
 
-/// What replaces the form when it closes unsaved.
-fn closed_text(first_run: bool, cancelled: bool) -> String {
+/// What replaces the form when it closes unsaved. `setup` is the command as
+/// the admin can tap it (see [`checks::setup_mention`]).
+fn closed_text(first_run: bool, cancelled: bool, setup: &str) -> String {
     let what = if cancelled {
         "Setup cancelled."
     } else {
         "⏳ Setup closed after 10 minutes without a change."
     };
-    let kept = if first_run {
-        "Nothing was saved, so leaf still isn't set up here. Run `/setup` again when you're \
-         ready."
+    if first_run {
+        format!(
+            "{what} Nothing was saved, so leaf still isn't set up here. Run {setup} again when \
+             you're ready."
+        )
     } else {
-        "Nothing was saved, so the settings are as they were. Run `/setup` again to change \
-         them."
-    };
-    format!("{what} {kept}")
+        format!(
+            "{what} Nothing was saved, so the settings are as they were. Run {setup} again to \
+             change them."
+        )
+    }
 }
 
 /// Whether a press comes from someone who may manage the server, by the
@@ -1224,16 +1324,6 @@ const fn demoted_text(saved: bool) -> &'static str {
     } else {
         "🍂 You no longer have Manage Server in this server, so nothing was saved. The settings \
          are as they were."
-    }
-}
-
-/// Discord's JSON error code, when `error` is a refused request.
-const fn discord_code(error: &serenity::Error) -> Option<isize> {
-    match error {
-        serenity::Error::Http(serenity::HttpError::UnsuccessfulRequest(response)) => {
-            Some(response.error.code)
-        }
-        _ => None,
     }
 }
 
@@ -1462,6 +1552,7 @@ fn form_rows(
     ids: &Ids,
     draft: &Draft,
     facts: Option<&GuildFacts>,
+    sight: &Sight,
     panel: Option<&str>,
     prefill: Prefill,
     now_unix: i64,
@@ -1473,7 +1564,7 @@ fn form_rows(
         ])
     };
     let filled = |allowed: bool, ids: &[String]| {
-        Some(channel_defaults(ids, facts)).filter(|defaults| allowed && !defaults.is_empty())
+        Some(channel_defaults(ids, facts, sight)).filter(|defaults| allowed && !defaults.is_empty())
     };
     let log_channel: Vec<String> = draft.log_channel.iter().cloned().collect();
 
@@ -1641,7 +1732,8 @@ pub async fn setup(ctx: Context<'_>) -> Result<(), Error> {
     let data = ctx.data();
     let serenity_ctx = ctx.serenity_context();
 
-    // Everything before the first reply is local: Discord allows it three
+    // Everything before the first reply is local but for one short question
+    // to Discord (which channels are still there): the reply has three
     // seconds.
     data.guilds.ensure_exists(&guild_id).await?;
     let opened = data
@@ -1651,7 +1743,8 @@ pub async fn setup(ctx: Context<'_>) -> Result<(), Error> {
         .unwrap_or_else(|| GuildSettings::defaults_for(&guild_id));
     let series = data.series.list_by_guild(&guild_id).await?;
     let facts = guild_facts(&serenity_ctx.cache, guild);
-    let (draft, stale) = Draft::open(&opened, facts.as_ref());
+    let sight = Sight::before_first_answer(&ctx).await;
+    let (draft, stale) = Draft::open(&opened, facts.as_ref(), &sight);
     let panel = ctx
         .data()
         .public_url
@@ -1672,6 +1765,7 @@ pub async fn setup(ctx: Context<'_>) -> Result<(), Error> {
         draft,
         stale,
         facts,
+        sight,
         series,
         panel,
         prefill: Prefill::ALL,
@@ -1759,6 +1853,10 @@ struct Session<'a> {
     /// The cached guild, read again on every press: the admin may be
     /// fixing a permission between two of them.
     facts: Option<GuildFacts>,
+    /// Which channels leaf can see, asked once as the form opens. A channel
+    /// picked in a menu since then is taken in: Discord's own picker offers
+    /// only channels that exist.
+    sight: Sight,
     /// Every series of the server, for the "still posts there" warning.
     series: Vec<Series>,
     /// The admin panel's address for this server.
@@ -1805,10 +1903,12 @@ impl Session<'_> {
             &self.opened.watched_channels,
             &self.series,
             facts,
+            &self.sight,
         );
         let text = form_text(&FormView {
             first_run: self.first_run,
             draft: &self.draft,
+            sight: &self.sight,
             stale: &self.stale,
             warnings: &warnings,
             notice: self.notice.as_deref(),
@@ -1820,6 +1920,7 @@ impl Session<'_> {
             &self.ids,
             &self.draft,
             facts,
+            &self.sight,
             self.panel.as_deref(),
             self.prefill,
             now_unix,
@@ -1910,12 +2011,18 @@ impl Session<'_> {
     /// stays once the form stops listening: the link, and no line that
     /// points at a button.
     fn summary(&self, how_to: &HowTo, live: bool) -> (String, Vec<serenity::CreateActionRow>) {
-        let text = saved_text(
-            &self.opened,
-            self.first_run,
-            &self.saved_warnings,
+        let telling = how_to_line(
             how_to,
             live,
+            &self.data.app_name(),
+            &checks::setup_mention(self.data),
+        );
+        let text = saved_text(
+            &self.opened,
+            &self.sight,
+            self.first_run,
+            &self.saved_warnings,
+            &telling,
             self.panel.is_some(),
             checks::now_unix(),
         );
@@ -1995,7 +2102,10 @@ impl Session<'_> {
             return;
         };
         let (text, rows) = match &self.stage {
-            Stage::Form => (closed_text(self.first_run, false), Vec::new()),
+            Stage::Form => (
+                closed_text(self.first_run, false, &checks::setup_mention(self.data)),
+                Vec::new(),
+            ),
             Stage::Saved(how_to) => self.summary(how_to, false),
             Stage::Closed => return,
         };
@@ -2041,10 +2151,12 @@ impl Session<'_> {
             // menu would make the next pick replace the list unseen.
             (Some(Action::Watched), Kind::ChannelSelect { values }) => {
                 self.draft.watched = values.iter().map(ToString::to_string).collect();
+                self.sight.admit(self.draft.watched.iter().cloned());
                 self.prefill.watched = true;
             }
             (Some(Action::Log), Kind::ChannelSelect { values }) => {
                 self.draft.log_channel = values.first().map(ToString::to_string);
+                self.sight.admit(self.draft.log_channel.iter().cloned());
                 self.prefill.log_channel = true;
             }
             (Some(Action::Role), Kind::RoleSelect { values }) => {
@@ -2112,7 +2224,7 @@ impl Session<'_> {
     }
 
     async fn cancel(&mut self, press: &serenity::ComponentInteraction) -> Result<(), Error> {
-        let text = closed_text(self.first_run, true);
+        let text = closed_text(self.first_run, true, &checks::setup_mention(self.data));
         self.deliver(Via::Press(press), text, Vec::new()).await?;
         self.stage = Stage::Closed;
         Ok(())
@@ -2166,9 +2278,11 @@ impl Session<'_> {
                     &self.opened.watched_channels,
                     &self.series,
                     self.facts.as_ref(),
+                    &self.sight,
                 );
-                let how_to = how_to_target(&stored.watched_channels, self.facts.as_ref())
-                    .map_or(HowTo::NoChannel, HowTo::Offered);
+                let how_to =
+                    how_to_target(&stored.watched_channels, self.facts.as_ref(), &self.sight)
+                        .map_or(HowTo::NoChannel, HowTo::Offered);
                 self.opened = stored;
                 self.notice = None;
                 self.modal = None;
@@ -2256,7 +2370,7 @@ impl Session<'_> {
             tracing::warn!(code = ?discord_code(&e), error = %e, "could not launch the Activity");
             let fallback = serenity::CreateInteractionResponse::Message(
                 serenity::CreateInteractionResponseMessage::new()
-                    .content(OPEN_GALLERY_FALLBACK)
+                    .content(menus::open_gallery_fallback(&self.data.app_name()))
                     .ephemeral(true),
             );
             press.create_response(self.http, fallback).await?;
@@ -2290,7 +2404,18 @@ impl Session<'_> {
         }
 
         let message = serenity::CreateMessage::new()
-            .content(clip(&how_to_text(&self.opened), MESSAGE_MAX_CHARS))
+            // Everyone reads it: nobody is told to run a command only an
+            // admin can.
+            .content(clip(
+                &how_to_text(
+                    &self.opened,
+                    &self.data.app_name(),
+                    &self.sight,
+                    false,
+                    &checks::setup_mention(self.data),
+                ),
+                MESSAGE_MAX_CHARS,
+            ))
             .allowed_mentions(serenity::CreateAllowedMentions::new())
             .components(vec![serenity::CreateActionRow::Buttons(vec![
                 open_gallery_button(None).style(serenity::ButtonStyle::Primary),
@@ -2327,6 +2452,9 @@ mod tests {
     const JANUARY: i64 = 1_736_942_400;
 
     const EVERYTHING: serenity::Permissions = SERIES_CHANNEL_NEEDS;
+
+    /// What Discord lists the app as in these tests: not "leaf".
+    const APP: &str = "leaf-dev";
 
     fn text(name: &str, permissions: serenity::Permissions) -> ChannelFacts {
         ChannelFacts::new(name, serenity::ChannelType::Text, Some(permissions))
@@ -2389,10 +2517,23 @@ mod tests {
         }
     }
 
+    /// What leaf sees when Discord's list and the gateway cache agree: the
+    /// channels `known` has.
+    fn sight_of(known: &GuildFacts) -> Sight {
+        Sight::of(known.channels.keys().cloned())
+    }
+
+    /// Nothing could be found out: every channel counts as seen.
+    const UNSEEN: &Sight = &Sight::unknown();
+
+    /// The `/setup` command as an admin can tap it.
+    const CHIP: &str = "</setup:42>";
+
     fn view<'a>(draft: &'a Draft, stale: &'a Stale, warnings: &'a [String]) -> FormView<'a> {
         FormView {
             first_run: false,
             draft,
+            sight: UNSEEN,
             stale,
             warnings,
             notice: None,
@@ -2506,7 +2647,7 @@ mod tests {
             &[("7", false)],
         );
 
-        let (draft, stale) = Draft::open(&saved, Some(&known));
+        let (draft, stale) = Draft::open(&saved, Some(&known), &sight_of(&known));
         assert_eq!(draft.watched, ids(&["1", "2"]));
         assert_eq!(draft.log_channel.as_deref(), Some("3"));
         assert_eq!(draft.creator_role.as_deref(), Some("7"));
@@ -2526,7 +2667,7 @@ mod tests {
             &[],
         );
 
-        let (draft, stale) = Draft::open(&saved, Some(&known));
+        let (draft, stale) = Draft::open(&saved, Some(&known), &sight_of(&known));
         assert_eq!(draft.watched, ids(&["1", "2"]));
         assert_eq!(draft.log_channel, None);
         assert_eq!(draft.creator_role, None);
@@ -2541,11 +2682,35 @@ mod tests {
             }
         );
 
-        let notes = stale_notes(&stale, &draft).join("\n");
-        assert!(notes.contains("2 saved series channels no longer exist"));
-        assert!(notes.contains("log is switched off when you save"));
+        let notes = stale_notes(&stale, &draft);
+        // Gone, or hidden from leaf: the note says both, and how to keep a
+        // channel that is only hidden.
+        assert_eq!(
+            notes[0],
+            "leaf can no longer see 2 saved series channels (deleted, or hidden from leaf), so \
+             they come off the list when you save. If they are only hidden, pick them again in \
+             the 1st menu."
+        );
+        assert_eq!(
+            notes[1],
+            "leaf can no longer see the saved log channel (deleted, or hidden from leaf), so \
+             the log is switched off when you save. Pick another in the 2nd menu to keep it."
+        );
+        let notes = notes.join("\n");
         assert!(notes.contains("Saving lets anyone start one"));
         assert!(notes.contains("Mars/Olympus"));
+        let one = Stale {
+            channels: 1,
+            ..Stale::default()
+        };
+        assert_eq!(
+            stale_notes(&one, &draft),
+            [
+                "leaf can no longer see one saved series channel (deleted, or hidden from leaf), so \
+              it comes off the list when you save. If it is only hidden, pick it again in the \
+              1st menu."
+            ]
+        );
 
         // Once the admin picks replacements, those notes have done their job.
         let mut replaced = draft;
@@ -2562,11 +2727,47 @@ mod tests {
         saved.log_channel_id = Some("3".into());
         saved.creator_role_id = Some("7".into());
 
-        let (draft, stale) = Draft::open(&saved, None);
+        let (draft, stale) = Draft::open(&saved, None, UNSEEN);
         assert_eq!(draft.watched, ids(&["1", "2"]));
         assert_eq!(draft.log_channel.as_deref(), Some("3"));
         assert_eq!(draft.creator_role.as_deref(), Some("7"));
         assert_eq!(stale, Stale::default());
+    }
+
+    #[test]
+    fn what_leaf_can_see_decides_which_channels_stay_not_the_gateway_cache() {
+        let mut saved = settings(&["1", "2", "3"]);
+        saved.log_channel_id = Some("2".into());
+        saved.creator_role_id = Some("7".into());
+        // The gateway cache missed two events: it still has channel 2, which
+        // was deleted, and never heard of channel 3.
+        let stale_cache = facts(
+            &[("1", text("a", EVERYTHING)), ("2", text("b", EVERYTHING))],
+            &[("7", false)],
+        );
+        let sight = Sight::of(["1", "3"]);
+
+        let (draft, stale) = Draft::open(&saved, Some(&stale_cache), &sight);
+        assert_eq!(draft.watched, ids(&["1", "3"]));
+        assert_eq!(draft.log_channel, None);
+        assert_eq!(draft.creator_role.as_deref(), Some("7"));
+        assert_eq!(
+            stale,
+            Stale {
+                channels: 1,
+                log_channel: true,
+                ..Stale::default()
+            }
+        );
+
+        // Discord's list alone is enough: the gateway cache has no server.
+        let (draft, stale) = Draft::open(&saved, None, &sight);
+        assert_eq!(draft.watched, ids(&["1", "3"]));
+        assert_eq!(draft.log_channel, None);
+        // A role cannot be checked without the cache, so it is kept.
+        assert_eq!(draft.creator_role.as_deref(), Some("7"));
+        assert_eq!(stale.channels, 1);
+        assert!(stale.log_channel && !stale.creator_role);
     }
 
     #[test]
@@ -2588,19 +2789,29 @@ mod tests {
         // A forum, a deleted channel, a repeat and a non-id are left out.
         let saved = ids(&["1", "2", "3", "4", "1", "not-an-id", "0"]);
         assert_eq!(
-            channel_defaults(&saved, Some(&known)),
+            channel_defaults(&saved, Some(&known), &sight_of(&known)),
             [serenity::ChannelId::new(1), serenity::ChannelId::new(3)]
         );
         // Without the cache every id that parses is tried.
         assert_eq!(
-            channel_defaults(&saved, None),
+            channel_defaults(&saved, None, UNSEEN),
             [1, 2, 3, 4].map(serenity::ChannelId::new)
+        );
+        // A channel leaf cannot see is never a default, whatever the cache
+        // still has: Discord refuses the form over a deleted one.
+        assert_eq!(
+            channel_defaults(&saved, Some(&known), &Sight::of(["3", "2"])),
+            [serenity::ChannelId::new(3)]
+        );
+        assert_eq!(
+            channel_defaults(&saved, None, &Sight::of(["4"])),
+            [serenity::ChannelId::new(4)]
         );
 
         // Never more defaults than the menu takes.
         let many: Vec<String> = (1..=40).map(|id| id.to_string()).collect();
         assert_eq!(
-            channel_defaults(&many, None).len(),
+            channel_defaults(&many, None, UNSEEN).len(),
             usize::from(SELECT_MAX_VALUES)
         );
 
@@ -2818,7 +3029,13 @@ mod tests {
             ],
             &[],
         );
-        let lines = warnings(&draft(&["1", "2", "3", "4", "5"]), &[], &[], Some(&known));
+        let lines = warnings(
+            &draft(&["1", "2", "3", "4", "5"]),
+            &[],
+            &[],
+            Some(&known),
+            &sight_of(&known),
+        );
         assert_eq!(
             lines,
             [
@@ -2833,8 +3050,8 @@ mod tests {
         );
 
         // Nothing to say when all is granted, or when nothing is known.
-        assert!(warnings(&draft(&["1"]), &[], &[], Some(&known)).is_empty());
-        assert!(warnings(&draft(&["2", "9"]), &[], &[], None).is_empty());
+        assert!(warnings(&draft(&["1"]), &[], &[], Some(&known), &sight_of(&known)).is_empty());
+        assert!(warnings(&draft(&["2", "9"]), &[], &[], None, UNSEEN).is_empty());
     }
 
     #[test]
@@ -2851,17 +3068,17 @@ mod tests {
         let mut draft = draft(&["1"]);
         draft.log_channel = Some("2".into());
         assert_eq!(
-            warnings(&draft, &[], &[], Some(&known)),
+            warnings(&draft, &[], &[], Some(&known), &sight_of(&known)),
             ["⚠️ leaf is missing Send Messages in <#2>, so it can't write the log there."]
         );
         draft.log_channel = Some("3".into());
         assert_eq!(
-            warnings(&draft, &[], &[], Some(&known)),
+            warnings(&draft, &[], &[], Some(&known), &sight_of(&known)),
             ["⚠️ leaf can't see <#3>, so it can't write the log there."]
         );
         // The log channel needs no reactions.
         draft.log_channel = Some("1".into());
-        assert!(warnings(&draft, &[], &[], Some(&known)).is_empty());
+        assert!(warnings(&draft, &[], &[], Some(&known), &sight_of(&known)).is_empty());
     }
 
     #[test]
@@ -2883,35 +3100,157 @@ mod tests {
         let saved = ids(&["1", "2", "3", "gone"]);
 
         // 2 is dropped and two live series post there; 3 is dropped but only
-        // a revoked series used it; "gone" no longer exists.
-        let dropped = dropped_in_use(&saved, &ids(&["1"]), &all, Some(&known));
+        // a revoked series used it; "gone" is out of leaf's sight, which is
+        // a line of its own.
+        let sight = sight_of(&known);
+        let dropped = dropped_in_use(&saved, &ids(&["1"]), &all, &sight);
         assert_eq!(
             dropped,
             [("2".to_owned(), ids(&["Daily *Art*", "Sketches"]))]
         );
+        // Without a sight nothing can be ruled out, so every dropped channel
+        // that live series post in is named.
+        assert_eq!(dropped_in_use(&saved, &ids(&["1"]), &all, UNSEEN).len(), 2);
 
-        let lines = warnings(&draft(&["1"]), &saved, &all, Some(&known));
-        assert_eq!(lines.len(), 1);
+        let lines = warnings(&draft(&["1"]), &saved, &all, Some(&known), &sight);
+        assert_eq!(lines.len(), 2);
         assert!(lines[0].starts_with(r"⚠️ **Daily \*Art\*** and **Sketches** post in <#2>"));
         assert!(lines[0].contains("Their posts there can't be archived"));
         assert!(lines[0].contains("Series settings"));
+        assert!(lines[1].starts_with("⚠️ **Elsewhere** posts in a channel leaf can no longer"));
 
         // One series reads as one.
         let one = [series("Solo", &["2"], SeriesState::Active)];
-        let lines = warnings(&draft(&["1"]), &saved, &one, Some(&known));
+        let lines = warnings(
+            &draft(&["1"]),
+            &saved,
+            &one,
+            Some(&known),
+            &sight_of(&known),
+        );
         assert!(lines[0].starts_with("⚠️ **Solo** posts in <#2>"));
         assert!(lines[0].contains("Its posts there"));
 
         // Keeping the channel, or never having had it, is no warning.
-        assert!(warnings(&draft(&["1", "2"]), &saved, &one, Some(&known)).is_empty());
-        assert!(warnings(&draft(&["1"]), &ids(&["1"]), &one, Some(&known)).is_empty());
+        assert!(
+            warnings(
+                &draft(&["1", "2"]),
+                &saved,
+                &one,
+                Some(&known),
+                &sight_of(&known)
+            )
+            .is_empty()
+        );
+        assert!(
+            warnings(
+                &draft(&["1"]),
+                &ids(&["1"]),
+                &one,
+                Some(&known),
+                &sight_of(&known)
+            )
+            .is_empty()
+        );
 
         // Many series are counted, not listed.
         let many: Vec<Series> = (0..6)
             .map(|i| series(&format!("S{i}"), &["2"], SeriesState::Active))
             .collect();
-        let lines = warnings(&draft(&["1"]), &saved, &many, Some(&known));
+        let lines = warnings(
+            &draft(&["1"]),
+            &saved,
+            &many,
+            Some(&known),
+            &sight_of(&known),
+        );
         assert!(lines[0].starts_with("⚠️ **S0**, **S1**, **S2** and 3 more post in <#2>"));
+    }
+
+    #[test]
+    fn a_series_whose_channel_is_out_of_sight_sends_its_creator_to_series_settings() {
+        let known = facts(
+            &[("1", text("a", EVERYTHING)), ("2", text("b", EVERYTHING))],
+            &[],
+        );
+        let sight = sight_of(&known);
+        let solo = [
+            series("Solo *one*", &["gone"], SeriesState::Active),
+            series("Fine", &["1"], SeriesState::Active),
+            // A revoked series takes no posts: nothing for anyone to fix.
+            series("Taken down", &["gone"], SeriesState::Revoked),
+        ];
+        // Whether or not the channel was ever on the list, and with nothing
+        // changed in the form: the mention would read "#unknown", so the
+        // channel is described, and the fix is the creator's.
+        for saved in [ids(&["1"]), ids(&["1", "gone"])] {
+            assert_eq!(
+                warnings(&draft(&["1"]), &saved, &solo, Some(&known), &sight),
+                [
+                    "⚠️ **Solo \\*one\\*** posts in a channel leaf can no longer see (deleted, or \
+                  hidden from leaf). Its creator can pick another in Series settings, in the \
+                  gallery."
+                ]
+            );
+        }
+
+        // Several series, one lost channel between them.
+        let shared = [
+            series("A", &["gone"], SeriesState::Active),
+            series("B", &["gone"], SeriesState::Sprout),
+        ];
+        assert_eq!(
+            warnings(&draft(&["1"]), &[], &shared, Some(&known), &sight),
+            [
+                "⚠️ **A** and **B** post in a channel leaf can no longer see (deleted, or hidden \
+              from leaf). Their creators can pick another in Series settings, in the gallery."
+            ]
+        );
+        // Several lost channels, and more series than one line names.
+        let many: Vec<Series> = (0..5)
+            .map(|i| {
+                let channel = format!("gone-{}", i % 2);
+                series(&format!("S{i}"), &[channel.as_str()], SeriesState::Active)
+            })
+            .collect();
+        let lines = warnings(&draft(&["1"]), &[], &many, Some(&known), &sight);
+        assert_eq!(
+            lines,
+            [
+                "⚠️ **S0**, **S1**, **S2** and 2 more post in channels leaf can no longer see \
+              (deleted, or hidden from leaf). Their creators can pick another in Series \
+              settings, in the gallery."
+            ]
+        );
+        for line in &lines {
+            assert!(!line.contains("<#"), "{line}");
+        }
+
+        // What leaf sees decides, not the gateway cache: here the cache
+        // still has the deleted channel 2.
+        let moved = [series("Moved", &["2"], SeriesState::Active)];
+        let lines = warnings(
+            &draft(&["1"]),
+            &ids(&["1", "2"]),
+            &moved,
+            Some(&known),
+            &Sight::of(["1"]),
+        );
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].starts_with("⚠️ **Moved** posts in a channel leaf can no longer see"));
+        // The same series while its channel is there and merely off the list.
+        let lines = warnings(
+            &draft(&["1"]),
+            &ids(&["1", "2"]),
+            &moved,
+            Some(&known),
+            &sight,
+        );
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].starts_with("⚠️ **Moved** posts in <#2>, which is not on the list."));
+
+        // Nothing is said when nothing could be found out.
+        assert!(warnings(&draft(&["1"]), &[], &solo, None, UNSEEN).is_empty());
     }
 
     #[test]
@@ -2923,12 +3262,15 @@ mod tests {
         );
         let mut draft = draft(&["1"]);
         draft.creator_role = Some("7".into());
-        let lines = warnings(&draft, &[], &[], Some(&known));
+        let lines = warnings(&draft, &[], &[], Some(&known), &sight_of(&known));
         assert_eq!(lines.len(), 2);
         assert!(lines[0].starts_with("⚠️ <@&7> is a bot's own role, so no member can hold it"));
 
         draft.creator_role = Some("8".into());
-        assert_eq!(warnings(&draft, &[], &[], Some(&known)).len(), 1);
+        assert_eq!(
+            warnings(&draft, &[], &[], Some(&known), &sight_of(&known)).len(),
+            1
+        );
     }
 
     #[test]
@@ -2957,7 +3299,7 @@ mod tests {
         );
         let mut draft = draft(&["1"]);
         draft.creator_role = Some("9".into());
-        assert!(warnings(&draft, &[], &[], Some(&known)).is_empty());
+        assert!(warnings(&draft, &[], &[], Some(&known), &sight_of(&known)).is_empty());
     }
 
     #[test]
@@ -3021,6 +3363,54 @@ mod tests {
     }
 
     #[test]
+    fn the_form_and_the_summary_mention_only_channels_leaf_can_see() {
+        // Deleted while the form was open, after it was picked.
+        let mut draft = draft(&["1", "gone", "2"]);
+        draft.log_channel = Some("lost-log".into());
+        let sight = Sight::of(["1", "2"]);
+        let stale = Stale::default();
+        let mut view = view(&draft, &stale, &[]);
+        view.sight = &sight;
+        let text = form_text(&view);
+        assert!(
+            text.contains("1. **Series channels**: <#1> <#2> and 1 that leaf can no longer see\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "2. **Log channel**: 1 that leaf can no longer see (deleted, or hidden from \
+                 leaf)\n"
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("<#gone>") && !text.contains("<#lost-log>"));
+
+        let mut stored = settings(&["1", "gone", "2"]);
+        stored.log_channel_id = Some("lost-log".into());
+        let summary = saved_text(&stored, &sight, false, &[], "telling", true, JULY);
+        assert!(
+            summary.starts_with(
+                "🍃 **Setup saved.**\n\
+                 **Series channels**: <#1> <#2> and 1 that leaf can no longer see\n\
+                 **Log channel**: 1 that leaf can no longer see (deleted, or hidden from leaf)\n"
+            ),
+            "{summary}"
+        );
+
+        // None of them in sight: counted, with the reason, and no mention.
+        let none = Sight::of(["9"]);
+        let summary = saved_text(&stored, &none, false, &[], "telling", true, JULY);
+        assert!(
+            summary.contains(
+                "**Series channels**: 3 that leaf can no longer see (deleted, or hidden from \
+                 leaf)\n"
+            ),
+            "{summary}"
+        );
+        assert!(!summary.contains("<#"), "{summary}");
+    }
+
+    #[test]
     fn an_empty_form_says_what_each_menu_is_for() {
         let draft = draft(&[]);
         let stale = Stale::default();
@@ -3056,8 +3446,8 @@ mod tests {
                 .unwrap_or_else(|| panic!("{needle}: {text}"))
         };
         assert!(at("4. **Timezone**") < at("⚠️ the notice"));
-        assert!(at("⚠️ the notice") < at("One saved series channel no longer exists"));
-        assert!(at("One saved series channel") < at("The menus couldn't be pre-filled"));
+        assert!(at("⚠️ the notice") < at("leaf can no longer see one saved series channel"));
+        assert!(at("one saved series channel") < at("The menus couldn't be pre-filled"));
         assert!(at("The menus couldn't be pre-filled") < at("⚠️ a warning"));
     }
 
@@ -3109,7 +3499,7 @@ mod tests {
             creator_role: false,
             timezone: Some("x".repeat(80)),
         };
-        let warnings = warnings(&draft, &saved, &all, Some(&known));
+        let warnings = warnings(&draft, &saved, &all, Some(&known), &sight_of(&known));
         assert!(warnings.len() > 15);
 
         let mut view = view(&draft, &stale, &warnings);
@@ -3141,7 +3531,8 @@ mod tests {
             name: Some("c".into()),
         };
         let failed = HowTo::Failed(target, send_refusal(Some(MISSING_ACCESS)));
-        let text = saved_text(&stored, true, &warnings, &failed, true, false, JULY);
+        let failed = how_to_line(&failed, true, APP, CHIP);
+        let text = saved_text(&stored, UNSEEN, true, &warnings, &failed, false, JULY);
         assert!(
             text.chars().count() <= MESSAGE_MAX_CHARS,
             "{} chars",
@@ -3150,7 +3541,58 @@ mod tests {
         // The summary keeps its last lines: the how-to and the way to the panel.
         assert!(text.contains("couldn't post the how-to"));
         assert!(text.ends_with("your leaf address, then /admin."));
-        assert!(how_to_text(&stored).chars().count() <= MESSAGE_MAX_CHARS);
+        // The how-to fits whole, under the longest name a bot can have (32
+        // characters, each of them one that has to be escaped).
+        let longest = how_to_text(&stored, &"_".repeat(32), UNSEEN, false, CHIP);
+        assert!(
+            longest.chars().count() <= MESSAGE_MAX_CHARS,
+            "{} chars",
+            longest.chars().count()
+        );
+        // So does the summary when the admin has to pass the steps on.
+        let nowhere = how_to_line(&HowTo::NoChannel, true, &"_".repeat(32), CHIP);
+        let text = saved_text(&stored, UNSEEN, true, &warnings, &nowhere, false, JULY);
+        assert!(text.chars().count() <= MESSAGE_MAX_CHARS);
+        assert!(text.contains(&nowhere));
+    }
+
+    #[test]
+    fn the_longest_lists_fit_with_channels_out_of_sight() {
+        let snowflake = |n: usize| (1_234_567_890_123_456_000 + n).to_string();
+        let mut stored = settings(&[]);
+        stored.watched_channels = (0..25).map(snowflake).collect();
+        stored.log_channel_id = Some(snowflake(0));
+        stored.creator_role_id = Some(snowflake(7));
+        stored.timezone = "America/Argentina/Buenos_Aires".into();
+        stored.min_account_age_days = 30;
+        stored.min_membership_age_days = 14;
+        stored.sprout_enabled = true;
+        // The command as the longest chip there can be, the app under the
+        // longest name a bot can have.
+        let chip = "</setup:1234567890123456789>";
+        let app = "_".repeat(32);
+
+        let most = Sight::of(stored.watched_channels.iter().skip(1).cloned());
+        let none = Sight::of(["none"]);
+        for sight in [&most, &none] {
+            let text = how_to_text(&stored, &app, sight, true, chip);
+            assert!(
+                text.chars().count() <= MESSAGE_MAX_CHARS,
+                "{} chars",
+                text.chars().count()
+            );
+            assert!(text.contains("no longer see"), "{text}");
+        }
+
+        // The summary lists every channel it can see and counts the rest.
+        let telling = how_to_line(&HowTo::NoChannel, true, &app, chip);
+        let text = saved_text(&stored, &most, true, &[], &telling, false, JULY);
+        assert!(text.chars().count() <= MESSAGE_MAX_CHARS);
+        assert_eq!(text.matches("<#").count(), 24, "{text}");
+        assert!(
+            text.contains("and 1 that leaf can no longer see\n"),
+            "{text}"
+        );
     }
 
     // -- after Save -----------------------------------------------------------
@@ -3186,9 +3628,9 @@ mod tests {
             id: "1".into(),
             name: Some("daily".into()),
         };
-        let offered = HowTo::Offered(target.clone());
+        let offered = how_to_line(&HowTo::Offered(target.clone()), true, APP, CHIP);
 
-        let first = saved_text(&stored, true, &[], &offered, true, true, JULY);
+        let first = saved_text(&stored, UNSEEN, true, &[], &offered, true, JULY);
         assert!(first.starts_with("🍃 **leaf is set up.**\n**Series channels**: <#1> <#2>\n"));
         assert!(first.contains("**Log channel**: <#3>"));
         assert!(first.contains("**Who can start a series**: anyone in the server"));
@@ -3200,17 +3642,19 @@ mod tests {
         stored.log_channel_id = None;
         stored.sprout_enabled = true;
         let warnings = vec!["⚠️ careful".to_owned()];
-        let again = saved_text(&stored, false, &warnings, &offered, true, true, JULY);
+        let again = saved_text(&stored, UNSEEN, false, &warnings, &offered, true, JULY);
         assert!(again.starts_with("🍃 **Setup saved.**"));
         assert!(again.contains("**Log channel**: none"));
         assert!(again.contains("until 3 days are archived"));
         assert!(again.contains("⚠️ careful"));
 
-        let posting = how_to_line(&HowTo::Posting(target.clone()), true);
+        let posting = how_to_line(&HowTo::Posting(target.clone()), true, APP, CHIP);
         assert_eq!(posting, "⏳ Posting the how-to in <#1>…");
         let posted = how_to_line(
             &HowTo::Posted("https://discord.com/channels/9/1/5".into()),
             true,
+            APP,
+            CHIP,
         );
         assert_eq!(
             posted,
@@ -3219,13 +3663,20 @@ mod tests {
         let failed = how_to_line(
             &HowTo::Failed(target, send_refusal(Some(MISSING_PERMISSIONS))),
             true,
+            APP,
+            CHIP,
         );
         assert!(failed.contains("couldn't post the how-to in <#1>"));
         assert!(failed.contains("allow its role to Send Messages"));
         assert!(failed.ends_with("Press the button to try again."));
-        let nowhere = how_to_line(&HowTo::NoChannel, true);
-        assert!(nowhere.contains("telling members is up to you"));
-        assert!(nowhere.contains("Archive to Series"));
+        // Nowhere to post it: the admin gets the steps to pass on, whole.
+        assert_eq!(
+            how_to_line(&HowTo::NoChannel, true, APP, CHIP),
+            "leaf can't post in any series channel, so telling members is up to you: they start \
+             a series from the gallery. To archive a post: on a phone, press and hold the post, \
+             tap **Apps** (scroll down to find it), **leaf-dev**, then **Archive to Series**. On \
+             desktop: right-click it, **Apps**, **Archive to Series**."
+        );
     }
 
     #[test]
@@ -3235,26 +3686,37 @@ mod tests {
             id: "1".into(),
             name: Some("daily".into()),
         };
-        let rerun = "To post a public how-to for members, run `/setup` and press **Save** again.";
+        // The way back is the command, as a chip the admin can tap.
+        let rerun =
+            "To post a public how-to for members, run </setup:42> and press **Save** again.";
 
-        let offered = HowTo::Offered(target.clone());
-        let text = saved_text(&stored, true, &[], &offered, false, true, JULY);
+        let offered = how_to_line(&HowTo::Offered(target.clone()), false, APP, CHIP);
+        let text = saved_text(&stored, UNSEEN, true, &[], &offered, true, JULY);
         // The summary itself is all there.
         assert!(text.starts_with("🍃 **leaf is set up.**\n**Series channels**: <#1>\n"));
         assert!(text.contains(rerun));
         assert!(!text.contains("**Post a how-to**"));
-        assert_eq!(how_to_line(&HowTo::Posting(target.clone()), false), rerun);
+        assert_eq!(
+            how_to_line(&HowTo::Posting(target.clone()), false, APP, CHIP),
+            rerun
+        );
 
         let failed = HowTo::Failed(target, send_refusal(Some(MISSING_PERMISSIONS)));
-        let line = how_to_line(&failed, false);
+        let line = how_to_line(&failed, false, APP, CHIP);
         assert!(line.starts_with("⚠️ leaf couldn't post the how-to in <#1>."));
         assert!(line.contains("allow its role to Send Messages"));
-        assert!(line.ends_with("To try again, run `/setup` and press **Save**."));
+        assert!(line.ends_with("To try again, run </setup:42> and press **Save**."));
         assert!(!line.contains("button"));
+        // Until the command's id is known, its plain name.
+        let plain = how_to_line(&failed, false, APP, "`/setup`");
+        assert!(plain.ends_with("To try again, run `/setup` and press **Save**."));
 
         // Lines that never pointed at a button read the same.
         for how_to in [HowTo::Posted("link".into()), HowTo::NoChannel] {
-            assert_eq!(how_to_line(&how_to, false), how_to_line(&how_to, true));
+            assert_eq!(
+                how_to_line(&how_to, false, APP, CHIP),
+                how_to_line(&how_to, true, APP, CHIP)
+            );
         }
     }
 
@@ -3271,22 +3733,39 @@ mod tests {
             &[],
         );
         let watched = ids(&["1", "2", "3", "4"]);
+        let sight = sight_of(&known);
         assert_eq!(
-            how_to_target(&watched, Some(&known)),
+            how_to_target(&watched, Some(&known), &sight),
             Some(Target {
                 id: "3".into(),
                 name: Some("daily-art".into())
             })
         );
-        assert_eq!(how_to_target(&ids(&["1", "2"]), Some(&known)), None);
+        assert_eq!(how_to_target(&ids(&["1", "2"]), Some(&known), &sight), None);
         // Without the cache the first channel is tried, unnamed.
         assert_eq!(
-            how_to_target(&watched, None),
+            how_to_target(&watched, None, UNSEEN),
             Some(Target {
                 id: "1".into(),
                 name: None
             })
         );
+        // Never a channel leaf cannot see, whatever the cache still has.
+        assert_eq!(
+            how_to_target(&watched, Some(&known), &Sight::of(["1", "2", "4"])),
+            Some(Target {
+                id: "4".into(),
+                name: Some("later".into())
+            })
+        );
+        assert_eq!(
+            how_to_target(&watched, None, &Sight::of(["2"])),
+            Some(Target {
+                id: "2".into(),
+                name: None
+            })
+        );
+        assert_eq!(how_to_target(&watched, None, &Sight::of(["9"])), None);
 
         let named = Target {
             id: "3".into(),
@@ -3308,36 +3787,121 @@ mod tests {
     #[test]
     fn the_public_how_to_teaches_the_gesture_and_names_who_can_start() {
         let mut stored = settings(&["1", "2"]);
-        let open = how_to_text(&stored);
+        let open = how_to_text(&stored, APP, UNSEEN, false, CHIP);
         assert!(open.starts_with("🍃 **leaf is ready in this server.**"));
         assert!(open.contains("press **Open gallery** below, then **Start a series**"));
         // A phone may land on a series page, where the button is an icon.
         assert!(open.contains("it is the **+** at the top"));
         assert!(open.contains("Anyone here can start one."));
+        // On a phone the way goes through Apps, which is below the fold of
+        // the menu, and then through the app, under the name Discord lists
+        // it by. The desktop menu lists the command itself.
         assert!(open.contains(
-            "post your photo or video in <#1> or <#2>, then long-press the post (right-click \
-             on desktop), then Apps, then Archive to Series."
+            "**Archive a post**: post your photo or video in <#1> or <#2>. Then, on a phone, \
+             press and hold the post, tap **Apps** (scroll down to find it), **leaf-dev**, then \
+             **Archive to Series**. On desktop: right-click it, **Apps**, **Archive to Series**.\n"
         ));
         // A creator posts in one channel, so the list never reads as "post
         // in all of these".
         assert!(!open.contains("<#1> and <#2>"));
-        assert_eq!(post_in_text(&ids(&["1"])), "<#1>");
+        assert_eq!(post_in_text(&UNSEEN.sort(&ids(&["1"]))), "<#1>");
         assert_eq!(
-            post_in_text(&ids(&["1", "2", "3"])),
+            post_in_text(&UNSEEN.sort(&ids(&["1", "2", "3"]))),
             "one of the series channels (<#1>, <#2>, <#3>)"
         );
         let many: Vec<String> = (1..=CHANNELS_SHOWN_MAX + 3)
             .map(|n| n.to_string())
             .collect();
-        let listed = post_in_text(&many);
+        let listed = post_in_text(&UNSEEN.sort(&many));
         assert!(listed.starts_with("one of the series channels (<#1>, <#2>, "));
         assert!(listed.ends_with(", 3 more)"));
         assert_eq!(listed.matches("<#").count(), CHANNELS_SHOWN_MAX);
-        // The way in when the button does not launch.
-        assert!(open.contains("tap + next to the message box, then Apps, then leaf"));
+        // The way in when the button does not launch, in small print.
+        assert!(open.ends_with(
+            "\n-# If the button doesn't open the gallery: on a phone, tap **+** next to the \
+             message box, then **Apps**, then **leaf-dev**. On desktop, open the app launcher in \
+             the message box and choose **leaf-dev**."
+        ));
+        // The app is never called "leaf" on the strength of the code alone.
+        let renamed = how_to_text(&stored, "Daily Art Bot", UNSEEN, false, CHIP);
+        assert_eq!(renamed.matches("**Daily Art Bot**").count(), 3, "{renamed}");
+        assert_eq!(renamed, open.replace("leaf-dev", "Daily Art Bot"));
 
         stored.creator_role_id = Some("7".into());
-        assert!(how_to_text(&stored).contains("Members with <@&7> can start one."));
+        assert!(
+            how_to_text(&stored, APP, UNSEEN, false, CHIP)
+                .contains("Members with <@&7> can start one.")
+        );
+    }
+
+    #[test]
+    fn the_how_to_sends_nobody_to_a_channel_leaf_cannot_see() {
+        let stored = settings(&["1", "gone", "2"]);
+        let seen = how_to_text(&stored, APP, UNSEEN, false, CHIP);
+
+        // Some are out of sight: the others are still where to post.
+        let mixed = how_to_text(&stored, APP, &Sight::of(["1", "2"]), false, CHIP);
+        assert!(
+            mixed.contains(
+                "post your photo or video in one of the series channels (<#1>, <#2> and 1 that \
+                 leaf can no longer see). Then, on a phone,"
+            ),
+            "{mixed}"
+        );
+        assert!(
+            !mixed.contains("<#gone>") && !mixed.contains("⚠️"),
+            "{mixed}"
+        );
+        assert_eq!(
+            post_in_text(&Sight::of(["2"]).sort(&stored.watched_channels)),
+            "one of the series channels (<#2> and 2 that leaf can no longer see)"
+        );
+
+        // None is in sight: the steps stand, and the next line says what
+        // happened and who can fix it.
+        let lost = Sight::of(["9"]);
+        let member = how_to_text(&stored, APP, &lost, false, CHIP);
+        assert!(
+            member.contains(
+                "**Archive a post**: post your photo or video in a series channel. Then, on a \
+                 phone,"
+            ),
+            "{member}"
+        );
+        assert!(
+            member.contains(
+                "**Archive to Series**.\n\
+                 ⚠️ This server's series channels are ones leaf can no longer see (deleted, or \
+                 hidden from leaf). A server admin can choose new ones with `/setup`.\n\
+                 **Browse**"
+            ),
+            "{member}"
+        );
+        assert!(!member.contains("<#"), "{member}");
+        // An admin reading it can tap the command.
+        let admin = how_to_text(&stored, APP, &lost, true, CHIP);
+        assert!(
+            admin.contains("(deleted, or hidden from leaf). Choose new ones with </setup:42>.\n"),
+            "{admin}"
+        );
+        // One channel, one sentence about it.
+        let single = settings(&["gone"]);
+        assert!(
+            how_to_text(&single, APP, &lost, false, CHIP)
+                .contains("⚠️ This server's series channel is one leaf can no longer see")
+        );
+
+        // With every channel in sight, nothing is added.
+        assert_eq!(
+            how_to_text(&stored, APP, &Sight::of(["1", "gone", "2"]), false, CHIP),
+            seen
+        );
+        assert!(
+            !seen.contains("⚠️") && !seen.contains("no longer see"),
+            "{seen}"
+        );
+        // The longest it gets still fits a message.
+        assert!(admin.chars().count() <= MESSAGE_MAX_CHARS);
     }
 
     #[test]
@@ -3348,7 +3912,9 @@ mod tests {
             starters_text(&stored).unwrap(),
             "Anyone here can start one once their Discord account is at least 30 days old."
         );
-        assert!(!how_to_text(&stored).contains("Anyone here can start one."));
+        assert!(
+            !how_to_text(&stored, APP, UNSEEN, false, CHIP).contains("Anyone here can start one.")
+        );
 
         stored.creator_role_id = Some("7".into());
         stored.min_membership_age_days = 1;
@@ -3357,12 +3923,15 @@ mod tests {
             "Members with <@&7> can start one once their Discord account is at least 30 days \
              old and they have been a member of this server for at least 1 day."
         );
-        assert!(how_to_text(&stored).contains(&starters_text(&stored).unwrap()));
+        assert!(
+            how_to_text(&stored, APP, UNSEEN, false, CHIP)
+                .contains(&starters_text(&stored).unwrap())
+        );
 
         // A limit of 0 closes creation, whatever the other rules say.
         stored.max_series_per_user = 0;
         assert_eq!(starters_text(&stored), None);
-        let closed = how_to_text(&stored);
+        let closed = how_to_text(&stored, APP, UNSEEN, false, CHIP);
         assert!(closed.contains(
             "**Start a series**: closed for now. This server's limit is 0 series per member.\n"
         ));
@@ -3385,6 +3954,14 @@ mod tests {
             refusal.starts_with("⚠️ leaf couldn't post a test line in <#3>, so nothing was saved.")
         );
         assert!(refusal.contains("pick another log channel in the 2nd menu"));
+        // A channel that went while the form was open is not mentioned: the
+        // mention would read "#unknown".
+        assert_eq!(
+            log_refusal_text("3", Some(UNKNOWN_CHANNEL)),
+            "⚠️ leaf can no longer see the log channel you picked (deleted, or hidden from \
+             leaf), so nothing was saved. Pick another log channel in the 2nd menu, then press \
+             **Save**."
+        );
 
         let line = log_test_text(serenity::UserId::new(42));
         assert!(line.contains("leaf's log channel"));
@@ -3393,12 +3970,20 @@ mod tests {
 
     #[test]
     fn a_form_that_closes_unsaved_says_nothing_was_saved() {
-        let timed_out = closed_text(true, false);
-        assert!(timed_out.starts_with("⏳ Setup closed after 10 minutes without a change."));
-        assert!(timed_out.contains("leaf still isn't set up here"));
-        let cancelled = closed_text(false, true);
-        assert!(cancelled.starts_with("Setup cancelled. Nothing was saved"));
-        assert!(cancelled.contains("the settings are as they were"));
+        let timed_out = closed_text(true, false, CHIP);
+        assert_eq!(
+            timed_out,
+            "⏳ Setup closed after 10 minutes without a change. Nothing was saved, so leaf \
+             still isn't set up here. Run </setup:42> again when you're ready."
+        );
+        let cancelled = closed_text(false, true, CHIP);
+        assert_eq!(
+            cancelled,
+            "Setup cancelled. Nothing was saved, so the settings are as they were. Run \
+             </setup:42> again to change them."
+        );
+        // Before the command's id is known it is named in plain text.
+        assert!(closed_text(true, true, "`/setup`").contains("Run `/setup` again"));
         assert_eq!(IDLE, Duration::from_mins(10));
         // The form closes while its token can still edit the message.
         assert!(IDLE < TOKEN_LIFE && TOKEN_LIFE < Duration::from_mins(15));
@@ -3487,7 +4072,7 @@ mod tests {
 
         // The form opens...
         let opened = db.guilds.get("900").await.unwrap().unwrap();
-        let (mut draft, _) = Draft::open(&opened, None);
+        let (mut draft, _) = Draft::open(&opened, None, UNSEEN);
 
         // ...and while it is open the panel changes policies, the timezone
         // and the creator role.
@@ -3661,7 +4246,15 @@ mod tests {
         draft.creator_role = Some("7".into());
         let url = "https://leaf.example/admin?guild=900";
 
-        let rows = form_rows(&form, &draft, Some(&known), Some(url), Prefill::ALL, JULY);
+        let rows = form_rows(
+            &form,
+            &draft,
+            Some(&known),
+            UNSEEN,
+            Some(url),
+            Prefill::ALL,
+            JULY,
+        );
         assert_eq!(rows.len(), 5);
         assert!(
             rows.iter()
@@ -3739,7 +4332,7 @@ mod tests {
     #[test]
     fn save_is_disabled_until_a_series_channel_is_picked() {
         let form = Ids::new(5);
-        let rows = form_rows(&form, &draft(&[]), None, None, Prefill::ALL, JULY);
+        let rows = form_rows(&form, &draft(&[]), None, UNSEEN, None, Prefill::ALL, JULY);
         let save = serenity::CreateButton::new(form.of(Action::Save))
             .style(serenity::ButtonStyle::Success)
             .label("Save");
@@ -3761,7 +4354,15 @@ mod tests {
             )
         );
 
-        let rows = form_rows(&form, &draft(&["1"]), None, None, Prefill::ALL, JULY);
+        let rows = form_rows(
+            &form,
+            &draft(&["1"]),
+            None,
+            UNSEEN,
+            None,
+            Prefill::ALL,
+            JULY,
+        );
         assert_eq!(buttons(&rows)[0], save.disabled(false));
     }
 
@@ -3792,7 +4393,7 @@ mod tests {
         let log_hint = "Log channel (optional): one quiet line per archive";
 
         // Refused by Discord: no defaults (and the session drops the link).
-        let rows = form_rows(&form, &draft, None, None, Prefill::NONE, JULY);
+        let rows = form_rows(&form, &draft, None, UNSEEN, None, Prefill::NONE, JULY);
         assert_eq!(
             rows[0],
             channel_menu(Action::Watched, 1, 25, None, watched_hint)
@@ -3807,7 +4408,7 @@ mod tests {
             watched: true,
             ..Prefill::NONE
         };
-        let rows = form_rows(&form, &draft, None, None, touched, JULY);
+        let rows = form_rows(&form, &draft, None, UNSEEN, None, touched, JULY);
         assert_eq!(
             rows[0],
             channel_menu(Action::Watched, 1, 25, Some(1), watched_hint)

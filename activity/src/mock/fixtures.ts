@@ -23,12 +23,20 @@ import type {
   Day,
   DaySummary,
   Eligibility,
+  Media,
   MySeries,
   Series,
   SeriesOptions,
   SeriesSettings,
   Stats,
 } from '../lib/types/api';
+// Two seconds of a slow green gradient, 480 x 270, no sound, in both of the
+// formats a browser may play. Made with ffmpeg from its `gradients` source
+// (`s=480x270:d=2:r=12:speed=0.02`): `-c:v libvpx-vp9 -crf 50 -b:v 0` for the
+// WebM, `-c:v libx264 -profile:v baseline -crf 34 -movflags +faststart` for
+// the MP4. Nothing depends on the bytes beyond "small, valid, this shape".
+import clipMp4 from './media/clip.mp4?url';
+import clipWebm from './media/clip.webm?url';
 import type { ScreenId } from './screens';
 
 const NOW = Math.floor(Date.now() / 1000);
@@ -53,6 +61,8 @@ const CHANNEL = {
   share: '200000000000000002',
   general: '200000000000000003',
   hidden: '200000000000000004',
+  /** Deleted since a series was started in it: no longer a series channel. */
+  deleted: '200000000000000005',
   log: '200000000000000009',
 } as const;
 
@@ -69,22 +79,26 @@ export function mockSession(platform: Platform): Session {
     guildId: GUILD_ID,
     channelId: CHANNEL.sketch,
     platform,
+    appName: 'leaf',
     customId: null,
     token: 'mock-token',
     expiresAt: Date.now() + 6 * HOUR * 1000,
   };
 }
 
-/** A colorful inline-SVG placeholder so the viewer needs no real media. */
-export function placeholder(label: string, hue: number, size = 600): string {
+/**
+ * A colorful inline-SVG placeholder so the viewer needs no real media:
+ * `size` square, or `size` wide and `height` tall.
+ */
+export function placeholder(label: string, hue: number, size = 600, height = size): string {
   const svg =
-    `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}">` +
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${height}">` +
     `<defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1">` +
     `<stop offset="0" stop-color="hsl(${hue},70%,72%)"/>` +
     `<stop offset="1" stop-color="hsl(${(hue + 40) % 360},65%,56%)"/>` +
     `</linearGradient></defs>` +
-    `<rect width="${size}" height="${size}" fill="url(#g)"/>` +
-    `<text x="50%" y="53%" font-family="Georgia,serif" font-size="${size / 6}" ` +
+    `<rect width="${size}" height="${height}" fill="url(#g)"/>` +
+    `<text x="50%" y="53%" font-family="Georgia,serif" font-size="${height / 6}" ` +
     `fill="rgba(32,32,32,0.5)" text-anchor="middle" dominant-baseline="middle">${label}</text>` +
     `</svg>`;
   return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
@@ -250,6 +264,14 @@ function fixtureSeries(id: number): Series {
 /** The series the Home, viewer and settings screens open. */
 export const homeSeries: Series = fixtureSeries(7);
 
+/**
+ * The same list after Daily Sketch's channel was deleted. The series keeps
+ * the channel's id, and its owner's list ({@link mineOf}) says it is gone.
+ */
+export const seriesChannelGone: Series[] = series.map((s) =>
+  s.id === homeSeries.id ? { ...s, channel_ids: [CHANNEL.deleted] } : s,
+);
+
 // --- gallery: archived days ---
 
 const dateParts = new Intl.DateTimeFormat('en-US', {
@@ -355,27 +377,48 @@ const LONG_CAPTION =
   'and the ink dries before the next stop. Second and third pictures are the same view on the ' +
   'way back.\nReference photos: https://example.com/albums/2024/commute-sketches/reference-set-03';
 
+/** The day the viewer screens open: three pictures and the long caption. */
+export const VIEWER_DAY = 125;
+
+/** The day of Daily Sketch whose one file is a video (480 x 270, two seconds). */
+export const VIDEO_DAY = 118;
+
+/**
+ * The mock's clip in a format this browser plays. WebM first: a Chromium
+ * built without H.264 (Playwright's, on some systems) plays nothing else,
+ * and the MP4 is for a browser with no WebM.
+ */
+function clip(): Pick<Media, 'url' | 'content_type'> {
+  const webm =
+    typeof document !== 'undefined' &&
+    document.createElement('video').canPlayType('video/webm; codecs="vp9"') !== '';
+  return webm
+    ? { url: clipWebm, content_type: 'video/webm' }
+    : { url: clipMp4, content_type: 'video/mp4' };
+}
+
 /** One archived day with its media, or `null` when the series has no such day. */
 export function dayOf(s: Series, day: number): Day | null {
   const row = indexOf(s).find((r) => r.day === day);
   if (!row) return null;
   const hue = (day * 23 + s.id * 40) % 360;
+  const video = s.id === homeSeries.id && day === VIDEO_DAY;
   return {
     day,
     caption: day % 25 === 0 ? LONG_CAPTION : (CAPTIONS[day % CAPTIONS.length] ?? ''),
     posted_at: row.posted_at,
     jump_url: `https://discord.com/channels/${GUILD_ID}/${s.channel_ids?.[0] ?? CHANNEL.share}/40000000000000${String(day).padStart(4, '0')}`,
-    media: Array.from({ length: row.count ?? 1 }, (_, i) => ({
-      url: row.missing ? '' : placeholder(`${day}.${i + 1}`, (hue + i * 30) % 360, 1200),
-      thumb_url: row.missing ? '' : placeholder(`${day}.${i + 1}`, (hue + i * 30) % 360, 160),
-      content_type: 'image/png',
-      missing: row.missing ?? false,
-    })),
+    media: video
+      ? // Its poster is a stored thumbnail's size: the clip's shape, 256px long.
+        [{ ...clip(), thumb_url: placeholder(String(day), hue, 256, 144), missing: false }]
+      : Array.from({ length: row.count ?? 1 }, (_, i) => ({
+          url: row.missing ? '' : placeholder(`${day}.${i + 1}`, (hue + i * 30) % 360, 1200),
+          thumb_url: row.missing ? '' : placeholder(`${day}.${i + 1}`, (hue + i * 30) % 360, 160),
+          content_type: 'image/png',
+          missing: row.missing ?? false,
+        })),
   };
 }
-
-/** The day the viewer screens open: three pictures and the long caption. */
-export const VIEWER_DAY = 125;
 
 /**
  * A day number Daily Sketch skipped, inside its range: the server has no
@@ -410,6 +453,16 @@ export const options: SeriesOptions = {
   guild_timezone: TIMEZONE,
   sprout_enabled: true,
   sprout_threshold: 3,
+};
+
+/**
+ * The form's choices in a server where no admin has run /setup since
+ * {@link seriesChannelGone}'s channel was deleted: it is still the one series
+ * channel on the server's list, and there is no name for it.
+ */
+export const optionsChannelUnseen: SeriesOptions = {
+  ...options,
+  channels: [{ id: CHANNEL.deleted, name: null }],
 };
 
 /**
@@ -462,9 +515,19 @@ export function settingsOf(s: Series, own: OwnerSettings = {}): SeriesSettings {
   };
 }
 
-/** A row of `GET .../series/mine`. */
-export function mineOf(s: Series, own: OwnerSettings = {}): MySeries {
+/**
+ * A row of `GET .../series/mine`. A channel leaf cannot name (deleted, so
+ * not among the server's series channels, or listed there with no name) is
+ * sent with no name and flagged as missing. A series with no channel has
+ * none to miss.
+ */
+export function mineOf(
+  s: Series,
+  own: OwnerSettings = {},
+  channels: SeriesOptions['channels'] = options.channels,
+): MySeries {
   const channelId = s.channel_ids?.[0] ?? null;
+  const channelName = channels.find((c) => c.id === channelId)?.name;
   return {
     id: s.id,
     name: s.name,
@@ -472,7 +535,8 @@ export function mineOf(s: Series, own: OwnerSettings = {}): MySeries {
     state: s.state ?? 'active',
     cadence: s.cadence,
     channel_id: channelId,
-    channel_name: options.channels.find((c) => c.id === channelId)?.name ?? null,
+    ...(channelName ? { channel_name: channelName } : {}),
+    channel_missing: channelId !== null && !channelName,
     archived_days: s.total_days ?? 0,
     reminder_enabled: own.reminder_enabled ?? false,
   };
@@ -519,6 +583,12 @@ export const bootScreens: ReadonlyMap<string, BootState> = new Map([
   [
     'error-retry',
     { status: 'error', error: new BootError('network', 'POST /token → no response') },
+  ],
+  // Minimised (see the tile screens in Screen.svelte): the first two again.
+  ['tile-boot', { status: 'loading', step: 'ready', slow: false }],
+  [
+    'tile-error',
+    { status: 'error', error: new BootError('ready_timeout', 'ready: no answer from Discord') },
   ],
 ] satisfies [ScreenId, BootState][]);
 

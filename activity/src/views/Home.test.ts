@@ -1,4 +1,5 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/svelte';
+import { tick } from 'svelte';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { nav } from '../lib/stores/nav.svelte';
@@ -25,9 +26,38 @@ const store = vi.hoisted(() => {
     refreshAll: vi.fn(),
   };
 });
-vi.mock('../lib/stores/gallery.svelte', () => store);
+vi.mock('../lib/stores/gallery.svelte', async () => {
+  // Reactive, as the real store's state is: a refresh bumps `epoch`, and the
+  // loads that read it run again.
+  const { reactive } = await import('../lib/test/reactive.svelte');
+  store.gallery = reactive(store.gallery);
+  return store;
+});
 
 const STATS = { total: 3, current_streak: 3, longest_streak: 3, missed: 0, max_day: 3 };
+
+/** The owner's own list: one row, the series these tests show. */
+function mine(channel: Record<string, unknown>): unknown[] {
+  return [
+    {
+      id: 1,
+      name: 'Daily Sketch',
+      emoji: '✏️',
+      state: 'active',
+      cadence: 'daily',
+      channel_id: 'c1',
+      archived_days: 0,
+      reminder_enabled: false,
+      ...channel,
+    },
+  ];
+}
+
+const GONE_TITLE = 'This series’ channel is gone';
+/** The first archive step, as a person reads it. */
+function firstStep(): string {
+  return (document.querySelector('.steps li')?.textContent ?? '').replace(/\s+/g, ' ').trim();
+}
 
 function series(extra: Partial<Series> = {}): Series {
   return {
@@ -53,20 +83,9 @@ function index(): DaySummary[] {
 
 beforeEach(() => {
   nav.reset({ name: 'picker' }, { name: 'home', seriesId: 1 });
+  store.gallery.epoch = 0;
   store.api.getStats.mockReset().mockResolvedValue(STATS);
-  store.api.listMySeries.mockReset().mockResolvedValue([
-    {
-      id: 1,
-      name: 'Daily Sketch',
-      emoji: '✏️',
-      state: 'active',
-      cadence: 'daily',
-      channel_id: 'c1',
-      channel_name: 'daily-sketch',
-      archived_days: 0,
-      reminder_enabled: false,
-    },
-  ]);
+  store.api.listMySeries.mockReset().mockResolvedValue(mine({ channel_name: 'daily-sketch' }));
   store.loadDaysIndex.mockReset().mockResolvedValue(index());
   store.refreshAll.mockReset().mockResolvedValue(true);
 });
@@ -79,21 +98,126 @@ describe('Home', () => {
         userId: 'owner',
         canGoBack: true,
         platform: 'mobile',
+        appName: 'Sketchbook Archive',
         created: true,
       },
     });
 
     expect(screen.getByText('Series created')).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Archive your first post' })).toBeInTheDocument();
-    expect(screen.getByText(/Press and hold your message/)).toBeInTheDocument();
+    expect(screen.getByText('Press and hold your message.')).toBeInTheDocument();
+    // The app is named as Discord's Apps list names it.
+    expect(screen.getByText('Sketchbook Archive')).toBeInTheDocument();
     expect(screen.getAllByText('Archive to Series')).not.toHaveLength(0);
     expect(await screen.findByText('#daily-sketch')).toBeInTheDocument();
     expect(screen.queryByText(/appear here as they’re posted/)).not.toBeInTheDocument();
+    // Its channel is there: nothing to warn about.
+    expect(screen.queryByText(GONE_TITLE)).not.toBeInTheDocument();
 
     await fireEvent.click(screen.getByRole('button', { name: 'Check again' }));
     expect(store.refreshAll).toHaveBeenCalled();
     expect(await screen.findByText(/Nothing archived yet/)).toBeInTheDocument();
     expect(store.api.getStats).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['a current server: no name, and the flag', { channel_name: null, channel_missing: true }],
+    ['no name alone', { channel_name: null }],
+    [
+      'the flag, over a name the server still had',
+      { channel_name: 'general', channel_missing: true },
+    ],
+  ])('tells the owner the series’ channel is gone (%s)', async (_, channel) => {
+    store.api.listMySeries.mockResolvedValue(mine(channel));
+    render(Home, {
+      props: {
+        series: series({ max_day: null }),
+        userId: 'owner',
+        canGoBack: true,
+        platform: 'mobile',
+      },
+    });
+
+    expect(await screen.findByText(GONE_TITLE)).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        'It was deleted or hidden from leaf, so nothing posted there can be archived.',
+      ),
+    ).toBeInTheDocument();
+    // The steps name no channel, least of all the one that is gone.
+    expect(firstStep()).toBe(
+      'Minimise leaf, then post your photo or video in one of this server’s series channels.',
+    );
+    expect(screen.queryByText(/#general/)).not.toBeInTheDocument();
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Choose another channel' }));
+    expect(nav.current).toEqual({ name: 'seriesSettings', seriesId: 1 });
+  });
+
+  it('says so over the calendar too, where the steps are behind a disclosure', async () => {
+    store.api.listMySeries.mockResolvedValue(mine({ channel_name: null, channel_missing: true }));
+    const { container } = render(Home, {
+      props: { series: series(), userId: 'owner', canGoBack: true },
+    });
+
+    expect(await screen.findByText(GONE_TITLE)).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: /^Day 3, / })).toBeInTheDocument();
+    expect(screen.getByText('How to archive a post')).toBeInTheDocument();
+    expect(firstStep()).toBe('Post your photo or video in one of this server’s series channels.');
+    await expectNoA11yViolations(container);
+  });
+
+  it('asks again after a refresh: the channel may have gone while leaf was open', async () => {
+    render(Home, { props: { series: series(), userId: 'owner', canGoBack: true } });
+    await waitFor(() => expect(store.api.listMySeries).toHaveBeenCalledTimes(1));
+    expect(screen.queryByText(GONE_TITLE)).not.toBeInTheDocument();
+
+    store.api.listMySeries.mockResolvedValue(mine({ channel_name: null, channel_missing: true }));
+    store.gallery.epoch += 1;
+    expect(await screen.findByText(GONE_TITLE)).toBeInTheDocument();
+    expect(store.api.listMySeries).toHaveBeenCalledTimes(2);
+
+    // And back, once an admin has put it right.
+    store.api.listMySeries.mockResolvedValue(mine({ channel_name: 'daily-sketch' }));
+    store.gallery.epoch += 1;
+    await waitFor(() => expect(screen.queryByText(GONE_TITLE)).not.toBeInTheDocument());
+  });
+
+  it('shows a viewer nothing about the channel, and does not ask', async () => {
+    store.api.listMySeries.mockResolvedValue(mine({ channel_name: null, channel_missing: true }));
+    render(Home, { props: { series: series(), userId: 'viewer', canGoBack: true } });
+
+    expect(await screen.findByRole('button', { name: /^Day 3, / })).toBeInTheDocument();
+    expect(store.api.listMySeries).not.toHaveBeenCalled();
+    expect(screen.queryByText(GONE_TITLE)).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: 'Choose another channel' }),
+    ).not.toBeInTheDocument();
+  });
+
+  it.each([
+    [
+      'the server says the channel is there',
+      () => Promise.resolve(mine({ channel_name: null, channel_missing: false })),
+    ],
+    [
+      'the series never had a channel, and the server sends no flag',
+      () => Promise.resolve(mine({ channel_id: null, channel_name: null })),
+    ],
+    ['the list did not load', () => Promise.reject(new ApiError(503, 'GET /series/mine → 503'))],
+    ['the list does not have the series', () => Promise.resolve([])],
+  ])('does not call the channel gone on no more than a missing name (%s)', async (_, answer) => {
+    const answered = answer();
+    store.api.listMySeries.mockReturnValue(answered);
+    render(Home, {
+      props: { series: series({ max_day: null }), userId: 'owner', canGoBack: true },
+    });
+    await answered.catch(() => undefined);
+    await tick();
+
+    expect(store.api.listMySeries).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText(GONE_TITLE)).not.toBeInTheDocument();
+    expect(firstStep()).toBe('Post your photo or video in one of this server’s series channels.');
   });
 
   it('words the steps for desktop', () => {
@@ -119,6 +243,7 @@ describe('Home', () => {
     expect(screen.getByText('A server admin revoked this series')).toBeInTheDocument();
     expect(store.api.getStats).not.toHaveBeenCalled();
     expect(store.loadDaysIndex).not.toHaveBeenCalled();
+    expect(store.api.listMySeries).not.toHaveBeenCalled();
   });
 
   it('tells the owner a sprout is hidden, and for how long', () => {

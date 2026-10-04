@@ -26,12 +26,14 @@ export interface AuthorizeArgs {
   scope: string[];
 }
 
-/** Result of `commands.authenticate` (a superset; we read `user`). */
+/** Result of `commands.authenticate` (a superset; we read `user` and the app's name). */
 export interface AuthenticateResult {
   access_token: string;
   user: DiscordUser;
   scopes: string[];
   expires: string;
+  /** The application the token was issued to. Not every client is known to send it. */
+  application?: { name?: string | null | undefined } | null | undefined;
 }
 
 /** Which Discord client hosts the Activity. There is no iOS/Android flag. */

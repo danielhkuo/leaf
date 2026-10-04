@@ -28,6 +28,8 @@ const RPC_INVALID_ORIGIN = 4008;
  */
 const RPC_INVALID_PAYLOAD = 4000;
 const RPC_INVALID_COMMAND = 4002;
+/** What the application is taken to be called when Discord does not say. */
+const DEFAULT_APP_NAME = 'leaf';
 
 /** What `POST /api/token` returns: our session token + the Discord token. */
 export interface ExchangeResult {
@@ -46,6 +48,12 @@ export interface Session {
   channelId: string | null;
   /** Which Discord client hosts the Activity. */
   platform: Platform;
+  /**
+   * What the application is called in Discord, so the gallery can name it
+   * as the Apps menu does (an owner may not have called theirs "leaf").
+   * `leaf` when Discord did not say.
+   */
+  appName: string;
   /**
    * The `custom_id` of the activity link that launched this instance, as
    * Discord passed it. Read it with `parseCustomId` (see `customId.ts`).
@@ -293,6 +301,7 @@ export function createBoot(deps: HandshakeDeps): Boot {
       guildId: sdk.guildId,
       channelId: sdk.channelId,
       platform: sdk.platform,
+      appName: authed.application?.name?.trim() || DEFAULT_APP_NAME,
       customId: sdk.customId,
       token: exchanged.result.token,
       expiresAt: exchanged.expiresAt,

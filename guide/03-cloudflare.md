@@ -7,7 +7,9 @@ Cloudflare does two jobs for leaf. The tunnel is free, and R2 is free up to
    port forwarding and no exposed home IP.
 2. **R2** — S3-compatible object storage for all archived media (originals +
    thumbnails). This is where the **S3 endpoint / bucket / access keys** for the
-   setup form come from.
+   setup form come from. If you chose **A folder on this machine** instead
+   ([01 § Storage](01-install.md#storage-r2-or-a-folder-on-this-machine)), skip
+   section 3; the tunnel and the cache rule still apply.
 
 Everything here is in the **Cloudflare dashboard** (<https://dash.cloudflare.com>).
 

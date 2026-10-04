@@ -3,11 +3,13 @@
   // `npm run dev`). The sidebar picks a screen; the stage embeds it in an
   // iframe sized to the chosen device width, so each screen's own media
   // queries respond to a real viewport width (true phone vs. desktop preview).
+  // The "Minimised" screens get an iframe the size of the tile Discord
+  // shrinks leaf to, which is what makes them show the card.
   // `?embed=1&screen=<id>` renders just that screen — that's what the iframe
   // loads, so all rendering logic lives in Screen.svelte. `&long=1` fills it
   // with worst-case text (the longest names leaf allows, with no spaces).
   import Screen from './Screen.svelte';
-  import { SCREEN_GROUPS, SCREENS, type ScreenId } from './screens';
+  import { SCREEN_GROUPS, SCREENS, TILE_SIZES, type ScreenId } from './screens';
 
   const params = new URLSearchParams(location.search);
   const embed = params.has('embed');
@@ -25,8 +27,11 @@
 
   let current = $state<ScreenId>('picker');
   let width = $state<number | null>(375);
+  let tileSize = $state<(typeof TILE_SIZES)[number]>(TILE_SIZES[0]);
   let longText = $state(false);
-  const label = $derived(SCREENS.find((s) => s.id === current)?.label ?? current);
+  const listed = $derived(SCREENS.find((s) => s.id === current));
+  const label = $derived(listed?.label ?? current);
+  const tile = $derived(listed?.tile ?? false);
 </script>
 
 {#if embed}
@@ -55,28 +60,53 @@
         <input type="checkbox" bind:checked={longText} />
         Long text
       </label>
-      <div class="width" role="group" aria-label="Preview width">
-        {#each widths as w (w.label)}
-          <button
-            type="button"
-            class:on={width === w.px}
-            aria-pressed={width === w.px}
-            onclick={() => (width = w.px)}
-          >
-            {w.label}
-          </button>
-        {/each}
-      </div>
+      {#if tile}
+        <div class="width" role="group" aria-label="Tile size">
+          {#each TILE_SIZES as size (size)}
+            <button
+              type="button"
+              class:on={tileSize === size}
+              aria-pressed={tileSize === size}
+              onclick={() => (tileSize = size)}
+            >
+              {size.width}×{size.height}
+            </button>
+          {/each}
+        </div>
+      {:else}
+        <div class="width" role="group" aria-label="Preview width">
+          {#each widths as w (w.label)}
+            <button
+              type="button"
+              class:on={width === w.px}
+              aria-pressed={width === w.px}
+              onclick={() => (width = w.px)}
+            >
+              {w.label}
+            </button>
+          {/each}
+        </div>
+      {/if}
     </aside>
 
-    <main class="stage" class:phone={width !== null}>
-      <iframe
-        class="device"
-        class:framed={width !== null}
-        style:width={width === null ? null : `${width}px`}
-        title={label}
-        src="/mock.html?embed=1&screen={current}{longText ? '&long=1' : ''}"
-      ></iframe>
+    <main class="stage" class:phone={tile || width !== null}>
+      {#if tile}
+        <iframe
+          class="device framed tile"
+          style:width="{tileSize.width}px"
+          style:height="{tileSize.height}px"
+          title={label}
+          src="/mock.html?embed=1&screen={current}{longText ? '&long=1' : ''}"
+        ></iframe>
+      {:else}
+        <iframe
+          class="device"
+          class:framed={width !== null}
+          style:width={width === null ? null : `${width}px`}
+          title={label}
+          src="/mock.html?embed=1&screen={current}{longText ? '&long=1' : ''}"
+        ></iframe>
+      {/if}
     </main>
   </div>
 {/if}
@@ -211,5 +241,9 @@
     border-radius: 28px;
     box-shadow: 0 24px 60px rgba(32, 32, 32, 0.18);
     overflow: hidden;
+  }
+  /* A tile is small enough for a phone's corners to eat it. */
+  .device.tile {
+    border-radius: 12px;
   }
 </style>

@@ -1,0 +1,60 @@
+#!/usr/bin/env python3
+"""Stand-in for the Android SDK's `emulator`, for scripts/tests/run.
+
+Run as `emulator -avd <name> [...]`, it stays alive until SIGTERM, like a
+booted emulator, and leaves `emulator.running` (holding the AVD's name) in
+STUB_STATE while it does: that file is what the stand-in adb reports as
+emulator-5554.
+
+  STUB_EMULATOR     ok (default) or die (exit 1 at once)
+  STUB_IGNORE_TERM  ignore SIGTERM when this names `emulator`
+  STUB_STATE        a directory: `emulator.args` gets the arguments and
+                    `emulator.env` the SDK location it was given
+  STUB_READY_FIFO   a fifo that gets one line once it is "running"
+"""
+
+import os
+import signal
+import sys
+
+STATE = os.environ["STUB_STATE"]
+RUNNING = os.path.join(STATE, "emulator.running")
+
+
+def on_term(_signum, _frame):
+    try:
+        os.remove(RUNNING)
+    except FileNotFoundError:
+        pass
+    print("INFO    | Saving state on exit (stand-in)", flush=True)
+    sys.exit(0)
+
+
+def main():
+    args = sys.argv[1:]
+    with open(os.path.join(STATE, "emulator.args"), "w", encoding="utf-8") as record:
+        record.write(" ".join(args) + "\n")
+    with open(os.path.join(STATE, "emulator.env"), "w", encoding="utf-8") as record:
+        for key in ("ANDROID_HOME", "ANDROID_SDK_ROOT"):
+            record.write(f"{key}={os.environ.get(key, '<unset>')}\n")
+    if os.environ.get("STUB_EMULATOR", "ok") == "die":
+        print("PANIC: Cannot find AVD system path. Please define ANDROID_SDK_ROOT", flush=True)
+        sys.exit(1)
+    if "emulator" in os.environ.get("STUB_IGNORE_TERM", ""):
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    else:
+        signal.signal(signal.SIGTERM, on_term)
+    avd = args[args.index("-avd") + 1]
+    with open(RUNNING, "w", encoding="utf-8") as marker:
+        marker.write(avd + "\n")
+    print("INFO    | Android emulator (stand-in) booting " + avd, flush=True)
+    fifo = os.environ.get("STUB_READY_FIFO")
+    if fifo:
+        with open(fifo, "w", encoding="utf-8") as ready:
+            ready.write("ready\n")
+    while True:
+        signal.pause()
+
+
+if __name__ == "__main__":
+    main()

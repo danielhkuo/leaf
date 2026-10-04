@@ -114,6 +114,49 @@ describe('SeriesSettingsForm', () => {
     expect(saveButton()).toBeDisabled();
   });
 
+  // Deleted in Discord, and no admin has run /setup since: the server still
+  // lists the channel, with no name.
+  const UNSEEN = { id: '200000000000001234', name: null };
+  const unseenHint = () => screen.queryByText(/leaf can’t see this channel/);
+
+  it('says what to do about a listed channel leaf can’t see, while it is the one chosen', async () => {
+    renderForm(settings({ channel_id: UNSEEN.id }), {
+      options: { ...options, channels: [...options.channels, UNSEEN] },
+    });
+    const channel = screen.getByLabelText('Channel');
+    expect(channel).toHaveDisplayValue('A channel leaf can’t see (…1234)');
+    expect(unseenHint()).toHaveTextContent(
+      'leaf can’t see this channel. If it was deleted or hidden, posts there can’t be archived: choose another, or ask a server admin to choose new series channels with /setup.',
+    );
+    // That is not the note for a channel the server took off its list.
+    expect(screen.queryByText(/no longer one this server allows/)).not.toBeInTheDocument();
+
+    await fireEvent.change(channel, { target: { value: 'c1' } });
+    expect(unseenHint()).not.toBeInTheDocument();
+    await fireEvent.change(channel, { target: { value: UNSEEN.id } });
+    expect(unseenHint()).toBeInTheDocument();
+  });
+
+  it('does not say to choose another channel when there is none leaf can see', () => {
+    const other = { id: '200000000000005678', name: null };
+    for (const channels of [[UNSEEN], [UNSEEN, other]]) {
+      const { unmount } = renderForm(settings({ channel_id: UNSEEN.id }), {
+        options: { ...options, channels },
+      });
+      expect(unseenHint()).toHaveTextContent(
+        'leaf can’t see this channel, and this server has no other series channel it can see. If it was deleted or hidden, ask a server admin to choose new series channels with /setup.',
+      );
+      expect(screen.queryByText(/choose another/)).not.toBeInTheDocument();
+      unmount();
+    }
+  });
+
+  it('says nothing of the kind about a channel leaf can see', () => {
+    renderForm(settings(), { options: { ...options, channels: [...options.channels, UNSEEN] } });
+    expect(screen.getByLabelText('Channel')).toHaveDisplayValue('#art');
+    expect(unseenHint()).not.toBeInTheDocument();
+  });
+
   it('renames the series and moves its first day', async () => {
     const { onSave } = renderForm();
     await fireEvent.input(screen.getByLabelText('Series name'), { target: { value: 'Renamed' } });

@@ -39,9 +39,16 @@ const MEMBERSHIP_TTL: Duration = Duration::from_mins(1);
 /// Cap on cached `(guild, user)` pairs — bounds memory for a public archive.
 const MEMBERSHIP_CACHE_CAPACITY: u64 = 10_000;
 
-/// How long a guild's channel list is trusted; channels change rarely and
-/// the picker only needs names, so a few minutes of staleness is fine.
+/// How long a guild's channel list is kept for checking an id someone
+/// sent, and for when Discord cannot be asked. It is not trusted for names:
+/// a deleted channel stays in it, under its old name, until it expires (see
+/// [`channel_names_cache`]).
 const CHANNELS_TTL: Duration = Duration::from_mins(5);
+
+/// How long a channel list is good for naming channels. A deleted channel
+/// keeps its name in the gallery for this long at most; a burst of requests
+/// inside it costs one Discord call.
+const CHANNEL_NAMES_TTL: Duration = Duration::from_secs(10);
 
 /// Cap on cached guild channel lists.
 const CHANNELS_CACHE_CAPACITY: u64 = 1_000;
@@ -71,6 +78,23 @@ pub fn channels_cache() -> ChannelsCache {
         .time_to_live(CHANNELS_TTL)
         .max_capacity(CHANNELS_CACHE_CAPACITY)
         .build()
+}
+
+/// The process-wide cache of channel lists fresh enough to name channels
+/// from: `guild_id` → the list, for [`CHANNEL_NAMES_TTL`].
+///
+/// Apart from [`ChannelsCache`] in [`ApiState`], whose lists live long
+/// enough for a channel to be deleted under them. A static for the same
+/// reason as [`roles_cache`].
+#[must_use]
+pub fn channel_names_cache() -> &'static ChannelsCache {
+    static CACHE: LazyLock<ChannelsCache> = LazyLock::new(|| {
+        moka::future::Cache::builder()
+            .time_to_live(CHANNEL_NAMES_TTL)
+            .max_capacity(CHANNELS_CACHE_CAPACITY)
+            .build()
+    });
+    &CACHE
 }
 
 /// The process-wide role cache. A static rather than an [`ApiState`] field
@@ -183,7 +207,7 @@ pub fn creator_name_cache() -> &'static CreatorNameCache {
 
 /// Launch intents already handed out: `(user_id, guild_id, attempt)` → the
 /// intent that request collected. See [`launch_replay_cache`].
-pub(crate) type LaunchReplayCache =
+pub type LaunchReplayCache =
     moka::future::Cache<(String, String, String), leaf_core::domain::LaunchIntent>;
 
 /// How long a collected launch intent can be read again by a repeat of the
@@ -201,7 +225,8 @@ const LAUNCH_REPLAY_CAPACITY: u64 = 1_000;
 /// the retry; this lets that retry read the same intent again. The key
 /// includes the signed-in user, so an id guessed by someone else reads
 /// nothing. A static for the same reason as [`roles_cache`].
-pub(crate) fn launch_replay_cache() -> &'static LaunchReplayCache {
+#[must_use]
+pub fn launch_replay_cache() -> &'static LaunchReplayCache {
     static CACHE: LazyLock<LaunchReplayCache> = LazyLock::new(|| {
         moka::future::Cache::builder()
             .time_to_live(LAUNCH_REPLAY_TTL)

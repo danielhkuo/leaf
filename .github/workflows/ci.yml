@@ -65,6 +65,84 @@ jobs:
       - run: npm run build
       - run: npm run bundle:check
 
+  e2e:
+    name: playwright · mock screens (chromium, webkit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: activity
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: activity/package-lock.json
+      - run: npm ci
+      - run: npm run e2e:check
+      # The browsers, and the system libraries WebKit needs that the runner
+      # image lacks.
+      - run: npx playwright install --with-deps chromium webkit
+      - run: npm run e2e:mock
+      # Screenshot baselines depend on the OS's fonts and only the macOS set
+      # is committed, so nothing is compared here: each screen's picture goes
+      # to test-results/gallery for a person to look through. The line
+      # reporter leaves the HTML report of the step above as it is.
+      - name: screenshot gallery
+        if: ${{ !cancelled() }}
+        run: npm run e2e:visual -- --reporter=line
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: playwright-report
+          path: activity/playwright-report/
+          retention-days: 14
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: playwright-screenshots
+          path: activity/test-results/gallery/
+          retention-days: 14
+
+  e2e-app:
+    name: playwright · real API (chromium, webkit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # Reads rust-toolchain.toml; caches the registry and target dir.
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      # leaf-server's `e2e_server` example: the real API over a seeded
+      # database, with stand-ins for Discord and R2. Playwright starts it with
+      # `cargo run`; building it here first makes a compile error a step of
+      # its own and leaves Playwright nothing to wait for.
+      - name: build the e2e server
+        run: cargo build -p leaf-server --example e2e_server
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: activity/package-lock.json
+      - run: npm ci
+        working-directory: activity
+      - run: npx playwright install --with-deps chromium webkit
+        working-directory: activity
+      # Builds the Activity for the e2e server, starts one server per engine
+      # and runs the suites under e2e/app. Nothing in it reaches Discord, R2
+      # or any other machine.
+      - run: npm run e2e:app
+        working-directory: activity
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: playwright-report-app
+          path: activity/playwright-report/
+          retention-days: 14
+
   docker:
     name: docker build
     runs-on: ubuntu-latest

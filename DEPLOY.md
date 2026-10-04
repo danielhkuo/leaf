@@ -91,8 +91,16 @@ Open `https://leaf.example.com/setup`, enter the code, and provide:
 | Field | Where it comes from |
 | --- | --- |
 | Application ID, Client Secret, Bot Token | Discord Developer Portal (step 3) |
-| R2 endpoint, bucket, access keys | Cloudflare → R2 |
 | **Public URL** | `https://leaf.example.com` (your origin, no path) |
+| Media storage: R2 endpoint, bucket, access keys | Cloudflare → R2 (recommended) |
+| Media storage: or a folder's full path | A folder on the machine, e.g. `/data/media` |
+
+The **Media storage** section starts with the choice between Cloudflare R2 and
+a folder on this machine. Use R2 for a real install. A folder needs no bucket,
+but the files then live only on this machine, with no redundancy, and in Docker
+the folder must be inside the mounted data volume (`/data/…`) or the files
+vanish when the container is replaced
+([details](guide/01-install.md#storage-r2-or-a-folder-on-this-machine)).
 
 Saving checks everything live and switches leaf to run mode. The success page
 says when the bot is online, or why it isn't; later, the same state is at
@@ -108,6 +116,22 @@ docker compose run --rm --service-ports --use-aliases leaf --reconfigure
 # complete /setup in the browser, then Ctrl-C here
 docker compose up -d
 ```
+
+### Check the install: `leaf doctor`
+
+```sh
+docker compose exec leaf leaf doctor            # config, Discord, commands, gateway, storage, database
+docker compose exec leaf leaf doctor --url      # also the Public URL: health, bot status, gallery, API, media
+docker compose exec leaf leaf doctor --url http://127.0.0.1:3777   # the same, asked of the container directly
+```
+
+One line per check (`ok`, `warn`, `FAIL` or `skip`, a sentence, and the next
+step for a failure); exit status `1` when anything failed. It starts neither
+the server nor the bot, writes nothing to the database (its test object in the
+bucket, or test file in the folder, is removed again) and prints no credential. `--only <check,...>` limits
+the run and `--json` is for scripts. Run it after setup, after an update, and
+first when something is off
+([details](guide/07-troubleshooting.md#start-here-leaf-doctor)).
 
 ## 5. Admin panel
 
@@ -125,3 +149,14 @@ git pull && docker compose up -d --build
 
 This rebuilds the gallery and the binary from the working tree and restarts,
 reusing the `leaf-data` volume (your config and database persist).
+
+To try the new version's database migrations on a copy first, build without
+restarting and run the new image's doctor against the live file (it is only
+read):
+
+```sh
+git pull && docker compose build
+docker compose run --rm leaf doctor --only db-copy --db-copy /data/leaf.db
+docker compose up -d
+docker compose exec leaf leaf doctor
+```

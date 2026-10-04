@@ -17,7 +17,9 @@ leaf is a **single process** with a **two-state boot** (`crates/leaf/src/main.rs
 
 All persistent state lives in one directory (the `/data` volume in Docker): the
 `leaf.conf` credentials file and the `leaf.db` SQLite database. Media does **not**
-live here; it goes to Cloudflare R2.
+live here by default; it goes to Cloudflare R2. Setup also lets you keep it in
+a folder on the machine instead
+([§ Storage: R2 or a folder](#storage-r2-or-a-folder-on-this-machine)).
 
 ## Prerequisites
 
@@ -25,7 +27,9 @@ live here; it goes to Cloudflare R2.
   or VPS). The bot's connection to Discord is outbound-only: **no port
   forwarding** and no exposed home IP are required.
 - A **domain** and a **Cloudflare account** (free tier is plenty). Both are set
-  up in [03-cloudflare.md](03-cloudflare.md).
+  up in [03-cloudflare.md](03-cloudflare.md). The R2 bucket described there is
+  the recommended place for media, but not required: a folder on the machine
+  works too.
 - A **Discord application** (created in [02-discord.md](02-discord.md)).
 
 ## 1. Get the code and start the container
@@ -119,8 +123,8 @@ Once you have a public hostname pointed at the container (see
 (or `http://localhost:3777/setup` if you're finishing locally before exposing
 it). `/` redirects to `/setup` automatically.
 
-Enter the **setup code** from the logs, then fill the form. Every field is
-required, and the page links to the place each value comes from:
+Enter the **setup code** from the logs, then fill the form. Every field shown
+is required, and the page links to the place each value comes from:
 
 | Section | Field | Where it comes from |
 | --- | --- | --- |
@@ -128,9 +132,11 @@ required, and the page links to the place each value comes from:
 | | **Application (client) ID** | [02-discord.md](02-discord.md): OAuth2 → Client information |
 | | **OAuth client secret** | [02-discord.md](02-discord.md): OAuth2 → Reset Secret |
 | Public origin | **Public URL** | your hostname, e.g. `https://leaf.example.com`: the address only, no path (`http://` is accepted only for localhost) |
-| Cloudflare R2 | **S3 endpoint** | [03-cloudflare.md](03-cloudflare.md): R2 → Overview, `https://<account-id>.r2.cloudflarestorage.com` |
+| Media storage | The choice at the top of the section | **Cloudflare R2 (or another S3-compatible store)**, which is recommended, or **A folder on this machine** ([next section](#storage-r2-or-a-folder-on-this-machine)) |
+| with R2 | **S3 endpoint** | [03-cloudflare.md](03-cloudflare.md): R2 → Overview, `https://<account-id>.r2.cloudflarestorage.com` |
 | | **Bucket** | [03-cloudflare.md](03-cloudflare.md): the bucket you created |
 | | **Access key ID** and **Secret access key** | [03-cloudflare.md](03-cloudflare.md): R2 API token (Object Read & Write) |
+| with a folder | **Folder path** | the folder's full path, e.g. `/data/media`; no bucket and no keys |
 
 When you submit, leaf **checks everything live** before writing anything, and
 reports every problem at once, each next to its field:
@@ -140,6 +146,48 @@ reports every problem at once, each next to its field:
   as a pair.
 - R2: leaf writes, reads back and deletes a small test object in your bucket
   (it gives up after 25 seconds).
+- A folder: leaf creates the folder if it isn't there, then writes, reads back
+  and deletes a small test file in it. Nothing is sent over the network for
+  this.
+
+### Storage: R2 or a folder on this machine
+
+The **Media storage** section of the setup page starts with a choice.
+
+- **Cloudflare R2 (or another S3-compatible store)** is the recommended choice
+  for a real install. The files are kept off the machine leaf runs on, so they
+  survive a dead disk or a replaced server, and nothing has to be backed up by
+  hand. [03-cloudflare.md](03-cloudflare.md) sets the bucket up.
+- **A folder on this machine** needs no bucket and no keys: you enter one
+  thing, the folder's full path. It is meant for development and for an
+  install that lives on one machine. The page fills in a suggestion, `media`
+  inside leaf's data directory, which is `/data/media` in Docker.
+
+Before you choose a folder, know what it means (the page says the same):
+
+- **The files live only on this machine.** Nothing is copied anywhere else.
+- **There is no redundancy.** If the disk fails or the folder is deleted, the
+  archived photos and videos are gone. Back the folder up yourself.
+- **In Docker, the folder must be inside the mounted data volume**, for example
+  `/data/media`. Any other path is inside the container, and the files vanish
+  when the container is replaced (every `docker compose up -d --build` does
+  that).
+
+The path must be the full one, starting with `/`; `media`, `./media` and
+`~/media` are refused. leaf creates the folder when it isn't there, and the
+user leaf runs as must be able to write in it. In `leaf.conf` a folder is
+stored as the endpoint `file://` followed by that path, with no bucket and no
+keys:
+
+```toml
+[r2]
+endpoint = "file:///data/media"
+```
+
+Every start of leaf logs which storage is in use, in one line: `storing media
+in a folder on this machine (the files are kept nowhere else)` with
+`folder=/data/media`, or `storing media in an S3 bucket` with the endpoint's
+host and the bucket's name.
 
 On success it writes `leaf.conf` (owner-only `0600`) to the data volume, and
 switches to run mode **in the same process, with no restart**. The page then
@@ -157,6 +205,26 @@ Discord hasn't accepted leaf's command list yet).
 [07 § Bot offline](07-troubleshooting.md#bot-offline) has the fixes for both.
 The same state is at `https://leaf.example.com/api/status` at any later time.
 
+### Check the install
+
+Once the page says the bot is online, `leaf doctor` confirms the rest in one
+go: the token and client secret, the registered commands and the Entry Point
+command, the gateway, a write, read and delete in the bucket (or the folder),
+and the database.
+
+```sh
+docker compose exec leaf leaf doctor          # the install itself
+docker compose exec leaf leaf doctor --url    # and the Public URL, as a browser reaches it
+```
+
+Each line is `ok`, `warn`, `FAIL` or `skip` with a sentence and, for a failure,
+the next step; the exit status is non-zero when anything failed. It starts
+neither the server nor the bot, writes nothing to the database (the one thing
+it writes, a test object in the bucket or folder, it removes again) and prints
+no credential.
+[07 § Start here](07-troubleshooting.md#start-here-leaf-doctor) explains every
+check and option. Run it again whenever something seems off.
+
 Continue to [04-usage.md](04-usage.md): the first thing to do in Discord is
 `/setup`.
 
@@ -166,7 +234,7 @@ Continue to [04-usage.md](04-usage.md): the first thing to do in Discord is
 
 ## Changing credentials later (`--reconfigure`)
 
-The values from the setup form (tokens, R2 keys, public URL) can't be edited in
+The values from the setup form (tokens, storage, public URL) can't be edited in
 the admin panel. To change one, run leaf once with `--reconfigure`, which shows
 the setup page again over the existing config:
 
@@ -191,9 +259,17 @@ Each part matters:
   running leaf. Stop it before starting the normal one, or two bots connect
   with the same token.
 
-The form starts **empty**: have all eight values to hand, not only the one you
-are changing. Nothing is replaced until a submit passes every check, so
-pressing Ctrl-C before that leaves the existing configuration as it was.
+The form starts **empty**: have every value to hand (eight with R2, five with
+a folder), not only the one you are changing. Nothing is replaced until a
+submit passes every check, so pressing Ctrl-C before that leaves the existing
+configuration as it was.
+
+`--reconfigure` is also how you change where media is stored, from a folder to
+R2 or back. **It does not move the files already archived.** Days archived
+before the change keep pointing at files in the old place, so copy them over
+first: the folder's contents and the bucket's objects have the same names
+(`g/<server>/s/<series>/d/<day>/…`), so an S3 client that copies a directory
+tree into a bucket, or a bucket into a directory, is all it takes.
 
 (Per-server and per-series settings are a different thing: pick channels in
 Discord with `/setup`, and edit limits, timezone, creator role and series
@@ -206,6 +282,11 @@ privacy in the admin panel. See [04-usage.md](04-usage.md).)
   container first for a consistent copy, or use SQLite's online backup). Media is
   stored separately in R2; the `/export` command is an index of day numbers, not
   a backup.
+- **With a folder instead of R2, the media needs a backup too.** A folder
+  inside the volume, such as `/data/media`, is part of the volume and is copied
+  with it. A folder anywhere else has to be backed up on its own, and nothing
+  but your backup stands between a disk failure and the loss of every archived
+  photo and video.
 - **A copy of the volume holds your credentials.** `leaf.conf` is in it, with
   the bot token, the client secret and the R2 keys in plain text. Store a
   backup like a password, and keep it out of the folder you cloned leaf into:
@@ -219,6 +300,21 @@ privacy in the admin panel. See [04-usage.md](04-usage.md).)
   ```
   This rebuilds the gallery and binary from the working tree and restarts,
   reusing the volume, so your config and database persist.
+- **Try an update's database changes first** (optional). A new version may
+  change the database when it first starts. To rehearse that on a copy, build
+  the new image without restarting, and let its `leaf doctor` migrate a copy
+  of the database in a temporary directory:
+  ```sh
+  git pull && docker compose build
+  docker compose run --rm leaf doctor --only db-copy --db-copy /data/leaf.db
+  docker compose up -d      # when every line is ok
+  ```
+  The running leaf is not stopped and `/data/leaf.db` is only read. The lines
+  say which migrations applied to the copy, whether the copy passes SQLite's
+  integrity and foreign-key checks, and that the counts of series, posts and
+  media files are unchanged
+  ([07 § Start here](07-troubleshooting.md#start-here-leaf-doctor)). After the
+  update, `docker compose exec leaf leaf doctor` checks the whole install.
 
 For a public production deploy with the Cloudflare Tunnel sidecar and the admin
 panel, [DEPLOY.md](../DEPLOY.md) is the quick reference; this guide set is the

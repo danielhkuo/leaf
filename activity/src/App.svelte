@@ -5,11 +5,12 @@
   // otherwise leave a dead button or a half-updated view with no explanation.
   import { onMount } from 'svelte';
 
+  import Minimisable from './lib/components/shared/Minimisable.svelte';
   import Button from './lib/components/ui/Button.svelte';
   import { closeActivity } from './lib/sdk/actions';
   import { bootErrorCopy } from './lib/sdk/bootError';
   import { preloadGallery } from './lib/stores/gallery.svelte';
-  import { bootSession, bootStatusText, session } from './lib/stores/session.svelte';
+  import { bootSession, bootStatusText, bootTileText, session } from './lib/stores/session.svelte';
   import Gallery from './views/Gallery.svelte';
 
   /** How long Discord gets to act on a close before the hint appears. */
@@ -89,60 +90,65 @@
 {#if current.status === 'authed'}
   <Gallery session={current.session} />
 {:else}
-  <main class="boot">
-    {#if current.status === 'loading'}
-      <div class="center">
-        <div class="center" role="status" aria-live="polite">
-          <span class="mark sway" aria-hidden="true">🍃</span>
-          <p class="status">{bootStatusText(current.step, current.slow)}</p>
+  <!-- Shrunk to a tile, a boot screen is the leaf and a word or two. -->
+  <Minimisable detail={bootTileText(current.status)}>
+    <main class="boot">
+      {#if current.status === 'loading'}
+        <!-- A heading for the page while a status line is all it shows. -->
+        <h1 class="sr-only">leaf</h1>
+        <div class="center">
+          <div class="center" role="status" aria-live="polite">
+            <span class="mark sway" aria-hidden="true">🍃</span>
+            <p class="status">{bootStatusText(current.step, current.slow)}</p>
+            {#if stuck}
+              <p class="hint">If Discord isn’t asking, close leaf and open it again.</p>
+            {/if}
+          </div>
           {#if stuck}
-            <p class="hint">If Discord isn’t asking, close leaf and open it again.</p>
+            <div class="actions">
+              <Button variant="secondary" disabled={closing} onclick={() => void close()}>
+                Close leaf
+              </Button>
+            </div>
+            {#if closeHint}
+              <p class="hint">{CLOSE_HINT}</p>
+            {/if}
           {/if}
         </div>
-        {#if stuck}
-          <div class="actions">
-            <Button variant="secondary" disabled={closing} onclick={() => void close()}>
-              Close leaf
-            </Button>
-          </div>
+      {:else if failure && copy}
+        <div class="center" role={copy.tone === 'error' ? 'alert' : 'status'}>
+          <span class="mark" aria-hidden="true">{copy.tone === 'error' ? '🍂' : '🍃'}</span>
+          <h1>{copy.title}</h1>
+          <p class="message">{copy.message}</p>
+          {#if copy.retry || copy.close}
+            <div class="actions">
+              {#if copy.retry}
+                <Button variant="primary" disabled={closing} onclick={boot}>{copy.retry}</Button>
+              {/if}
+              {#if copy.close}
+                <Button
+                  variant={copy.retry ? 'secondary' : 'primary'}
+                  disabled={closing}
+                  onclick={() => void close()}
+                >
+                  Close leaf
+                </Button>
+              {/if}
+            </div>
+          {/if}
           {#if closeHint}
             <p class="hint">{CLOSE_HINT}</p>
           {/if}
-        {/if}
-      </div>
-    {:else if failure && copy}
-      <div class="center" role={copy.tone === 'error' ? 'alert' : 'status'}>
-        <span class="mark" aria-hidden="true">{copy.tone === 'error' ? '🍂' : '🍃'}</span>
-        <h1>{copy.title}</h1>
-        <p class="message">{copy.message}</p>
-        {#if copy.retry || copy.close}
-          <div class="actions">
-            {#if copy.retry}
-              <Button variant="primary" disabled={closing} onclick={boot}>{copy.retry}</Button>
-            {/if}
-            {#if copy.close}
-              <Button
-                variant={copy.retry ? 'secondary' : 'primary'}
-                disabled={closing}
-                onclick={() => void close()}
-              >
-                Close leaf
-              </Button>
-            {/if}
-          </div>
-        {/if}
-        {#if closeHint}
-          <p class="hint">{CLOSE_HINT}</p>
-        {/if}
-        {#if copy.details}
-          <details class="details">
-            <summary>Details</summary>
-            <p>{failure.detail}</p>
-          </details>
-        {/if}
-      </div>
-    {/if}
-  </main>
+          {#if copy.details}
+            <details class="details">
+              <summary>Details</summary>
+              <p>{failure.detail}</p>
+            </details>
+          {/if}
+        </div>
+      {/if}
+    </main>
+  </Minimisable>
 {/if}
 
 <!-- Always in the page, so the notice is announced when its text arrives. -->

@@ -14,8 +14,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type * as AdminClient from '../lib/admin/client';
 import type * as SessionStore from '../lib/stores/session.svelte';
 import { expectNoA11yViolations } from '../lib/test/a11y';
+import { FULL_SIZE, resizeTo, TILE_SIZE } from '../lib/test/viewport';
 import { bootScreens, GUILD_ID } from './fixtures';
-import { SCREENS, type ScreenId } from './screens';
+import { SCREENS, TILE_SCREENS, type ScreenId } from './screens';
 
 type Queries = (typeof TestingLibrary)['screen'];
 
@@ -44,10 +45,34 @@ function memoryStorage(): Storage {
 let testing: typeof TestingLibrary;
 let errors: string[];
 
+/** Whether a screen is one of the minimised ones, which their viewport's size makes. */
+const isTile = (id: string): boolean => TILE_SCREENS.some((screen) => screen.id === id);
+
 async function show(id: string, longText = false): Promise<HTMLElement> {
+  // As the screen viewer and the browser suites open them: in a viewport the
+  // size of the tile Discord shrinks leaf to.
+  resizeTo(isTile(id) ? TILE_SIZE : FULL_SIZE);
   const { default: Screen } = await import('./Screen.svelte');
   return testing.render(Screen, { props: { id, longText } }).container;
 }
+
+/**
+ * The card a minimised screen shows: its name, the line under it (`null`
+ * for none) and whether a picture is behind them. It waits for all three,
+ * since the picture comes with the series' days.
+ */
+const tile =
+  (name: string, detail: string | null, pictured = false) =>
+  (s: Queries): Promise<HTMLElement> =>
+    testing.waitFor(() => {
+      // The only heading there is: the screen behind the card is put away.
+      const card = s.getByRole('heading', { level: 1, name }).closest('main');
+      if (!card) throw new Error('the card is not the page’s main landmark');
+      expect(card).toHaveClass('tile');
+      expect(card.querySelector('p')?.textContent ?? null).toBe(detail);
+      expect(card.querySelector('img') !== null).toBe(pictured);
+      return card;
+    }, WAIT);
 
 beforeEach(async () => {
   vi.resetModules();
@@ -72,6 +97,7 @@ afterEach(async () => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
   history.replaceState(null, '', '/');
+  resizeTo(FULL_SIZE);
 });
 
 const heading =
@@ -102,7 +128,16 @@ const LANDMARKS: Record<ScreenId, (s: Queries) => Promise<HTMLElement>> = {
   home: button('Latest: Day 128'),
   'home-empty': heading('Archive your first post', 2),
   'home-sprout': text(/Only you can see this series for now/),
+  'home-channel-gone': button('Choose another channel'),
   viewer: (s) => s.findByRole('dialog', { name: 'Day 125, Daily Sketch' }, WAIT),
+  // The day's one file is a video, under its poster until it plays. (The
+  // dialog is asked for each time: Gallery's stand-in has the same name.)
+  'viewer-video': (s) =>
+    testing.waitFor(() => {
+      const dialog = s.getByRole('dialog', { name: 'Day 118, Daily Sketch' });
+      expect(dialog.querySelector('video[poster]')).not.toBeNull();
+      return dialog;
+    }, WAIT),
   // The viewer's own loading state: its shell is up, the day is not.
   'viewer-loading': (s) => s.findByRole('status', { name: 'Loading Day 125' }, WAIT),
   'viewer-failed': async (s) => {
@@ -113,6 +148,7 @@ const LANDMARKS: Record<ScreenId, (s: Queries) => Promise<HTMLElement>> = {
   'create-blocked': text('You can’t start a series here yet'),
   myseries: text(/124 days archived/),
   settings: field('Remind me when I’m behind'),
+  'settings-channel-unseen': text(/this server has no other series channel it can see/),
   'admin-login': (s) => s.findByRole('link', { name: 'Sign in with Discord' }, WAIT),
   'admin-panel': heading('Settings', 2),
   loading: text('Opening leaf…'),
@@ -123,6 +159,13 @@ const LANDMARKS: Record<ScreenId, (s: Queries) => Promise<HTMLElement>> = {
   expired: text('Your session has ended'),
   'load-error': text('Couldn’t load the gallery'),
   landing: heading('leaf is running'),
+  'tile-day': tile('Daily Sketch', 'Day 125', true),
+  'tile-series': tile('Daily Sketch', 'Day 128', true),
+  'tile-empty': tile('Pressed Flowers', 'No days yet'),
+  'tile-list': tile('leaf', null),
+  'tile-boot': tile('leaf', 'Opening…'),
+  'tile-error': tile('leaf', 'Didn’t open'),
+  'tile-expired': tile('leaf', 'Session ended'),
 };
 
 /** The screens whose scenario fails a request on purpose, and what that logs. */
@@ -130,6 +173,7 @@ const LOGGED: Partial<Record<ScreenId, string[]>> = {
   expired: ['leaf: loading the gallery failed'],
   'load-error': ['leaf: loading the gallery failed'],
   'viewer-failed': ['leaf: loading Day 124 failed'],
+  'tile-expired': ['leaf: loading the gallery failed'],
 };
 
 describe('mock screens', () => {
@@ -143,6 +187,15 @@ describe('mock screens', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(errors).toEqual(LOGGED[id] ?? []);
     await expectNoA11yViolations(container);
+    // axe only checks these on a whole page (the Playwright suite in
+    // e2e/mock does): every screen is one main landmark with a heading. A
+    // minimised screen's is the card; the screen put away behind it is inert.
+    const mains = [...container.querySelectorAll('main')].filter(
+      (main) => !main.closest('[hidden]'),
+    );
+    expect(mains).toHaveLength(1);
+    expect(mains[0]?.querySelector('h1')).not.toBeNull();
+    expect(container.querySelectorAll('.screens[hidden]')).toHaveLength(isTile(id) ? 1 : 0);
   });
 
   it('viewer-loading can be left: a dialog with a Close button while the day loads', async () => {
@@ -229,6 +282,11 @@ function outlineOf(container: HTMLElement, selector: string): unknown[] {
   return outline(el);
 }
 
+/** Every `<main>` in the container, outlined: the screen, and the card over it when minimised. */
+function mainsOf(container: HTMLElement): unknown[] {
+  return [...container.querySelectorAll('main')].map(outline);
+}
+
 describe('mock screens copied from a real one', () => {
   it.each([...bootScreens])('%s is what App renders in that boot state', async (id, state) => {
     vi.doMock('../lib/stores/session.svelte', async (original) => ({
@@ -238,11 +296,15 @@ describe('mock screens copied from a real one', () => {
     }));
     const { session } = await import('../lib/stores/session.svelte');
     session.value = state;
+    // In the viewport the mock screen is for: a minimised one is the card
+    // over the boot screen, and both are held to App's.
+    resizeTo(isTile(id) ? TILE_SIZE : FULL_SIZE);
     const { default: App } = await import('../App.svelte');
-    const real = outlineOf(testing.render(App).container, 'main');
+    const real = mainsOf(testing.render(App).container);
     testing.cleanup();
 
-    expect(outlineOf(await show(id), 'main')).toEqual(real);
+    expect(real).toHaveLength(isTile(id) ? 2 : 1);
+    expect(mainsOf(await show(id))).toEqual(real);
   });
 
   it('admin-login is what Admin renders before there is a session', async () => {

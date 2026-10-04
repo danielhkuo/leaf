@@ -79,12 +79,23 @@ describe('MySeries', () => {
   });
 
   it('explains a revoked series instead of leaving a bare badge', async () => {
-    store.api.listMySeries.mockResolvedValue([mine({ state: 'revoked', channel_name: null })]);
+    store.api.listMySeries.mockResolvedValue([mine({ state: 'revoked', channel_name: undefined })]);
     render(MySeries);
     const card = await screen.findByRole('button', { name: /^Daily Sketch/ });
     expect(card).toHaveTextContent('Revoked');
     expect(card).toHaveTextContent(/A server admin revoked this series/);
     expect(card).toHaveTextContent(/Ask an admin to restore it/);
+  });
+
+  it('does not name a channel the server calls gone', async () => {
+    // A name the server still had for it would send the owner to post nowhere.
+    store.api.listMySeries.mockResolvedValue([
+      mine({ channel_name: 'general', channel_missing: true }),
+    ]);
+    render(MySeries);
+    const card = await screen.findByRole('button', { name: /^Daily Sketch/ });
+    expect(card).toHaveTextContent('daily · 124 days archived · reminders on');
+    expect(card).not.toHaveTextContent('#');
   });
 
   it('says when reminders are on but not arriving', async () => {

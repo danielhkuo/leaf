@@ -40,6 +40,7 @@ const SESSION: Session = {
   guildId: 'g1',
   channelId: 'c2',
   platform: 'mobile',
+  appName: 'leaf',
   customId: null,
   token: 't',
   expiresAt: 0,

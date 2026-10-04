@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { Session } from '../lib/sdk/handshake';
 import { nav } from '../lib/stores/nav.svelte';
+import { FULL_SIZE, resizeTo, TILE_SIZE } from '../lib/test/viewport';
 import type { Series } from '../lib/types/api';
 import Gallery from './Gallery.svelte';
 
@@ -28,6 +29,7 @@ vi.mock('../lib/stores/gallery.svelte', () => ({
   gallery: mocks.gallery,
   initGallery: () => Promise.resolve(),
   lastSeries: () => null,
+  peekThumb: () => null,
   refreshAll: () => Promise.resolve(true),
   rememberSeries: () => undefined,
   takeLaunchIntent: () => Promise.resolve({ seriesId: 1, day: 4 }),
@@ -56,6 +58,7 @@ const SESSION: Session = {
   guildId: 'g1',
   channelId: null,
   platform: 'mobile',
+  appName: 'leaf',
   customId: null,
   token: 't',
   expiresAt: Date.now() + 3_600_000,
@@ -80,6 +83,21 @@ describe('Gallery while the day viewer loads', () => {
     render(Gallery, { props: { session: SESSION } });
     expect(await screen.findByText('Loading the day')).toBeInTheDocument();
 
+    await fireEvent.keyDown(window, { key: 'Escape' });
+    await waitFor(() => expect(nav.current).toEqual({ name: 'home', seriesId: 1 }));
+  });
+
+  it('is not left by an Escape pressed while leaf is a tile', async () => {
+    render(Gallery, { props: { session: SESSION } });
+    expect(await screen.findByText('Loading the day')).toBeInTheDocument();
+
+    try {
+      resizeTo(TILE_SIZE);
+      await fireEvent.keyDown(window, { key: 'Escape' });
+      expect(nav.current).toEqual({ name: 'viewer', seriesId: 1, day: 4 });
+    } finally {
+      resizeTo(FULL_SIZE);
+    }
     await fireEvent.keyDown(window, { key: 'Escape' });
     await waitFor(() => expect(nav.current).toEqual({ name: 'home', seriesId: 1 }));
   });

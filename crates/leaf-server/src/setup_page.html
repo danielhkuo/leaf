@@ -155,6 +155,43 @@
 
   .frow { margin-bottom: 1.05rem; }
   .frow:last-of-type { margin-bottom: 0; }
+
+  /* ---- storage choice ----
+   * Two native radio buttons, each inside its label so the whole row is the
+   * target. The fields of the choice not made sit in a disabled fieldset:
+   * out of the tab order, not sent, not checked. */
+  fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+  legend { padding: 0; }
+  .choice { display: grid; gap: .5rem; margin-bottom: 1.2rem; }
+  .choice legend { font-size: .875rem; font-weight: 600; margin-bottom: .5rem; }
+  .opt {
+    display: flex; gap: .7rem; align-items: flex-start;
+    min-height: var(--touch); padding: .7rem .85rem;
+    background: var(--field);
+    border: 1px solid var(--control-border);
+    border-radius: var(--radius-field);
+    cursor: pointer;
+  }
+  .opt input {
+    flex: none; width: 1.15rem; height: 1.15rem; margin: .12rem 0 0;
+    accent-color: var(--text); cursor: pointer;
+  }
+  .opt input:focus { box-shadow: none; }
+  .opt:has(input:checked) { background: var(--card); border-color: var(--text); box-shadow: inset 0 0 0 1px var(--text); }
+  .opt:has(input:focus-visible) { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+  .opt:has(input:focus-visible) input { outline: none; }
+  .opt-text { min-width: 0; overflow-wrap: anywhere; }
+  .opt-name { display: block; font-size: .9rem; font-weight: 600; }
+  .opt-note { display: block; font-size: .8rem; font-weight: 400; color: var(--dim); margin-top: .1rem; }
+  .means {
+    margin-top: 1.05rem; padding: .8rem .95rem;
+    font-size: .85rem;
+    background: color-mix(in srgb, var(--warn-fill) 10%, var(--card));
+    border: 1px solid var(--line); border-left: 3px solid var(--warn-fill);
+    border-radius: var(--radius-field);
+  }
+  .means-h { font-weight: 700; margin-bottom: .35rem; }
+  .means ul { padding-left: 1.1rem; display: grid; gap: .35rem; }
   .lrow {
     display: flex; align-items: baseline; justify-content: space-between; gap: .5rem;
     margin-bottom: .35rem;
@@ -360,39 +397,81 @@
       </div>
     </section>
 
-    <section class="card" aria-labelledby="r2-h">
-      <h2 id="r2-h">Cloudflare R2</h2>
+    <section class="card" aria-labelledby="storage-h">
+      <h2 id="storage-h">Media storage</h2>
 
-      <div class="frow">
-        <div class="lrow"><label for="r2_endpoint">S3 endpoint</label><span class="req" aria-hidden="true">Required</span></div>
-        <input id="r2_endpoint" name="r2_endpoint" type="url" inputmode="url" required placeholder="https://&lt;account-id&gt;.r2.cloudflarestorage.com" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other" aria-describedby="err-r2_endpoint help-r2_endpoint">
-        <p class="ferr" id="err-r2_endpoint" data-for="r2_endpoint"></p>
-        <p class="help" id="help-r2_endpoint"><a href="https://dash.cloudflare.com/?to=/:account/r2" target="_blank" rel="noreferrer">Dashboard → R2</a> → Overview shows your account endpoint.</p>
-      </div>
+      <fieldset class="choice">
+        <legend>Where leaf keeps the photos and videos it archives</legend>
+        <label class="opt">
+          <input type="radio" name="storage" value="r2" checked id="storage-r2" aria-labelledby="name-storage-r2" aria-describedby="note-storage-r2">
+          <span class="opt-text">
+            <span class="opt-name" id="name-storage-r2">Cloudflare R2 (or another S3-compatible store)</span>
+            <span class="opt-note" id="note-storage-r2">Recommended for a real install: the files are kept off this machine.</span>
+          </span>
+        </label>
+        <label class="opt">
+          <input type="radio" name="storage" value="folder" id="storage-folder" aria-labelledby="name-storage-folder" aria-describedby="note-storage-folder">
+          <span class="opt-text">
+            <span class="opt-name" id="name-storage-folder">A folder on this machine</span>
+            <span class="opt-note" id="note-storage-folder">No Cloudflare bucket needed. For development, or an install that lives on one machine.</span>
+          </span>
+        </label>
+      </fieldset>
 
-      <div class="frow">
-        <div class="lrow"><label for="r2_bucket">Bucket</label><span class="req" aria-hidden="true">Required</span></div>
-        <input id="r2_bucket" name="r2_bucket" type="text" required autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other" aria-describedby="err-r2_bucket help-r2_bucket">
-        <p class="ferr" id="err-r2_bucket" data-for="r2_bucket"></p>
-        <p class="help" id="help-r2_bucket">The R2 bucket you created for leaf's media.</p>
-      </div>
+      <fieldset id="group-r2">
+        <legend class="sr-only">Cloudflare R2 details</legend>
 
-      <div class="frow">
-        <div class="lrow"><label for="r2_access_key_id">Access key ID</label><span class="req" aria-hidden="true">Required</span></div>
-        <input id="r2_access_key_id" name="r2_access_key_id" type="text" required autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other" aria-describedby="err-r2_access_key_id help-r2_access_key_id">
-        <p class="ferr" id="err-r2_access_key_id" data-for="r2_access_key_id"></p>
-        <p class="help" id="help-r2_access_key_id">R2 → <a href="https://dash.cloudflare.com/?to=/:account/r2/api-tokens" target="_blank" rel="noreferrer">Manage R2 API Tokens</a> → Create token with <strong>Object Read &amp; Write</strong>, scoped to the bucket.</p>
-      </div>
-
-      <div class="frow">
-        <div class="lrow"><label for="r2_secret_access_key">Secret access key</label><span class="req" aria-hidden="true">Required</span></div>
-        <div class="secret">
-          <input id="r2_secret_access_key" name="r2_secret_access_key" type="password" required autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other" aria-describedby="err-r2_secret_access_key help-r2_secret_access_key">
-          <button type="button" class="small-btn reveal" aria-controls="r2_secret_access_key"><span class="reveal-label">Show</span><span class="sr-only"> secret access key</span></button>
+        <div class="frow">
+          <div class="lrow"><label for="r2_endpoint">S3 endpoint</label><span class="req" aria-hidden="true">Required</span></div>
+          <input id="r2_endpoint" name="r2_endpoint" type="url" inputmode="url" required placeholder="https://&lt;account-id&gt;.r2.cloudflarestorage.com" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other" aria-describedby="err-r2_endpoint help-r2_endpoint">
+          <p class="ferr" id="err-r2_endpoint" data-for="r2_endpoint"></p>
+          <p class="help" id="help-r2_endpoint"><a href="https://dash.cloudflare.com/?to=/:account/r2" target="_blank" rel="noreferrer">Dashboard → R2</a> → Overview shows your account endpoint.</p>
         </div>
-        <p class="ferr" id="err-r2_secret_access_key" data-for="r2_secret_access_key"></p>
-        <p class="help" id="help-r2_secret_access_key">Shown once when the token is created.</p>
-      </div>
+
+        <div class="frow">
+          <div class="lrow"><label for="r2_bucket">Bucket</label><span class="req" aria-hidden="true">Required</span></div>
+          <input id="r2_bucket" name="r2_bucket" type="text" required autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other" aria-describedby="err-r2_bucket help-r2_bucket">
+          <p class="ferr" id="err-r2_bucket" data-for="r2_bucket"></p>
+          <p class="help" id="help-r2_bucket">The R2 bucket you created for leaf's media.</p>
+        </div>
+
+        <div class="frow">
+          <div class="lrow"><label for="r2_access_key_id">Access key ID</label><span class="req" aria-hidden="true">Required</span></div>
+          <input id="r2_access_key_id" name="r2_access_key_id" type="text" required autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other" aria-describedby="err-r2_access_key_id help-r2_access_key_id">
+          <p class="ferr" id="err-r2_access_key_id" data-for="r2_access_key_id"></p>
+          <p class="help" id="help-r2_access_key_id">R2 → <a href="https://dash.cloudflare.com/?to=/:account/r2/api-tokens" target="_blank" rel="noreferrer">Manage R2 API Tokens</a> → Create token with <strong>Object Read &amp; Write</strong>, scoped to the bucket.</p>
+        </div>
+
+        <div class="frow">
+          <div class="lrow"><label for="r2_secret_access_key">Secret access key</label><span class="req" aria-hidden="true">Required</span></div>
+          <div class="secret">
+            <input id="r2_secret_access_key" name="r2_secret_access_key" type="password" required autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other" aria-describedby="err-r2_secret_access_key help-r2_secret_access_key">
+            <button type="button" class="small-btn reveal" aria-controls="r2_secret_access_key"><span class="reveal-label">Show</span><span class="sr-only"> secret access key</span></button>
+          </div>
+          <p class="ferr" id="err-r2_secret_access_key" data-for="r2_secret_access_key"></p>
+          <p class="help" id="help-r2_secret_access_key">Shown once when the token is created.</p>
+        </div>
+      </fieldset>
+
+      <fieldset id="group-folder" hidden disabled>
+        <legend class="sr-only">Folder details</legend>
+
+        <div class="frow">
+          <div class="lrow"><label for="storage_folder">Folder path</label><span class="req" aria-hidden="true">Required</span></div>
+          <input id="storage_folder" name="storage_folder" type="text" required placeholder="/data/media" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other" aria-describedby="err-storage_folder help-storage_folder">
+          <p class="ferr" id="err-storage_folder" data-for="storage_folder"></p>
+          <p class="help" id="help-storage_folder">The folder's full path, starting with <code>/</code>. leaf creates the folder if it isn't there yet. <span id="folder-suggestion" hidden>Suggested: <code id="folder-suggested"></code>, inside leaf's data folder.</span></p>
+        </div>
+
+        <div class="means" role="note" aria-labelledby="means-h">
+          <p class="means-h" id="means-h">What a folder means</p>
+          <ul>
+            <li>The files live only on this machine. Nothing is copied anywhere else.</li>
+            <li>There is no redundancy: if the disk fails or the folder is deleted, the archived photos and videos are gone. Back the folder up yourself.</li>
+            <li>In Docker, the folder must be inside the mounted data volume, for example <code>/data/media</code>. Anywhere else is inside the container, and the files vanish when the container is replaced.</li>
+          </ul>
+        </div>
+      </fieldset>
     </section>
 
     <p class="form-msg" id="err-form" data-for="form" role="alert"></p>
@@ -450,7 +529,7 @@
     <p class="sr-only" id="copy-status" role="status"></p>
   </section>
 
-  <footer>Credentials are stored in <code>leaf.conf</code> on the data volume and sent only to Discord and your R2 endpoint.</footer>
+  <footer>Credentials are stored in <code>leaf.conf</code> on the data volume and sent only to Discord and, when you use R2, your R2 endpoint.</footer>
 </main>
 
 <script>
@@ -476,14 +555,32 @@
     client_id: 'Enter the application ID.',
     client_secret: 'Enter the client secret.',
     public_url: 'Enter the public URL, such as https://leaf.example.com.',
+    storage_folder: "Enter the folder's full path, such as /data/media.",
     r2_endpoint: 'Enter the S3 endpoint.',
     r2_bucket: 'Enter the bucket name.',
     r2_access_key_id: 'Enter the access key ID.',
     r2_secret_access_key: 'Enter the secret access key.',
   };
+  // The storage choices (the values of the `storage` radio buttons): the
+  // fieldset that holds each one's fields, those fields, and what a submit
+  // says it is checking. Only the fields of the choice made are checked and
+  // sent.
+  const STORAGE = {
+    r2: {
+      group: 'group-r2',
+      fields: ['r2_endpoint', 'r2_bucket', 'r2_access_key_id', 'r2_secret_access_key'],
+      checking: 'Discord and R2',
+    },
+    folder: {
+      group: 'group-folder',
+      fields: ['storage_folder'],
+      checking: 'Discord and the folder',
+    },
+  };
   const CLIENT_ID_NOT_A_NUMBER = 'The application ID is a long number, such as 1234567890123456789. Copy it from OAuth2 → Client information.';
+  const FOLDER_NOT_ABSOLUTE = "Enter the folder's full path, starting with /, such as /data/media. Short forms such as ~/media, ./media or a path with .. in it don't work.";
   const SUBMIT_LABEL = 'Validate & save';
-  // Longer than the server's worst case (about 25 s for R2, Discord in parallel).
+  // Longer than the server's worst case (about 25 s for storage, Discord in parallel).
   const SUBMIT_TIMEOUT_MS = 60000;
   const VERIFY_TIMEOUT_MS = 15000;
   const LOGS = 'docker compose logs leaf';
@@ -505,8 +602,9 @@
   // Refresh persistence (sessionStorage: this tab only, gone on close).
   // The verified code and non-secret fields survive a refresh; the three
   // secret fields are deliberately never persisted.
-  const PERSIST_FIELDS = ['client_id', 'public_url', 'r2_endpoint', 'r2_bucket', 'r2_access_key_id'];
+  const PERSIST_FIELDS = ['client_id', 'public_url', 'storage_folder', 'r2_endpoint', 'r2_bucket', 'r2_access_key_id'];
   const CODE_KEY = 'leaf-setup-code';
+  const STORAGE_KEY = 'leaf-storage';
 
   const code = () => boxes.map(b => b.value).join('').toUpperCase();
 
@@ -582,9 +680,10 @@
     boxes[0].focus({ preventScroll: true });
   }
 
-  function unlock(restoring) {
+  function unlock(restoring, suggested) {
     verifiedCode = code();
     store.set(CODE_KEY, verifiedCode);
+    suggestFolder(suggested);
     boxRow.hidden = true;
     codeHint.hidden = true;
     gateError.textContent = '';
@@ -626,7 +725,7 @@
       return;
     }
     const { res, data } = outcome;
-    if (data && data.ok) { unlock(restoring); return; }
+    if (data && data.ok) { unlock(restoring, data.suggested_folder); return; }
 
     if (restoring) {
       // Saved code is stale (leaf restarted → new code). Reset quietly.
@@ -675,6 +774,64 @@
       : '';
   });
 
+  // ---- storage choice ----
+
+  const storageRadios = [...creds.querySelectorAll('input[name="storage"]')];
+  // The folder leaf suggests, told once the code has verified.
+  let suggestedFolder = '';
+
+  const storageChoice = () => {
+    const picked = storageRadios.find((radio) => radio.checked);
+    return picked && picked.value in STORAGE ? picked.value : 'r2';
+  };
+
+  // The fields a submit checks and sends: the common ones, and those of the
+  // storage chosen.
+  function activeFields() {
+    const others = Object.entries(STORAGE)
+      .filter(([value]) => value !== storageChoice())
+      .flatMap(([, storage]) => storage.fields);
+    return Object.keys(FIELDS).filter((name) => !others.includes(name));
+  }
+
+  // An empty folder field takes the suggestion once the folder is chosen;
+  // anything typed is left alone.
+  function fillSuggestedFolder() {
+    const input = $('storage_folder');
+    if (storageChoice() === 'folder' && suggestedFolder && !input.value) {
+      input.value = suggestedFolder;
+    }
+  }
+
+  function suggestFolder(path) {
+    suggestedFolder = typeof path === 'string' ? path : '';
+    $('folder-suggested').textContent = suggestedFolder;
+    $('folder-suggestion').hidden = !suggestedFolder;
+    fillSuggestedFolder();
+  }
+
+  // Shows the fields of the storage chosen and switches the others off.
+  function applyStorage() {
+    const choice = storageChoice();
+    for (const [value, storage] of Object.entries(STORAGE)) {
+      const group = $(storage.group);
+      group.hidden = value !== choice;
+      group.disabled = value !== choice;
+      if (value !== choice) {
+        for (const name of storage.fields) {
+          $('err-' + name).textContent = '';
+          $(name).removeAttribute('aria-invalid');
+        }
+      }
+    }
+    fillSuggestedFolder();
+  }
+
+  storageRadios.forEach((radio) => radio.addEventListener('change', () => {
+    store.set(STORAGE_KEY, storageChoice());
+    applyStorage();
+  }));
+
   // The line above the submit button: errors that belong to no field, and
   // the one non-error note after a code re-check.
   function setFormMsg(text, tone = 'error') {
@@ -696,8 +853,9 @@
     clearErrors();
     const general = [];
     const invalid = new Set();
+    const active = activeFields();
     for (const fe of errors) {
-      if (fe.field in FIELDS) {
+      if (active.includes(fe.field)) {
         const slot = $('err-' + fe.field);
         slot.textContent = slot.textContent ? slot.textContent + ' ' + fe.message : fe.message;
         $(fe.field).setAttribute('aria-invalid', 'true');
@@ -708,7 +866,7 @@
     }
     if (invalid.size > 1) general.unshift(`${invalid.size} fields need changes. Each one says what to fix.`);
     setFormMsg(general.join(' '));
-    const first = Object.keys(FIELDS).find(name => invalid.has(name));
+    const first = active.find(name => invalid.has(name));
     if (first) {
       const input = $(first);
       input.scrollIntoView({ block: 'center', behavior: scrollMode });
@@ -718,14 +876,16 @@
     }
   }
 
-  // Checks before sending: every field filled, and an application ID that
-  // is a number. Everything else needs the server.
+  // Checks before sending: every field of the storage chosen filled, an
+  // application ID that is a number, and a folder given by its full path.
+  // Everything else needs the server.
   function localErrors() {
     const errors = [];
-    for (const [name, missing] of Object.entries(FIELDS)) {
+    for (const name of activeFields()) {
       const v = $(name).value.trim();
-      if (!v) errors.push({ field: name, message: missing });
+      if (!v) errors.push({ field: name, message: FIELDS[name] });
       else if (name === 'client_id' && !/^[0-9]{1,20}$/.test(v)) errors.push({ field: name, message: CLIENT_ID_NOT_A_NUMBER });
+      else if (name === 'storage_folder' && !/^\/+[^/]/.test(v)) errors.push({ field: name, message: FOLDER_NOT_ABSOLUTE });
     }
     return errors;
   }
@@ -735,11 +895,12 @@
   const credCards = [...creds.querySelectorAll('section')];
 
   function setBusy(on) {
+    const checking = STORAGE[storageChoice()].checking;
     go.disabled = on;
     credCards.forEach((card) => card.setAttribute('aria-busy', String(on)));
-    go.textContent = on ? 'Checking Discord and R2…' : SUBMIT_LABEL;
+    go.textContent = on ? `Checking ${checking}…` : SUBMIT_LABEL;
     busyMsg.textContent = on
-      ? 'Checking your details with Discord and R2. This usually takes a few seconds, and at most about 30.'
+      ? `Checking your details with ${checking}. This usually takes a few seconds, and at most about 30.`
       : '';
   }
 
@@ -750,6 +911,9 @@
     if (saved) el.value = saved;
     el.addEventListener('input', () => store.set('leaf-' + name, el.value));
   });
+  const savedStorage = store.get(STORAGE_KEY);
+  storageRadios.forEach((radio) => { if (radio.value === savedStorage) radio.checked = true; });
+  applyStorage();
   // Opened at the public address (the documented path): that is the answer.
   if (!$('public_url').value && location.protocol === 'https:') {
     $('public_url').value = location.origin;
@@ -772,8 +936,10 @@
     clearErrors();
     gateError.textContent = '';
     setBusy(true);
-    const payload = Object.fromEntries(new FormData(creds).entries());
-    payload.setup_code = verifiedCode;
+    // The storage choice, and the fields of that choice only: what was typed
+    // for the other one stays in the page.
+    const payload = { setup_code: verifiedCode, storage: storageChoice() };
+    for (const name of activeFields()) payload[name] = $(name).value;
     let outcome;
     try {
       outcome = await postJson('/setup/api/submit', payload, SUBMIT_TIMEOUT_MS);

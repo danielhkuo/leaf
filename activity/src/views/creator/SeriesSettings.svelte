@@ -164,7 +164,7 @@
   onMount(() => focusHeading(root));
 </script>
 
-<div class="view" bind:this={root}>
+<main class="view" bind:this={root}>
   <header class="bar">
     <IconButton ariaLabel="Back" variant="solid" icon="back" onclick={() => void back()} />
     <h1 tabindex="-1">Series settings</h1>
@@ -210,7 +210,7 @@
   {:else}
     <Skeleton height="360px" radius="var(--radius-xl)" label="Loading the settings" />
   {/if}
-</div>
+</main>
 
 <style>
   .view {

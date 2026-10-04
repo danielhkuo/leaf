@@ -80,7 +80,7 @@
   onMount(() => focusHeading(root));
 </script>
 
-<div class="view" bind:this={root}>
+<main class="view" bind:this={root}>
   <header class="bar">
     <IconButton ariaLabel="Back" variant="solid" icon="back" onclick={() => nav.back()} />
     <h1 tabindex="-1">My series</h1>
@@ -124,7 +124,7 @@
     <Skeleton height="96px" radius="var(--radius-xl)" label="Loading your series" />
     <Skeleton height="96px" radius="var(--radius-xl)" label="" />
   {/if}
-</div>
+</main>
 
 <style>
   .view {

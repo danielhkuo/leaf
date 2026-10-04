@@ -8,9 +8,14 @@
 //!
 //! A submit reports every problem it can find in one answer, each on the
 //! field it concerns: every empty or malformed field, then whatever Discord
-//! and R2 say about the credentials of each section that is complete.
+//! and the storage say about the details of each section that is complete.
+//!
+//! Storage is a choice ([`StorageChoice`]): an R2 bucket, with its endpoint,
+//! bucket and keys, or a folder on this machine, with its path and nothing
+//! else. A folder is saved as the endpoint `file://<path>` (see
+//! `leaf_core::media::local_store_dir`).
 
-use std::path::PathBuf;
+use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
 
 use axum::extract::{Path, State};
@@ -45,6 +50,15 @@ const PUBLIC_URL_NOT_HTTPS: &str = "Discord needs an HTTPS address (https://…)
     only works for localhost.";
 const ENDPOINT_NOT_HTTPS: &str = "Enter the endpoint starting with https://, such as \
     https://<account-id>.r2.cloudflarestorage.com.";
+const ENDPOINT_IS_A_FOLDER: &str = "This is a folder, not an S3 endpoint. To keep media in a \
+    folder, choose “A folder on this machine” above and enter its path there.";
+/// Shown when the folder path is not absolute. The page's own check uses the
+/// same sentence, and so does the live check for a config written by hand.
+pub(crate) const FOLDER_NOT_ABSOLUTE: &str = "Enter the folder's full path, starting with /, \
+    such as /data/media. Short forms such as ~/media, ./media or a path with .. in it don't \
+    work.";
+/// The folder the page suggests, inside the data directory.
+const SUGGESTED_FOLDER_NAME: &str = "media";
 
 /// Generates a setup code of the form `XXXX-XXXX`.
 #[must_use]
@@ -84,13 +98,16 @@ pub trait CredentialValidator: Send + Sync + 'static {
         client_secret: &str,
     ) -> impl Future<Output = Vec<FieldError>> + Send;
 
-    /// Checks the R2 credentials with a canary put/get/delete.
+    /// Checks the storage with a canary put/get/delete: in the R2 bucket,
+    /// or in the folder a `file://` endpoint names (no network then).
     fn validate_r2(&self, r2: &R2Config) -> impl Future<Output = Result<(), FieldError>> + Send;
 }
 
 struct Shared {
     code: String,
     config_path: PathBuf,
+    /// The folder the page suggests for media kept on this machine.
+    suggested_folder: Option<String>,
     /// Wrong-attempt counter; `None` once completed (further submits 410).
     attempts: Mutex<Option<u32>>,
     done_tx: watch::Sender<bool>,
@@ -129,6 +146,7 @@ pub fn setup_mode<V: CredentialValidator>(config_path: PathBuf, validator: V) ->
     let app = SetupApp {
         shared: Arc::new(Shared {
             code: normalize_code(&code),
+            suggested_folder: suggested_folder(&config_path),
             config_path,
             attempts: Mutex::new(Some(0)),
             done_tx,
@@ -150,6 +168,15 @@ pub fn setup_mode<V: CredentialValidator>(config_path: PathBuf, validator: V) ->
         done_rx,
         _marker: std::marker::PhantomData,
     }
+}
+
+/// The folder to suggest for media kept on this machine: `media` inside the
+/// data directory (where `leaf.conf` goes), by its full path. In Docker that
+/// is `/data/media`, which is inside the mounted volume.
+fn suggested_folder(config_path: &FsPath) -> Option<String> {
+    let data_dir = config_path.parent()?;
+    let folder = std::path::absolute(data_dir.join(SUGGESTED_FOLDER_NAME)).ok()?;
+    folder.to_str().map(str::to_owned)
 }
 
 /// The page holds no data: never let a stale copy outlive an upgrade.
@@ -196,14 +223,37 @@ pub struct SubmitRequest {
     pub client_secret: String,
     /// Public origin for the embedded app.
     pub public_url: String,
-    /// R2 endpoint URL.
+    /// Where media is kept. Left out, it is R2.
+    #[serde(default)]
+    pub storage: StorageChoice,
+    /// The folder's full path; read only when `storage` is the folder.
+    #[serde(default)]
+    pub storage_folder: String,
+    /// R2 endpoint URL. The four R2 fields are read only when `storage` is
+    /// R2, and the page does not send them otherwise.
+    #[serde(default)]
     pub r2_endpoint: String,
     /// R2 bucket.
+    #[serde(default)]
     pub r2_bucket: String,
     /// R2 access key id.
+    #[serde(default)]
     pub r2_access_key_id: String,
     /// R2 secret access key.
+    #[serde(default)]
     pub r2_secret_access_key: String,
+}
+
+/// The storage choice at the top of the page's storage section. Serialized
+/// as the value of the `storage` radio buttons.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StorageChoice {
+    /// Cloudflare R2, or another S3-compatible store.
+    #[default]
+    R2,
+    /// A folder on the machine leaf runs on.
+    Folder,
 }
 
 /// Where the page shows an error. Serialized as the input's `name`, which is
@@ -221,6 +271,8 @@ pub enum Field {
     ClientSecret,
     /// Public URL.
     PublicUrl,
+    /// The folder media is kept in, when storage is a folder.
+    StorageFolder,
     /// R2 S3 endpoint.
     R2Endpoint,
     /// R2 bucket.
@@ -229,8 +281,8 @@ pub enum Field {
     R2AccessKeyId,
     /// R2 secret access key.
     R2SecretAccessKey,
-    /// Not about one field (Discord or R2 unreachable, the config could not
-    /// be written): shown next to the submit button.
+    /// Not about one field (Discord or storage unreachable, the config could
+    /// not be written): shown next to the submit button.
     Form,
 }
 
@@ -242,10 +294,14 @@ impl Field {
         )
     }
 
-    const fn is_r2(self) -> bool {
+    const fn is_storage(self) -> bool {
         matches!(
             self,
-            Self::R2Endpoint | Self::R2Bucket | Self::R2AccessKeyId | Self::R2SecretAccessKey
+            Self::StorageFolder
+                | Self::R2Endpoint
+                | Self::R2Bucket
+                | Self::R2AccessKeyId
+                | Self::R2SecretAccessKey
         )
     }
 }
@@ -280,6 +336,11 @@ pub struct SubmitResponse {
     /// own values filled in.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next: Option<NextSteps>,
+    /// After the code verifies: the folder the page suggests for media kept
+    /// on this machine. Only someone who holds the code is told a path on
+    /// the server.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suggested_folder: Option<String>,
 }
 
 impl SubmitResponse {
@@ -288,6 +349,7 @@ impl SubmitResponse {
             ok: true,
             errors: Vec::new(),
             next,
+            suggested_folder: None,
         }
     }
 
@@ -296,6 +358,7 @@ impl SubmitResponse {
             ok: false,
             errors,
             next: None,
+            suggested_folder: None,
         }
     }
 }
@@ -357,6 +420,7 @@ const fn missing_message(field: Field) -> &'static str {
         Field::ClientId => "Enter the application ID.",
         Field::ClientSecret => "Enter the client secret.",
         Field::PublicUrl => "Enter the public URL, such as https://leaf.example.com.",
+        Field::StorageFolder => "Enter the folder's full path, such as /data/media.",
         Field::R2Endpoint => "Enter the S3 endpoint.",
         Field::R2Bucket => "Enter the bucket name.",
         Field::R2AccessKeyId => "Enter the access key ID.",
@@ -419,24 +483,114 @@ fn endpoint_ok(raw: &str) -> bool {
     reqwest::Url::parse(raw).is_ok_and(|url| url.scheme() == "https" && url.host_str().is_some())
 }
 
+/// The trimmed value of `field`; an empty one is recorded as missing.
+fn take(errors: &mut Vec<FieldError>, field: Field, raw: &str) -> String {
+    let value = raw.trim();
+    if value.is_empty() {
+        errors.push(FieldError::new(field, missing_message(field)));
+    }
+    value.to_owned()
+}
+
+/// Checks the shape of the storage fields for the choice made and builds the
+/// storage settings: the four R2 values, or for a folder its `file://`
+/// endpoint alone. The fields of the other choice are not looked at.
+fn storage_shape(req: &SubmitRequest, errors: &mut Vec<FieldError>) -> R2Config {
+    match req.storage {
+        StorageChoice::R2 => {
+            let r2 = R2Config {
+                endpoint: take(errors, Field::R2Endpoint, &req.r2_endpoint),
+                bucket: take(errors, Field::R2Bucket, &req.r2_bucket),
+                access_key_id: take(errors, Field::R2AccessKeyId, &req.r2_access_key_id),
+                secret_access_key: take(
+                    errors,
+                    Field::R2SecretAccessKey,
+                    &req.r2_secret_access_key,
+                ),
+            };
+            if leaf_core::media::is_local_endpoint(&r2.endpoint) {
+                errors.push(FieldError::new(Field::R2Endpoint, ENDPOINT_IS_A_FOLDER));
+            } else if !r2.endpoint.is_empty() && !endpoint_ok(&r2.endpoint) {
+                errors.push(FieldError::new(Field::R2Endpoint, ENDPOINT_NOT_HTTPS));
+            }
+            r2
+        }
+        StorageChoice::Folder => {
+            let folder = take(errors, Field::StorageFolder, &req.storage_folder);
+            let endpoint = leaf_core::media::local_endpoint(&folder).unwrap_or_else(|| {
+                if !folder.is_empty() {
+                    errors.push(FieldError::new(Field::StorageFolder, FOLDER_NOT_ABSOLUTE));
+                }
+                String::new()
+            });
+            R2Config {
+                endpoint,
+                bucket: String::new(),
+                access_key_id: String::new(),
+                secret_access_key: String::new(),
+            }
+        }
+    }
+}
+
+/// The folders the storage check would create for a folder on this machine:
+/// the folder itself and each one above it that is not there yet, deepest
+/// first. Empty for a bucket, and for a folder that is already there.
+async fn folders_to_create(r2: &R2Config) -> Vec<PathBuf> {
+    let Some(dir) = leaf_core::media::local_store_dir(&r2.endpoint) else {
+        return Vec::new();
+    };
+    // File work, so off the runtime.
+    let looking = tokio::task::spawn_blocking(move || {
+        dir.ancestors()
+            .take_while(|folder| !folder.as_os_str().is_empty() && !folder.exists())
+            .map(FsPath::to_owned)
+            .collect::<Vec<_>>()
+    });
+    looking.await.unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "setup: could not look for the storage folder");
+        Vec::new()
+    })
+}
+
+/// Removes the folders a refused submit created (see [`folders_to_create`]),
+/// deepest first, so a mistyped path or a rejected token leaves no empty
+/// folders on the machine. Only an empty folder is removed, and the first
+/// one that is not empty ends it: whatever was put there in the meantime
+/// stays, with everything above it.
+async fn remove_empty_folders(created: Vec<PathBuf>) {
+    if created.is_empty() {
+        return;
+    }
+    let removing = tokio::task::spawn_blocking(move || {
+        for folder in created {
+            match std::fs::remove_dir(&folder) {
+                Ok(()) => {}
+                // The check never got as far as creating this one.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    tracing::debug!(
+                        folder = %folder.display(),
+                        error = %e,
+                        "setup: left a folder the storage check created"
+                    );
+                    break;
+                }
+            }
+        }
+    });
+    if let Err(e) = removing.await {
+        tracing::warn!(error = %e, "setup: could not remove the folders the storage check created");
+    }
+}
+
 /// Checks the shape of every field at once and builds the config to
 /// validate live: values trimmed, the public URL reduced to its origin.
 fn check_shape(req: &SubmitRequest) -> (Tier1Config, Vec<FieldError>) {
     let mut errors = Vec::new();
-    let mut take = |field: Field, raw: &str| -> String {
-        let value = raw.trim();
-        if value.is_empty() {
-            errors.push(FieldError::new(field, missing_message(field)));
-        }
-        value.to_owned()
-    };
-    let discord_token = take(Field::DiscordToken, &req.discord_token);
-    let client_id = take(Field::ClientId, &req.client_id);
-    let client_secret = take(Field::ClientSecret, &req.client_secret);
-    let endpoint = take(Field::R2Endpoint, &req.r2_endpoint);
-    let bucket = take(Field::R2Bucket, &req.r2_bucket);
-    let access_key_id = take(Field::R2AccessKeyId, &req.r2_access_key_id);
-    let secret_access_key = take(Field::R2SecretAccessKey, &req.r2_secret_access_key);
+    let discord_token = take(&mut errors, Field::DiscordToken, &req.discord_token);
+    let client_id = take(&mut errors, Field::ClientId, &req.client_id);
+    let client_secret = take(&mut errors, Field::ClientSecret, &req.client_secret);
 
     // Discord ids are u64 snowflakes; anything else cannot name an app.
     let snowflake =
@@ -448,21 +602,14 @@ fn check_shape(req: &SubmitRequest) -> (Tier1Config, Vec<FieldError>) {
         errors.push(FieldError::new(Field::PublicUrl, message));
         req.public_url.trim().to_owned()
     });
-    if !endpoint.is_empty() && !endpoint_ok(&endpoint) {
-        errors.push(FieldError::new(Field::R2Endpoint, ENDPOINT_NOT_HTTPS));
-    }
+    let r2 = storage_shape(req, &mut errors);
 
     let cfg = Tier1Config {
         discord_token,
         client_id,
         client_secret,
         public_url,
-        r2: R2Config {
-            endpoint,
-            bucket,
-            access_key_id,
-            secret_access_key,
-        },
+        r2,
     };
     (cfg, errors)
 }
@@ -546,7 +693,13 @@ async fn verify_code<V: CredentialValidator>(
 ) -> (StatusCode, Json<SubmitResponse>) {
     let mut attempts = app.shared.attempts.lock().await;
     match gate_code(&mut attempts, &app.shared.code, &req.setup_code) {
-        Ok(()) => (StatusCode::OK, Json(SubmitResponse::success(None))),
+        Ok(()) => {
+            let answer = SubmitResponse {
+                suggested_folder: app.shared.suggested_folder.clone(),
+                ..SubmitResponse::success(None)
+            };
+            (StatusCode::OK, Json(answer))
+        }
         Err((status, error)) => fail(status, error),
     }
 }
@@ -569,10 +722,10 @@ async fn submit<V: CredentialValidator>(
     let (cfg, mut errors) = check_shape(&req);
 
     // Then the live checks, side by side, for each section whose fields are
-    // all present and well formed: a gap in the R2 card does not hold back
-    // what Discord has to say, and the reverse.
+    // all present and well formed: a gap in the storage card does not hold
+    // back what Discord has to say, and the reverse.
     let discord_ready = !errors.iter().any(|e| e.field.is_discord());
-    let r2_ready = !errors.iter().any(|e| e.field.is_r2());
+    let r2_ready = !errors.iter().any(|e| e.field.is_storage());
     let discord = async {
         if discord_ready {
             app.validator
@@ -589,10 +742,19 @@ async fn submit<V: CredentialValidator>(
             None
         }
     };
+    // The storage check creates a folder that is not there yet. Which
+    // folders that will be is noted first, so a submit that is then refused
+    // does not leave them behind.
+    let new_folders = if r2_ready {
+        folders_to_create(&cfg.r2).await
+    } else {
+        Vec::new()
+    };
     let (discord_errors, r2_error) = tokio::join!(discord, r2);
     errors.extend(discord_errors);
     errors.extend(r2_error);
     if !errors.is_empty() {
+        remove_empty_folders(new_folders).await;
         // Page order, so the first error is the first one on screen.
         errors.sort_by_key(|e| e.field);
         return (
@@ -603,6 +765,7 @@ async fn submit<V: CredentialValidator>(
 
     if let Err(e) = cfg.save(&app.shared.config_path) {
         tracing::error!(error = %e, "setup: failed to persist config");
+        remove_empty_folders(new_folders).await;
         return fail(
             StatusCode::INTERNAL_SERVER_ERROR,
             FieldError::new(
@@ -647,6 +810,8 @@ mod tests {
         r2_error: Option<(Field, &'static str)>,
         discord_calls: AtomicU32,
         r2_calls: AtomicU32,
+        /// The storage settings of the last storage check.
+        r2_seen: std::sync::Mutex<Option<R2Config>>,
     }
 
     impl Mock {
@@ -664,8 +829,9 @@ mod tests {
                 .collect()
         }
 
-        async fn validate_r2(&self, _: &R2Config) -> Result<(), FieldError> {
+        async fn validate_r2(&self, r2: &R2Config) -> Result<(), FieldError> {
             self.r2_calls.fetch_add(1, Ordering::SeqCst);
+            *self.r2_seen.lock().unwrap() = Some(r2.clone());
             match self.r2_error {
                 Some((field, message)) => Err(FieldError::new(field, message)),
                 None => Ok(()),
@@ -689,6 +855,30 @@ mod tests {
 
     fn body_json(code: &str) -> String {
         body_value(code).to_string()
+    }
+
+    /// What the page sends when the folder is chosen: the choice and the
+    /// path, and no R2 field at all.
+    fn folder_body(code: &str, folder: &str) -> serde_json::Value {
+        serde_json::json!({
+            "setup_code": code,
+            "discord_token": "tok",
+            "client_id": "123",
+            "client_secret": "sec",
+            "public_url": "https://leaf.example.com",
+            "storage": "folder",
+            "storage_folder": folder,
+        })
+    }
+
+    /// Storage settings that are a folder and nothing else.
+    fn folder_only(endpoint: &str) -> R2Config {
+        R2Config {
+            endpoint: endpoint.to_owned(),
+            bucket: String::new(),
+            access_key_id: String::new(),
+            secret_access_key: String::new(),
+        }
     }
 
     async fn post_json(
@@ -1062,6 +1252,304 @@ mod tests {
         assert_eq!(clip("🍃🍃🍃", 2), "🍃🍃…");
     }
 
+    #[tokio::test]
+    async fn a_folder_needs_its_path_and_nothing_else() {
+        let mock = Arc::new(Mock::ok());
+        let (_dir, mode, path) = fixture(Arc::clone(&mock));
+        let body = folder_body(&mode.code, "  /data/media ");
+        let (status, json) = post_submit(&mode.router, body.to_string()).await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["ok"], true);
+
+        // The live check and the saved config hold the folder's endpoint
+        // and no bucket or key.
+        let folder = folder_only("file:///data/media");
+        assert_eq!(*mock.r2_seen.lock().unwrap(), Some(folder.clone()));
+        let saved = Tier1Config::load(&path).unwrap().unwrap();
+        assert_eq!(saved.r2, folder);
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            raw.ends_with("\n[r2]\nendpoint = \"file:///data/media\"\n"),
+            "{raw}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_fields_of_the_storage_not_chosen_are_not_read() {
+        // R2 details typed before the folder was chosen: not checked, not
+        // sent to the live check, not saved.
+        let mock = Arc::new(Mock::ok());
+        let (_dir, mode, path) = fixture(Arc::clone(&mock));
+        let mut body = folder_body(&mode.code, "/data/media");
+        body["r2_endpoint"] = "http://not-https.example".into();
+        body["r2_bucket"] = "leaf".into();
+        body["r2_access_key_id"] = "SECRET_KEYID".into();
+        body["r2_secret_access_key"] = "SECRET_KEY".into();
+        let (status, json) = post_submit(&mode.router, body.to_string()).await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        let saved = Tier1Config::load(&path).unwrap().unwrap();
+        assert_eq!(saved.r2, folder_only("file:///data/media"));
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("SECRET"));
+
+        // And the reverse: a folder path left in the form changes nothing
+        // about an R2 submit, named or (as before the choice existed) not.
+        for storage in [Some("r2"), None] {
+            let mock = Arc::new(Mock::ok());
+            let (_dir, mode, path) = fixture(Arc::clone(&mock));
+            let mut body = body_value(&mode.code);
+            body["storage_folder"] = "not a path".into();
+            if let Some(storage) = storage {
+                body["storage"] = storage.into();
+            }
+            let (status, json) = post_submit(&mode.router, body.to_string()).await;
+            assert_eq!(status, StatusCode::OK, "{json}");
+            let saved = Tier1Config::load(&path).unwrap().unwrap();
+            assert_eq!(saved.r2.endpoint, "https://acc.r2.cloudflarestorage.com");
+            assert_eq!(saved.r2.bucket, "leaf");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_folder_path_that_is_missing_or_not_absolute_lands_on_the_folder_field() {
+        // (what was typed, the message)
+        let cases = [
+            ("", "Enter the folder's full path, such as /data/media."),
+            ("   ", "Enter the folder's full path, such as /data/media."),
+            ("media", FOLDER_NOT_ABSOLUTE),
+            ("./media", FOLDER_NOT_ABSOLUTE),
+            ("~/media", FOLDER_NOT_ABSOLUTE),
+            ("data/media", FOLDER_NOT_ABSOLUTE),
+            ("file:///data/media", FOLDER_NOT_ABSOLUTE),
+            ("/", FOLDER_NOT_ABSOLUTE),
+            ("/data/..", FOLDER_NOT_ABSOLUTE),
+            ("/data/../media", FOLDER_NOT_ABSOLUTE),
+        ];
+        for (typed, message) in cases {
+            let mock = Arc::new(Mock::ok());
+            let (_dir, mode, path) = fixture(Arc::clone(&mock));
+            let body = folder_body(&mode.code, typed);
+            let (status, json) = post_submit(&mode.router, body.to_string()).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{typed:?}");
+            // One error, on the folder field: no bucket or key is asked for.
+            assert_eq!(fields(&json), ["storage_folder"], "{typed:?}");
+            assert_eq!(json["errors"][0]["message"], message, "{typed:?}");
+            // The folder is not tried; Discord is still asked.
+            assert_eq!(mock.r2_calls.load(Ordering::SeqCst), 0, "{typed:?}");
+            assert_eq!(mock.discord_calls.load(Ordering::SeqCst), 1, "{typed:?}");
+            assert!(!path.exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_folder_the_live_check_refuses_lands_on_the_folder_field() {
+        let mock = Arc::new(Mock {
+            discord_errors: vec![(Field::ClientSecret, "secret rejected")],
+            r2_error: Some((
+                Field::StorageFolder,
+                "leaf can't save files in this folder.",
+            )),
+            ..Mock::default()
+        });
+        let (_dir, mode, path) = fixture(mock);
+        let mut body = folder_body(&mode.code, "/data/media");
+        body["public_url"] = "leaf.example.com".into();
+        let (status, json) = post_submit(&mode.router, body.to_string()).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        // Page order: the storage card comes after the public URL.
+        assert_eq!(
+            fields(&json),
+            ["client_secret", "public_url", "storage_folder"]
+        );
+        assert_eq!(
+            json["errors"][2]["message"],
+            "leaf can't save files in this folder."
+        );
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn a_folder_typed_as_the_s3_endpoint_points_at_the_folder_choice() {
+        let mock = Arc::new(Mock::ok());
+        let (_dir, mode, path) = fixture(Arc::clone(&mock));
+        let mut body = body_value(&mode.code);
+        body["r2_endpoint"] = "file:///data/media".into();
+        body["r2_bucket"] = "local".into();
+        let (status, json) = post_submit(&mode.router, body.to_string()).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(fields(&json), ["r2_endpoint"]);
+        assert_eq!(json["errors"][0]["message"], ENDPOINT_IS_A_FOLDER);
+        assert_eq!(mock.r2_calls.load(Ordering::SeqCst), 0);
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn a_verified_code_is_told_the_folder_to_suggest() {
+        let (dir, mode, _path) = fixture(Arc::new(Mock::ok()));
+        // Not before the code is right.
+        let (status, json) = post_verify(&mode.router, "WRONG-CODE").await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(json.get("suggested_folder").is_none(), "{json}");
+
+        let (status, json) = post_verify(&mode.router, &mode.code).await;
+        assert_eq!(status, StatusCode::OK);
+        // `media` inside the data directory, by its full path.
+        let suggested = json["suggested_folder"].as_str().unwrap();
+        assert_eq!(FsPath::new(suggested), dir.path().join("media"));
+        assert!(leaf_core::media::local_endpoint(suggested).is_some());
+        // Suggesting it creates nothing.
+        assert!(!dir.path().join("media").exists());
+
+        // The answer to a submit has no use for it.
+        let (status, json) = post_submit(&mode.router, body_json(&mode.code)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json.get("suggested_folder").is_none(), "{json}");
+    }
+
+    #[test]
+    fn the_suggested_folder_is_a_full_path_inside_the_data_directory() {
+        assert_eq!(
+            suggested_folder(FsPath::new("/data/leaf.conf")).as_deref(),
+            Some("/data/media")
+        );
+        // A relative data directory (`./data`, the default outside Docker)
+        // still gives a full path, without `.` in it.
+        let suggested = suggested_folder(FsPath::new("./data/leaf.conf")).unwrap();
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(FsPath::new(&suggested), cwd.join("data").join("media"));
+        assert!(leaf_core::media::local_endpoint(&suggested).is_some());
+    }
+
+    /// Discord says yes to everything; the storage check is the real one.
+    struct RealStorage(crate::validate::LiveValidator);
+
+    impl CredentialValidator for RealStorage {
+        async fn validate_discord(&self, _: &str, _: &str, _: &str) -> Vec<FieldError> {
+            Vec::new()
+        }
+
+        async fn validate_r2(&self, r2: &R2Config) -> Result<(), FieldError> {
+            self.0.validate_r2(r2).await
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_folder_submit_is_checked_on_disk_and_saved_as_a_store_run_mode_can_open() {
+        use object_store::ObjectStore as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("leaf.conf");
+        let validator = RealStorage(crate::validate::LiveValidator::new().unwrap());
+        let mode = setup_mode(config_path.clone(), validator);
+
+        // A file is in the way: refused on the folder field, nothing saved.
+        std::fs::write(dir.path().join("taken"), b"").unwrap();
+        let blocked = dir.path().join("taken").join("media");
+        let body = folder_body(&mode.code, blocked.to_str().unwrap());
+        let (status, json) = post_submit(&mode.router, body.to_string()).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{json}");
+        assert_eq!(fields(&json), ["storage_folder"]);
+        let message = json["errors"][0]["message"].as_str().unwrap();
+        assert!(
+            message.starts_with("leaf can't create this folder."),
+            "{message}"
+        );
+        assert!(!config_path.exists());
+
+        // The suggested folder: created by the check, left empty, saved.
+        let folder = dir.path().join("media");
+        let body = folder_body(&mode.code, folder.to_str().unwrap());
+        let (status, json) = post_submit(&mode.router, body.to_string()).await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert!(folder.is_dir());
+        assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 0);
+
+        // What was saved is what run mode builds its store from.
+        let saved = Tier1Config::load(&config_path).unwrap().unwrap();
+        let store = leaf_core::media::r2_store(&saved.r2).unwrap();
+        let key = object_store::path::Path::from("g/1/s/2/d/3/att");
+        store.put(&key, b"a day".to_vec().into()).await.unwrap();
+        assert_eq!(
+            std::fs::read(folder.join("g/1/s/2/d/3/att")).unwrap(),
+            b"a day"
+        );
+    }
+
+    /// Discord refuses the token; the storage check is the real one.
+    struct TokenRefused(crate::validate::LiveValidator);
+
+    impl CredentialValidator for TokenRefused {
+        async fn validate_discord(&self, _: &str, _: &str, _: &str) -> Vec<FieldError> {
+            vec![FieldError::new(Field::DiscordToken, "refused")]
+        }
+
+        async fn validate_r2(&self, r2: &R2Config) -> Result<(), FieldError> {
+            self.0.validate_r2(r2).await
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_refused_submit_leaves_no_folders_it_created() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("leaf.conf");
+        let validator = TokenRefused(crate::validate::LiveValidator::new().unwrap());
+        let mode = setup_mode(config_path.clone(), validator);
+        let submit = async |folder: &FsPath| {
+            let body = folder_body(&mode.code, folder.to_str().unwrap());
+            let (status, json) = post_submit(&mode.router, body.to_string()).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{json}");
+            // The folder itself passed its check: only the token is at fault.
+            assert_eq!(fields(&json), ["discord_token"]);
+        };
+
+        // Two new folders deep: both go again, and what was there stays.
+        std::fs::create_dir(dir.path().join("there")).unwrap();
+        submit(&dir.path().join("there").join("new").join("media")).await;
+        assert!(dir.path().join("there").is_dir());
+        assert!(!dir.path().join("there").join("new").exists());
+
+        // A folder that was there before the submit is not leaf's to remove,
+        // empty or not.
+        let kept = dir.path().join("there").join("kept");
+        std::fs::create_dir(&kept).unwrap();
+        submit(&kept).await;
+        assert!(kept.is_dir());
+        submit(&kept.join("media")).await;
+        assert!(kept.is_dir());
+        assert!(!kept.join("media").exists());
+        assert!(!config_path.exists());
+    }
+
+    #[tokio::test]
+    async fn only_folders_that_are_not_there_yet_count_as_created() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = |path: &FsPath| R2Config {
+            endpoint: leaf_core::media::local_endpoint(path.to_str().unwrap()).unwrap(),
+            bucket: String::new(),
+            access_key_id: String::new(),
+            secret_access_key: String::new(),
+        };
+        let deep = dir.path().join("a").join("b");
+        assert_eq!(
+            folders_to_create(&folder(&deep)).await,
+            [deep.clone(), dir.path().join("a")]
+        );
+        assert!(folders_to_create(&folder(dir.path())).await.is_empty());
+        let bucket = R2Config {
+            endpoint: "https://acc.r2.cloudflarestorage.com".to_owned(),
+            ..folder(&deep)
+        };
+        assert!(folders_to_create(&bucket).await.is_empty());
+
+        // A folder something was put in is left, with the one above it.
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(dir.path().join("a").join("note"), b"mine").unwrap();
+        remove_empty_folders(vec![deep.clone(), dir.path().join("a")]).await;
+        assert!(!deep.exists());
+        assert!(dir.path().join("a").join("note").is_file());
+    }
+
     #[test]
     fn field_names_match_the_page() {
         let page = include_str!("setup_page.html");
@@ -1070,6 +1558,7 @@ mod tests {
             Field::ClientId,
             Field::ClientSecret,
             Field::PublicUrl,
+            Field::StorageFolder,
             Field::R2Endpoint,
             Field::R2Bucket,
             Field::R2AccessKeyId,
@@ -1086,6 +1575,72 @@ mod tests {
             }
         }
         assert!(page.contains(CLIENT_ID_NOT_A_NUMBER));
+        assert!(page.contains(FOLDER_NOT_ABSOLUTE));
+    }
+
+    #[test]
+    fn the_page_offers_the_storage_choice_and_says_what_a_folder_means() {
+        let page = include_str!("setup_page.html");
+        // The two radio buttons carry the values `StorageChoice` reads, and
+        // R2 is the one chosen to begin with.
+        for (value, choice) in [("r2", StorageChoice::R2), ("folder", StorageChoice::Folder)] {
+            assert!(
+                page.contains(&format!(
+                    "type=\"radio\" name=\"storage\" value=\"{value}\""
+                )),
+                "{value}"
+            );
+            let read: StorageChoice = serde_json::from_value(value.into()).unwrap();
+            assert_eq!(read, choice);
+        }
+        assert!(page.contains("name=\"storage\" value=\"r2\" checked"));
+        assert_eq!(StorageChoice::default(), StorageChoice::R2);
+        assert!(page.contains("Cloudflare R2 (or another S3-compatible store)"));
+        assert!(page.contains("A folder on this machine"));
+
+        // Each choice has its own fieldset. The folder's starts hidden and
+        // switched off, and holds one input: the path. The bucket and the
+        // keys are in the other one.
+        let inputs_of = |fieldset: &str| -> Vec<&str> {
+            let (_, rest) = page.split_once(fieldset).unwrap();
+            let (group, _) = rest.split_once("</fieldset>").unwrap();
+            group
+                .split("<input ")
+                .skip(1)
+                .map(|input| {
+                    let (_, rest) = input.split_once("name=\"").unwrap();
+                    rest.split_once('"').unwrap().0
+                })
+                .collect()
+        };
+        assert_eq!(
+            inputs_of("<fieldset id=\"group-folder\" hidden disabled>"),
+            ["storage_folder"]
+        );
+        assert_eq!(
+            inputs_of("<fieldset id=\"group-r2\">"),
+            [
+                "r2_endpoint",
+                "r2_bucket",
+                "r2_access_key_id",
+                "r2_secret_access_key"
+            ]
+        );
+        // The script checks and sends the same split.
+        assert!(page.contains("fields: ['storage_folder'],"));
+        assert!(page.contains(
+            "fields: ['r2_endpoint', 'r2_bucket', 'r2_access_key_id', 'r2_secret_access_key'],"
+        ));
+        // What a folder means, in the page's own words.
+        for says in [
+            "live only on this machine",
+            "no redundancy",
+            "inside the mounted data volume",
+            "<code>/data/media</code>",
+            "vanish",
+        ] {
+            assert!(page.contains(says), "{says}");
+        }
     }
 
     #[tokio::test]

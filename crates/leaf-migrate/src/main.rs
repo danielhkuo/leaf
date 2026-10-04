@@ -112,7 +112,7 @@ async fn main() -> anyhow::Result<()> {
                 config_path.display()
             )
         })?;
-        let store = leaf_core::media::r2_store(&tier1.r2).context("building R2 store")?;
+        let store = leaf_core::media::r2_store(&tier1.r2).context("opening media storage")?;
         let media =
             leaf_core::media::MediaPipeline::new(store).context("building media pipeline")?;
         let messages = discord::LiveMessageSource::new(

@@ -261,6 +261,33 @@ describe('server responses parse without loss', () => {
     ]);
     expect(rows[0]?.reminder_error).toBe('dm_closed');
     expect(rows[1]?.reminder_error).toBeUndefined();
+    // An older server sends no `channel_missing`; a channel it cannot name is `null`.
+    expect(rows[0]).toMatchObject({ channel_name: 'daily-sketch' });
+    expect(rows[0]?.channel_missing).toBeUndefined();
+    expect(rows[1]?.channel_name).toBeUndefined();
+  });
+
+  it('my series: a channel leaf cannot see, with the flag, without the name, or neither key', () => {
+    const row = {
+      id: 7,
+      name: 'Daily Sketch',
+      emoji: '✏️',
+      state: 'active',
+      cadence: 'daily',
+      channel_id: '900000000000000101',
+      archived_days: 124,
+      reminder_enabled: false,
+    };
+    const rows = mySeriesListSchema.parse([
+      { ...row, channel_name: null, channel_missing: true },
+      { ...row, channel_name: 'daily-sketch', channel_missing: false },
+      row,
+    ]);
+    expect(rows[0]?.channel_name).toBeUndefined();
+    expect(rows[0]?.channel_missing).toBe(true);
+    expect(rows[1]).toMatchObject({ channel_name: 'daily-sketch', channel_missing: false });
+    expect(rows[2]?.channel_name).toBeUndefined();
+    expect(rows[2]?.channel_missing).toBeUndefined();
   });
 
   it('settings: SeriesSettingsDto, with and without a reminder failure', () => {

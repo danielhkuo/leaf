@@ -4,6 +4,7 @@
   // archived days and reminders. Opens its settings.
   import type { MySeries, SproutProgress } from '../../types/api';
   import { accentVar } from '../../utils/accent';
+  import { channelOf } from '../../utils/channel';
   import Icon from '../ui/Icon.svelte';
   import { daysAre } from './formRules';
 
@@ -42,6 +43,8 @@
     return `${until} Then its privacy setting applies.`;
   });
 
+  /** Not a name the server still has for a channel it calls gone. */
+  const channel = $derived(channelOf(series).name);
   const archived = $derived(
     series.archived_days === 1 ? '1 day archived' : `${series.archived_days} days archived`,
   );
@@ -60,7 +63,7 @@
     </span>
     <span class="sub">
       {series.cadence}
-      {#if series.channel_name}· #{series.channel_name}{/if}
+      {#if channel}· #{channel}{/if}
       · {archived}
       {#if undelivered}
         · <span class="warn">reminders can’t reach you</span>

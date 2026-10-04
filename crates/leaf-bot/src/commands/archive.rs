@@ -13,7 +13,7 @@
 //!    stored a few at a time, the day is written, and the answer is edited
 //!    into the result.
 //! 5. The result and every recoverable problem carry buttons, so a slip is
-//!    fixed in place instead of starting over from the long-press.
+//!    fixed in place instead of starting over from the message's menu.
 //!
 //! Storage keys are a function of guild, series, day and attachment id, so
 //! two attempts at the same message write the same objects. Two rules keep
@@ -38,8 +38,10 @@ use serenity::Builder as _;
 use serenity::futures::{Stream, StreamExt as _};
 use tokio::sync::Semaphore;
 
-use crate::components::{self, FlightKey, INFLIGHT, Inflight, NONCE, OPEN_GALLERY_FALLBACK};
-use crate::{Context, Data, Error, checks};
+use crate::channels::{self, Sight, Style};
+use crate::checks::SETUP_PLAIN;
+use crate::components::{self, FlightKey, INFLIGHT, Inflight, NONCE, discord_code};
+use crate::{Context, Data, Error, checks, menus};
 
 /// Attachments of one post stored at the same time.
 const UPLOAD_CONCURRENCY: usize = 3;
@@ -914,32 +916,39 @@ fn no_series_text(revoked: &[Series]) -> String {
 }
 
 /// The refusal for a message outside the server's series channels.
-fn not_watched_text(watched: &[String], is_admin: bool) -> String {
+///
+/// The channels leaf can see (`sight`) are listed for the invoker to post
+/// in; the others are counted, since a mention of a channel that is gone
+/// reads "#unknown". `setup` is how the `/setup` command is written for an
+/// admin (see [`checks::setup_mention`]); anyone else is pointed at one.
+fn not_watched_text(watched: &[String], sight: &Sight, is_admin: bool, setup: &str) -> String {
     if watched.is_empty() {
         let fix = if is_admin {
-            "Pick them with `/setup`, then archive this post again."
+            format!("Pick them with {setup}, then archive this post again.")
         } else {
-            "Ask a server admin to pick them with `/setup`."
+            format!("Ask a server admin to pick them with {SETUP_PLAIN}.")
         };
         return format!("🍂 This server has no series channels yet, so leaf can't archive. {fix}");
     }
-    let mut channels = watched
-        .iter()
-        .take(CHANNELS_SHOWN_MAX)
-        .map(|id| format!("<#{id}>"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    if watched.len() > CHANNELS_SHOWN_MAX {
-        channels.push_str(", …");
+    let listed = sight.sort(watched);
+    if listed.none_seen() {
+        // Nowhere to send anyone: say what happened and who can fix it.
+        return format!(
+            "🍂 leaf doesn't archive from this channel. {} {}",
+            channels::none_seen_text(listed.unseen),
+            channels::choose_new_text(is_admin, setup)
+        );
     }
     let fix = if is_admin {
-        "Post it there, or add this channel with `/setup`."
+        format!("Post it there, or add this channel with {setup}.")
     } else {
-        "Post it there, or ask a server admin to add this channel with `/setup`."
+        format!("Post it there, or ask a server admin to add this channel with {SETUP_PLAIN}.")
     };
     format!(
-        "🍂 leaf doesn't archive from this channel. This server's series channels: {channels}. \
-         {fix}"
+        "🍂 leaf doesn't archive from this channel. This server's series channels: {}. {fix}",
+        listed.text(Style::Commas {
+            cap: CHANNELS_SHOWN_MAX
+        })
     )
 }
 
@@ -1172,16 +1181,6 @@ fn reaction_permission_note(channel: serenity::ChannelId) -> String {
         "I couldn't add the reaction: leaf needs Add Reactions and Read Message History in \
          <#{channel}>, which a server admin can grant. The post is archived all the same."
     )
-}
-
-/// Discord's JSON error code, when `error` is a refused request.
-const fn discord_code(error: &serenity::Error) -> Option<isize> {
-    match error {
-        serenity::Error::Http(serenity::HttpError::UnsuccessfulRequest(response)) => {
-            Some(response.error.code)
-        }
-        _ => None,
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1700,7 +1699,16 @@ pub async fn archive_menu(ctx: Context<'_>, msg: serenity::Message) -> Result<()
             .render(via, Stage::NoSeries, no_series_text(&revoked))
             .await?;
     } else if !watched {
-        return refuse(&ctx, not_watched_text(&settings.watched_channels, is_admin)).await;
+        // The one round trip before this reply, and a short one: which of
+        // the series channels are still there to be pointed at.
+        let sight = Sight::before_first_answer(&ctx).await;
+        let text = not_watched_text(
+            &settings.watched_channels,
+            &sight,
+            is_admin,
+            &checks::setup_mention(data),
+        );
+        return refuse(&ctx, text).await;
     } else if no_files {
         return refuse(&ctx, nothing_text).await;
     } else {
@@ -2973,9 +2981,15 @@ impl Session<'_> {
     async fn log(&self, line: String) -> Option<String> {
         // Boxed: the channel check and the send would otherwise sit inside
         // every future that can log, which is most of the session.
-        Box::pin(components::log_line(self.http, self.settings, &line))
-            .await
-            .filter(|_| self.is_admin)
+        let setup = checks::setup_mention(self.data);
+        Box::pin(components::log_line(
+            self.http,
+            self.settings,
+            &line,
+            &setup,
+        ))
+        .await
+        .filter(|_| self.is_admin)
     }
 
     // -- result buttons ----------------------------------------------------
@@ -3238,7 +3252,7 @@ impl Session<'_> {
             tracing::warn!(code = ?discord_code(&e), error = %e, "could not launch the Activity");
             let fallback = serenity::CreateInteractionResponse::Message(
                 serenity::CreateInteractionResponseMessage::new()
-                    .content(OPEN_GALLERY_FALLBACK)
+                    .content(menus::open_gallery_fallback(&self.data.app_name()))
                     .ephemeral(true),
             );
             press.create_response(self.http, fallback).await?;
@@ -4562,28 +4576,112 @@ mod tests {
         assert!(two.contains("**Sketches**, **Ink**"));
     }
 
+    /// The `/setup` command as a chip, and as it is written before its id
+    /// is known.
+    const CHIP: &str = "</setup:42>";
+    const PLAIN: &str = "`/setup`";
+
     #[test]
     fn refusals_say_what_to_do_next() {
         let watched = vec!["10".to_owned(), "11".to_owned()];
-        let member = not_watched_text(&watched, false);
-        assert!(member.contains("<#10>, <#11>"));
-        assert!(member.contains("ask a server admin"));
-        let admin = not_watched_text(&watched, true);
-        assert!(admin.contains("add this channel with `/setup`"));
+        let all = Sight::of(["10", "11", "12"]);
+        let member = not_watched_text(&watched, &all, false, CHIP);
+        assert_eq!(
+            member,
+            "🍂 leaf doesn't archive from this channel. This server's series channels: <#10>, \
+             <#11>. Post it there, or ask a server admin to add this channel with `/setup`."
+        );
+        let admin = not_watched_text(&watched, &all, true, CHIP);
+        assert!(
+            admin.ends_with("<#10>, <#11>. Post it there, or add this channel with </setup:42>.")
+        );
         assert!(!admin.contains("ask a server admin"));
+        // Without the cache or Discord's list, what is stored is listed.
+        assert_eq!(
+            not_watched_text(&watched, &Sight::unknown(), true, CHIP),
+            admin
+        );
         let many: Vec<String> = (0..30).map(|n| n.to_string()).collect();
-        assert!(not_watched_text(&many, false).chars().count() < 500);
+        let long = not_watched_text(&many, &Sight::unknown(), false, CHIP);
+        assert!(long.chars().count() < 500);
+        assert_eq!(long.matches("<#").count(), CHANNELS_SHOWN_MAX);
         // No channel picked at all: no empty list, and the way to fix it.
-        let unset = not_watched_text(&[], false);
+        let unset = not_watched_text(&[], &all, false, CHIP);
         assert!(unset.contains("no series channels yet"), "{unset}");
         assert!(!unset.contains(": ."), "{unset}");
-        assert!(not_watched_text(&[], true).contains("Pick them with `/setup`"));
+        assert!(unset.ends_with("Ask a server admin to pick them with `/setup`."));
+        assert!(
+            not_watched_text(&[], &all, true, CHIP)
+                .ends_with("Pick them with </setup:42>, then archive this post again.")
+        );
 
         // Skipped files are named; a link preview gets its own explanation.
         let skipped = nothing_to_archive_text(&["`a.heic` isn't supported.".to_owned()], true);
         assert!(skipped.contains("Skipped: `a.heic` isn't supported."));
         assert!(nothing_to_archive_text(&[], true).contains("link preview or GIF"));
         assert!(nothing_to_archive_text(&[], false).contains(media::SUPPORTED_FORMATS));
+    }
+
+    #[test]
+    fn a_refusal_never_sends_anyone_to_a_channel_leaf_cannot_see() {
+        let watched = vec!["10".to_owned(), "11".to_owned()];
+
+        // One of the two is gone: the other is still somewhere to post.
+        let one_left = Sight::of(["11"]);
+        assert_eq!(
+            not_watched_text(&watched, &one_left, true, CHIP),
+            "🍂 leaf doesn't archive from this channel. This server's series channels: <#11> \
+             and 1 that leaf can no longer see. Post it there, or add this channel with \
+             </setup:42>."
+        );
+        let member = not_watched_text(&watched, &one_left, false, CHIP);
+        assert!(member.contains("<#11> and 1 that leaf can no longer see. Post it there, or ask"));
+        assert!(!member.contains("<#10>"), "{member}");
+
+        // Both are gone: nobody is told to post "there".
+        let none_left = Sight::of(["12"]);
+        assert_eq!(
+            not_watched_text(&watched, &none_left, true, CHIP),
+            "🍂 leaf doesn't archive from this channel. This server's series channels are ones \
+             leaf can no longer see (deleted, or hidden from leaf). Choose new ones with \
+             </setup:42>."
+        );
+        // The only one is gone, and the reader cannot run /setup.
+        let only = vec!["10".to_owned()];
+        let member = not_watched_text(&only, &none_left, false, CHIP);
+        assert_eq!(
+            member,
+            "🍂 leaf doesn't archive from this channel. This server's series channel is one \
+             leaf can no longer see (deleted, or hidden from leaf). A server admin can choose \
+             new ones with `/setup`."
+        );
+        for text in [&member, &not_watched_text(&watched, &none_left, true, CHIP)] {
+            assert!(!text.contains("<#"), "{text}");
+            assert!(!text.contains("Post it there"), "{text}");
+        }
+    }
+
+    #[test]
+    fn setup_is_a_chip_for_an_admin_and_plain_text_until_its_id_is_known() {
+        let watched = ["10".to_owned()];
+        let sights = [Sight::of(["10"]), Sight::of(["12"])];
+        for (stored, sight) in [
+            (&[][..], &sights[0]),
+            (&watched[..], &sights[0]),
+            (&watched[..], &sights[1]),
+        ] {
+            // An admin can tap it once the command is registered...
+            let chip = not_watched_text(stored, sight, true, CHIP);
+            assert!(chip.contains(CHIP), "{chip}");
+            assert!(!chip.contains(PLAIN), "{chip}");
+            // ...and reads the plain name until then.
+            let plain = not_watched_text(stored, sight, true, PLAIN);
+            assert_eq!(plain, chip.replace(CHIP, PLAIN));
+            // Someone who cannot run it gets nothing to tap.
+            let member = not_watched_text(stored, sight, false, CHIP);
+            assert!(member.contains(PLAIN), "{member}");
+            assert!(!member.contains(CHIP), "{member}");
+        }
     }
 
     #[test]

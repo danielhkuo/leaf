@@ -25,13 +25,14 @@ use leaf_core::transfer::{
 use poise::serenity_prelude as serenity;
 use serenity::futures::{Stream, StreamExt as _};
 
+use crate::channels::Sight;
 use crate::commands::query::{begin, private_series};
 use crate::commands::series_lookup::{
     Answer, App, Asker, PROMPT_TIMEOUT, Scope, Via, autocomplete_any_series, bold, clip,
     rerun_hint, scoped_id, settle,
 };
-use crate::components::{self, FlightKey, INFLIGHT, OPEN_GALLERY_FALLBACK};
-use crate::{Context, Error, checks};
+use crate::components::{self, FlightKey, INFLIGHT};
+use crate::{Context, Error, checks, menus};
 
 /// Import files larger than this are refused (matches v2's guard).
 const MAX_IMPORT_BYTES: u32 = 24 * 1024 * 1024;
@@ -281,12 +282,13 @@ pub async fn import(
     };
     let existing = app.data.posts.all_days(series.id).await?;
     let review = review(posts, &existing, checks::now_unix());
-    let channels = guild_channels(app);
+    // Asked after the defer: no first answer is waiting on it.
+    let sight = Sight::of_command(&Context::Application(app)).await;
     let preview = Preview {
         file: &label,
         series: &series,
         review: &review,
-        channels: channels.as_ref(),
+        channels: sight.ids(),
     };
     if review.fresh.is_empty() {
         via.send(Answer::private(nothing_text(&preview))).await?;
@@ -578,24 +580,6 @@ fn is_snowflake(raw: &str) -> bool {
     raw.bytes().all(|b| b.is_ascii_digit()) && raw.parse::<u64>().is_ok_and(|id| id != 0)
 }
 
-/// The ids of the server's channels and active threads, from the gateway
-/// cache. `None` when the server is not cached: nothing can then be said
-/// about where an entry comes from.
-fn guild_channels(app: App<'_>) -> Option<HashSet<String>> {
-    let guild = app
-        .serenity_context
-        .cache
-        .guild(app.interaction.guild_id?)?;
-    let ids = guild
-        .channels
-        .keys()
-        .map(ToString::to_string)
-        .chain(guild.threads.iter().map(|thread| thread.id.to_string()))
-        .collect();
-    drop(guild);
-    Some(ids)
-}
-
 // ---------------------------------------------------------------------------
 // The preview
 // ---------------------------------------------------------------------------
@@ -608,7 +592,8 @@ struct Preview<'a> {
     series: &'a Series,
     /// The file's entries, sorted.
     review: &'a Review,
-    /// The server's channels and threads (see [`guild_channels`]).
+    /// The server's channels and threads, as far as leaf could find out
+    /// (see [`Sight::ids`]).
     channels: Option<&'a HashSet<String>>,
 }
 
@@ -747,8 +732,8 @@ fn date_span(earliest: i64, latest: i64) -> String {
 }
 
 /// Where the entries to import were posted: ", from #a and #b". Only
-/// channels of this server are named (every channel when the cache cannot
-/// tell); the others get a warning instead.
+/// channels leaf can see in this server are named (every channel when it
+/// could not find out); the others get a warning instead.
 fn sources_text(fresh: &[TransferPost], known: Option<&HashSet<String>>) -> String {
     let mut sources: Vec<&str> = Vec::new();
     for post in fresh {
@@ -813,9 +798,9 @@ fn author_warning(fresh: &[TransferPost], creator_id: &str) -> Option<String> {
     })
 }
 
-/// Some of the file's posts are from channels this server does not have,
-/// as far as the cache can tell (an archived thread is not in it either,
-/// so the wording stays careful).
+/// Some of the file's posts are from channels leaf cannot see in this
+/// server (an archived thread is one of those too, so the wording stays
+/// careful).
 fn channel_warning(fresh: &[TransferPost], known: Option<&HashSet<String>>) -> Option<String> {
     let known = known?;
     let unseen = fresh
@@ -1098,13 +1083,13 @@ impl<'a> Job<'a> {
         );
 
         let sprout = self.sprout_step().await;
-        let http = &self.app.serenity_context.http;
-        let actor = self.app.interaction.user.id;
+        let app = self.app;
+        let actor = app.interaction.user.id;
         let skipped = self.left_out.saturating_add(raced);
         let line = imported_log_line(&self.series, written, skipped, actor);
-        let mut note = log_quiet(http, &self.settings, &line).await;
+        let mut note = log_quiet(app, &self.settings, &line).await;
         if sprout == Sprout::Promoted {
-            let sprouted = log_quiet(http, &self.settings, &sprouted_log_line(&self.series)).await;
+            let sprouted = log_quiet(app, &self.settings, &sprouted_log_line(&self.series)).await;
             note = note.or(sprouted);
         }
         Ok(Imported {
@@ -1292,7 +1277,7 @@ impl<'a> Job<'a> {
                 ..self.series.clone()
             };
             let line = undone_log_line(&series, removal.removed, app.interaction.user.id);
-            log_quiet(&app.serenity_context.http, &self.settings, &line).await
+            log_quiet(app, &self.settings, &line).await
         } else {
             None
         };
@@ -1378,7 +1363,7 @@ impl<'a> Job<'a> {
             tracing::warn!(error = %e, "could not launch the Activity");
             let fallback = serenity::CreateInteractionResponse::Message(
                 serenity::CreateInteractionResponseMessage::new()
-                    .content(OPEN_GALLERY_FALLBACK)
+                    .content(menus::open_gallery_fallback(&app.data.app_name()))
                     .ephemeral(true),
             );
             if let Err(e) = press.create_response(http, fallback).await {
@@ -1620,8 +1605,9 @@ fn sprouted_log_line(series: &Series) -> String {
 /// Writes `line` to the server's log channel (see
 /// [`components::log_line`]). Returns a note for the invoker when the write
 /// failed (they hold Manage Server, so they can fix it).
-async fn log_quiet(http: &serenity::Http, settings: &GuildSettings, line: &str) -> Option<String> {
-    components::log_line(http, settings, line).await
+async fn log_quiet(app: App<'_>, settings: &GuildSettings, line: &str) -> Option<String> {
+    let setup = checks::setup_mention(app.data);
+    components::log_line(&app.serenity_context.http, settings, line, &setup).await
 }
 
 #[cfg(test)]

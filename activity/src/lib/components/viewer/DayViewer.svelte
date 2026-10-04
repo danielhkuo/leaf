@@ -9,6 +9,7 @@
   // Paging goes through a day's files first and crosses to the neighbouring
   // day at the ends, for swipes, the arrows and the arrow keys alike.
   import { openExternalLink, type LinkOutcome } from '../../sdk/actions';
+  import type { Platform } from '../../sdk/types';
   import type { Day, DaySummary } from '../../types/api';
   import { formatCaption } from '../../utils/caption';
   import { formatPostedAt, isoInstant } from '../../utils/datetime';
@@ -47,6 +48,8 @@
     /** Loads the day again: after a failed load, or to renew a photo's address. */
     onRetry?: (() => void) | undefined;
     openLink?: (url: string) => Promise<LinkOutcome>;
+    /** Which Discord client this is: on a phone an opened post is out of sight. */
+    platform?: Platform | undefined;
   }
   let {
     dayNumber,
@@ -63,6 +66,7 @@
     onClose,
     onRetry,
     openLink = openExternalLink,
+    platform = 'desktop',
   }: Props = $props();
 
   /** Past any real count: "the last file", for a day entered backwards. */
@@ -126,39 +130,82 @@
 
   function measureCaption(): void {
     const el = captionEl;
-    if (el && !expanded) clipped = el.scrollHeight > el.clientHeight + 1;
+    // No height at all is a caption with no box (the viewer put away while
+    // leaf is a tile), not one that fits: the last answer stands.
+    if (!el || expanded || el.scrollHeight === 0) return;
+    clipped = el.scrollHeight > el.clientHeight + 1;
   }
   $effect(() => {
     void caption;
     void expanded;
     measureCaption();
   });
+  // A resize is measured in the next frame, not while the observer is being
+  // told: the answer adds or removes the More button, which resizes the
+  // photo's frame beside it, and a size that changes while observers are
+  // being told is what browsers report as an uncaught "ResizeObserver loop".
   $effect(() => {
     const el = captionEl;
     if (!el) return;
-    const ro = new ResizeObserver(measureCaption);
+    let frame = 0;
+    const ro = new ResizeObserver(() => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(measureCaption);
+    });
     ro.observe(el);
-    return () => ro.disconnect();
+    return () => {
+      ro.disconnect();
+      cancelAnimationFrame(frame);
+    };
   });
 
   // --- the original post ----------------------------------------------------
+
+  /** How long the line about an opened post stays up. */
+  const OPENED_NOTE_MS = 8_000;
+  const OPENED = 'Opened in the channel.';
+  // Discord jumps the chat to the post, and on a phone the chat is behind
+  // the full-screen Activity: with nothing said, the button looks dead.
+  const OPENED_BEHIND =
+    'Opened in the channel, behind leaf. Minimise leaf to see it: tap the arrow at the top left, or press Back on Android.';
 
   let linkFailedDay = $state<number | null>(null);
   const linkFailed = $derived(linkFailedDay === dayNumber);
   let copyState = $state<'idle' | 'copied' | 'failed'>('idle');
   const canCopy = typeof navigator !== 'undefined' && navigator.clipboard !== undefined;
 
+  // The line belongs to the day it was asked on: it goes when the day does,
+  // and does not come back with it.
+  let opened = $state(false);
+  let openedTimer: ReturnType<typeof setTimeout> | undefined;
+  function clearOpened(): void {
+    clearTimeout(openedTimer);
+    opened = false;
+  }
+  $effect(() => {
+    void dayNumber;
+    return clearOpened;
+  });
+
   async function openPost(): Promise<void> {
     if (!day) return;
     const asked = dayNumber;
+    // A second press says it again rather than leaving the old line up.
+    clearOpened();
     const outcome = await openLink(day.jump_url);
-    // Staying on Discord's "leaving" prompt is the person's choice: say nothing.
     if (outcome === 'failed') {
       copyState = 'idle';
       linkFailedDay = asked;
-    } else if (linkFailedDay === asked) {
-      linkFailedDay = null;
+      return;
     }
+    if (linkFailedDay === asked) linkFailedDay = null;
+    // Staying on Discord's "leaving" prompt is the person's choice: say
+    // nothing. Nor on a day the person has left by the time Discord answers.
+    if (outcome === 'cancelled' || asked !== dayNumber) return;
+    // Two presses can both be answered: the line stays up for the later one.
+    clearTimeout(openedTimer);
+    opened = true;
+    openedTimer = setTimeout(clearOpened, OPENED_NOTE_MS);
   }
 
   async function copyLink(): Promise<void> {
@@ -212,7 +259,9 @@
   });
 
   function onKeydown(e: KeyboardEvent): void {
-    if (e.defaultPrevented) return;
+    // Put away behind the tile (Minimisable.svelte), the viewer is as it
+    // was left: a key pressed at the tile does not turn its pages or close it.
+    if (e.defaultPrevented || dialogEl?.closest('[inert]')) return;
     if (e.key === 'Escape') {
       onClose();
       return;
@@ -287,7 +336,7 @@
   aria-label={`Day ${dayNumber}, ${seriesName}`}
   tabindex="-1"
 >
-  <!-- Not a <header>: that would be a second page banner beside Home's. -->
+  <!-- Not a <header>: out here, beside the page's <main>, it would be a page banner. -->
   <div class="top">
     <div class="meta">
       <span class="eyebrow">Day {dayNumber}</span>
@@ -418,20 +467,28 @@
       </div>
     {/if}
 
-    {#if linkFailed && day}
-      <div class="notice" role="status">
-        <p>Discord didn’t open the post. Copy this link and paste it into Discord or a browser:</p>
-        <p class="url">{day.jump_url}</p>
-        {#if canCopy}
-          <Button size="sm" onclick={() => void copyLink()}>
-            {copyState === 'copied' ? 'Copied' : 'Copy link'}
-          </Button>
-        {/if}
-        {#if copyState === 'failed'}
-          <p>Couldn’t copy it. Press and hold the link to select it.</p>
-        {/if}
-      </div>
-    {/if}
+    <!-- What became of "Open original post". Always in the page, so its
+         text is announced when it arrives. -->
+    <div class="link-status" role="status">
+      {#if linkFailed && day}
+        <div class="notice">
+          <p>
+            Discord didn’t open the post. Copy this link and paste it into Discord or a browser:
+          </p>
+          <p class="url">{day.jump_url}</p>
+          {#if canCopy}
+            <Button size="sm" onclick={() => void copyLink()}>
+              {copyState === 'copied' ? 'Copied' : 'Copy link'}
+            </Button>
+          {/if}
+          {#if copyState === 'failed'}
+            <p>Couldn’t copy it. Press and hold the link to select it.</p>
+          {/if}
+        </div>
+      {:else if opened}
+        <p class="opened">{platform === 'mobile' ? OPENED_BEHIND : OPENED}</p>
+      {/if}
+    </div>
 
     <div class="actions">
       <Button size="sm" disabled={!day} onclick={() => void openPost()}>Open original post</Button>
@@ -520,12 +577,19 @@
     min-width: 0;
     min-height: 0;
   }
+  /* A video is as big as its poster until its metadata arrives, which on a
+   * phone can be when Play is pressed. So its box is the stage's from the
+   * first paint, as a photo's frame is, and the poster and the picture are
+   * both fitted inside it: nothing moves when the real size becomes known. */
   .media {
-    align-self: center;
-    justify-self: center;
-    max-width: 100%;
-    max-height: 100%;
-    margin: auto;
+    flex: 1 1 0;
+    width: 100%;
+    min-width: 0;
+    height: 100%;
+    min-height: 0;
+    object-fit: contain;
+    background: var(--ink);
+    border-radius: var(--radius-md);
   }
   .preview {
     position: absolute;
@@ -675,12 +739,27 @@
     cursor: pointer;
   }
 
+  .link-status {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    justify-items: center;
+    max-width: 32rem;
+  }
+  /* While it has nothing to say it gives back the gap around it. */
+  .link-status:empty {
+    margin-top: calc(-1 * var(--space-xs));
+  }
+  .opened {
+    margin: 0;
+    color: var(--ink-muted);
+    font-size: var(--fs-body-sm);
+    text-align: center;
+  }
   .notice {
     display: grid;
     grid-template-columns: minmax(0, 1fr);
     gap: var(--space-xs);
     justify-items: center;
-    max-width: 32rem;
     padding: var(--space-sm) var(--space-md);
     color: var(--ink-muted);
     font-size: var(--fs-body-sm);

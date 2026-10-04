@@ -21,9 +21,16 @@ pub fn valid_hh_mm(s: &str) -> bool {
     chrono::NaiveTime::parse_from_str(s, "%H:%M").is_ok()
 }
 
-/// How to name the `/setup` command in a message: a mention Discord shows
-/// as a tappable chip once the command's id is known, the plain name until
-/// then.
+/// The `/setup` command by its plain name: how it is written until its id
+/// is known, and for someone who cannot run it (a chip they could tap would
+/// only be refused).
+pub const SETUP_PLAIN: &str = "`/setup`";
+
+/// How to name the `/setup` command in a message to someone who can run it:
+/// a mention Discord shows as a tappable chip once the command's id is
+/// known, the plain name until then.
+///
+/// Every reply that tells an admin to run the command writes it with this.
 #[must_use]
 pub fn setup_mention(data: &Data) -> String {
     mention_for(*data.setup_command.borrow())
@@ -54,7 +61,7 @@ async fn command_id_once_known(
 
 fn mention_for(command_id: u64) -> String {
     if command_id == 0 {
-        "`/setup`".to_owned()
+        SETUP_PLAIN.to_owned()
     } else {
         format!("</setup:{command_id}>")
     }
@@ -69,7 +76,7 @@ pub fn not_set_up_text(is_admin: bool, setup: &str) -> String {
             "🌱 leaf isn't set up in this server yet. Run {setup} to choose the series channels."
         )
     } else {
-        "🌱 leaf isn't set up in this server yet. Ask a server admin to run `/setup`.".to_owned()
+        format!("🌱 leaf isn't set up in this server yet. Ask a server admin to run {SETUP_PLAIN}.")
     }
 }
 

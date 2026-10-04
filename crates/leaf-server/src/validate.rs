@@ -1,4 +1,11 @@
-//! Live credential validation against Discord and R2, used by setup mode.
+//! Live credential validation against Discord and R2, used by setup mode,
+//! and the storage round trip `leaf doctor` runs against a configured install
+//! ([`LiveValidator::storage_round_trip`]).
+//!
+//! Storage that is a folder on this machine (a `file://` endpoint, see
+//! `leaf_core::media::local_store_dir`) gets the same canary, run in that
+//! folder: nothing is asked of the network, and the bucket and keys are not
+//! looked at.
 //!
 //! Every failure comes back on the form field it concerns, as one plain
 //! sentence that says what to change, and never echoes a credential. The raw
@@ -6,22 +13,26 @@
 //! XML that means nothing on a form.
 //!
 //! Every check is bounded. The two Discord calls run side by side under the
-//! HTTP client's timeout; the R2 canary has one retry and an overall
-//! deadline. The setup page tells the operator to expect an answer within
-//! about half a minute, and these limits keep that true.
+//! HTTP client's timeout; the R2 canary has one retry, an overall deadline of
+//! 25 seconds, and 5 more to remove its test object when a step failed. The
+//! setup page tells the operator to expect an answer within about half a
+//! minute, and these limits (30 seconds at most) keep that true.
 
+use std::ops::Range;
 use std::time::Duration;
 
 use leaf_core::config::R2Config;
+use leaf_core::media::LocalStoreError;
 use object_store::aws::{AmazonS3, AmazonS3Builder};
 use object_store::path::Path as ObjectPath;
-use object_store::{ClientOptions, ObjectStore as _, RetryConfig};
+use object_store::{ClientOptions, ObjectStore, RetryConfig};
 use reqwest::StatusCode;
 use serde::Deserialize;
 
-use crate::setup::{CredentialValidator, Field, FieldError, clip};
+use crate::setup::{CredentialValidator, FOLDER_NOT_ABSOLUTE, Field, FieldError, clip};
 
-const DISCORD_API: &str = "https://discord.com/api/v10";
+/// Base URL of Discord's REST API (also what `leaf doctor` asks).
+pub const DISCORD_API: &str = "https://discord.com/api/v10";
 /// Limit for each Discord call (the page's copy says 10 seconds).
 const DISCORD_TIMEOUT: Duration = Duration::from_secs(10);
 /// Limit for each R2 request, and for opening its connection.
@@ -35,8 +46,20 @@ const R2_RETRY_WINDOW: Duration = Duration::from_secs(10);
 /// Deadline for the whole canary: write, read back, delete. `R2_TIMED_OUT`
 /// names it.
 const R2_DEADLINE: Duration = Duration::from_secs(25);
-/// Object the canary writes and removes again.
+/// Limit for removing the canary once a step has failed or run out of time:
+/// by then the deadline above may have passed, and the object must still go.
+/// With the deadline this is the half minute the setup page promises.
+const R2_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
+/// Object the setup canary writes and removes again.
 const CANARY_KEY: &str = "leaf-setup-canary";
+/// Object `leaf doctor` writes and removes again. Archived media lives under
+/// `g/…`, so this name can never be a day's file.
+pub const DOCTOR_CANARY_KEY: &str = "leaf-doctor-canary";
+/// What a canary stores.
+const CANARY_BODY: &[u8] = b"leaf storage check";
+/// The bytes of [`CANARY_BODY`] a ranged read asks for, and what they are.
+const CANARY_PART_RANGE: Range<u64> = 5..12;
+const CANARY_PART: &[u8] = b"storage";
 
 // ---- copy: Discord ----
 
@@ -78,6 +101,30 @@ const R2_TIMED_OUT: &str = "R2 didn't finish the check within 25 seconds. Check 
 const R2_UNEXPECTED: &str = "R2 refused the test upload for a reason leaf doesn't recognise. \
     Check the endpoint, bucket and keys; leaf's logs have the details (docker compose logs \
     leaf).";
+const R2_WRONG_BYTES: &str = "This endpoint returned different bytes than leaf stored in the test \
+    file. Check it's the S3 endpoint from R2 → Overview and that nothing between leaf and R2 \
+    rewrites the files.";
+const RANGE_UNSUPPORTED: &str = "This endpoint stored and returned the test file but would not \
+    return a part of it. leaf reads files in parts to play video, so it needs storage that \
+    answers byte-range requests, as R2 does.";
+
+// ---- copy: a folder on this machine ----
+
+const FOLDER_NOT_CREATED: &str = "leaf can't create this folder. Check the path is right, that \
+    no file already has that name, and that the user leaf runs as may create folders there.";
+const FOLDER_NOT_OPENED: &str = "leaf can't open this folder. Check the user leaf runs as may \
+    read it.";
+const FOLDER_NOT_WRITABLE: &str = "leaf can't save files in this folder. Give the user leaf runs \
+    as permission to write there, and check the disk isn't full or read-only.";
+const FOLDER_NOT_READABLE: &str = "leaf saved a test file in this folder but couldn't read it \
+    back. Check the user leaf runs as may read files there.";
+const FOLDER_WRONG_BYTES: &str = "leaf saved a test file in this folder and read back something \
+    else. Check the disk, or choose another folder.";
+const FOLDER_NOT_DELETABLE: &str = "leaf can save files in this folder but can't remove them. \
+    Give the user leaf runs as full access to the folder: leaf deletes files when a post is \
+    undone.";
+const FOLDER_TIMED_OUT: &str = "This folder didn't answer within 25 seconds. If it is on a \
+    network drive, check the drive is connected, then try again.";
 
 /// Validator that talks to the real services.
 #[derive(Debug, Clone)]
@@ -90,6 +137,8 @@ pub struct LiveValidator {
     r2_allow_http: bool,
     /// Deadline for the R2 canary.
     r2_deadline: Duration,
+    /// Limit for removing the canary's object once a step has failed.
+    r2_cleanup: Duration,
 }
 
 impl LiveValidator {
@@ -102,6 +151,7 @@ impl LiveValidator {
             discord_api: DISCORD_API.to_owned(),
             r2_allow_http: false,
             r2_deadline: R2_DEADLINE,
+            r2_cleanup: R2_CLEANUP_TIMEOUT,
         })
     }
 
@@ -186,6 +236,110 @@ impl LiveValidator {
             })
             .build()
     }
+
+    /// The storage check `leaf doctor` runs against a configured install:
+    /// writes one small object under [`DOCTOR_CANARY_KEY`], reads it back,
+    /// reads a byte range of it (what a video player asks for) and deletes
+    /// it. Once the write has succeeded, or may have (it got no answer), the
+    /// object is deleted whatever became of the other steps. Same time
+    /// limits as the setup canary.
+    pub async fn storage_round_trip(&self, r2: &R2Config) -> Result<(), StorageFailure> {
+        let canary = Canary {
+            key: DOCTOR_CANARY_KEY,
+            ranged: true,
+            deadline: self.r2_deadline,
+            cleanup: self.r2_cleanup,
+        };
+        self.run_canary(r2, canary, "doctor").await
+    }
+
+    /// Runs `canary` against the bucket (or the folder) `r2` names and puts
+    /// a failure into words. `who` (setup or doctor) labels the log line
+    /// that carries the raw cause.
+    async fn run_canary(
+        &self,
+        r2: &R2Config,
+        canary: Canary,
+        who: &'static str,
+    ) -> Result<(), StorageFailure> {
+        if leaf_core::media::is_local_endpoint(&r2.endpoint) {
+            return folder_canary(&r2.endpoint, canary, who).await;
+        }
+        let unusable = |error: FieldError| StorageFailure {
+            step: None,
+            error,
+            left_behind: false,
+        };
+        if let Err(error) = addressable(r2, canary.key, self.r2_allow_http) {
+            tracing::warn!(
+                field = ?error.field,
+                "{who}: R2 settings cannot be made into a request"
+            );
+            return Err(unusable(error));
+        }
+        let store = self.r2_store(r2).map_err(|e| {
+            tracing::warn!(
+                error = %mask_keys(&e.to_string(), r2),
+                "{who}: R2 settings refused before any request"
+            );
+            unusable(FieldError::new(Field::R2Endpoint, ENDPOINT_UNUSABLE))
+        })?;
+        run(&store, canary).await.map_err(|failure| {
+            let error = match &failure.error {
+                CanaryError::Store(e) => {
+                    tracing::warn!(
+                        step = failure.step.as_str(),
+                        error = %mask_keys(&e.to_string(), r2),
+                        "{who}: R2 check failed"
+                    );
+                    r2_failure(failure.step, e, &r2.bucket)
+                }
+                CanaryError::WrongBytes => {
+                    tracing::warn!(
+                        step = failure.step.as_str(),
+                        "{who}: R2 returned other bytes than were stored"
+                    );
+                    FieldError::new(Field::R2Endpoint, R2_WRONG_BYTES)
+                }
+                CanaryError::TimedOut => {
+                    tracing::warn!(
+                        step = failure.step.as_str(),
+                        deadline_secs = canary.deadline.as_secs(),
+                        "{who}: R2 check timed out"
+                    );
+                    FieldError::new(Field::R2Endpoint, R2_TIMED_OUT)
+                }
+            };
+            if failure.left_behind {
+                tracing::warn!(
+                    key = canary.key,
+                    step = failure.step.as_str(),
+                    "{who}: the test object could not be removed and may still be in the bucket"
+                );
+            }
+            StorageFailure {
+                step: Some(failure.step),
+                error,
+                left_behind: failure.left_behind,
+            }
+        })
+    }
+}
+
+/// Why [`LiveValidator::storage_round_trip`] failed.
+#[derive(Debug, PartialEq, Eq)]
+pub struct StorageFailure {
+    /// The step that failed; `None` when the settings were refused before
+    /// any request was made (for a folder: before anything was written).
+    pub step: Option<Step>,
+    /// The setting at fault, and one plain sentence that says what to change.
+    /// For a folder the setting is always [`Field::StorageFolder`].
+    pub error: FieldError,
+    /// The test object could not be removed afterwards and may still be in
+    /// the bucket (or folder) under the canary's key. When `step` is anything but the
+    /// write, it was written and is there. When `step` is the write, the
+    /// write got no answer, so whether the object was stored is not known.
+    pub left_behind: bool,
 }
 
 impl CredentialValidator for LiveValidator {
@@ -204,31 +358,15 @@ impl CredentialValidator for LiveValidator {
     }
 
     async fn validate_r2(&self, r2: &R2Config) -> Result<(), FieldError> {
-        let store = self.r2_store(r2).map_err(|e| {
-            tracing::warn!(
-                error = %mask_keys(&e.to_string(), r2),
-                "setup: R2 settings refused before any request"
-            );
-            FieldError::new(Field::R2Endpoint, ENDPOINT_UNUSABLE)
-        })?;
-        match tokio::time::timeout(self.r2_deadline, canary(&store)).await {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err((step, e))) => {
-                tracing::warn!(
-                    step = step.as_str(),
-                    error = %mask_keys(&e.to_string(), r2),
-                    "setup: R2 check failed"
-                );
-                Err(r2_failure(step, &e, &r2.bucket))
-            }
-            Err(_elapsed) => {
-                tracing::warn!(
-                    deadline_secs = self.r2_deadline.as_secs(),
-                    "setup: R2 check timed out"
-                );
-                Err(FieldError::new(Field::R2Endpoint, R2_TIMED_OUT))
-            }
-        }
+        let canary = Canary {
+            key: CANARY_KEY,
+            ranged: false,
+            deadline: self.r2_deadline,
+            cleanup: self.r2_cleanup,
+        };
+        self.run_canary(r2, canary, "setup")
+            .await
+            .map_err(|failure| failure.error)
     }
 }
 
@@ -373,36 +511,346 @@ fn discord_unavailable(status: StatusCode) -> FieldError {
     )
 }
 
+// ---- a folder on this machine ----
+
+/// The canary against a folder on this machine: the same write, read and
+/// delete, in the store run mode builds for that folder
+/// (`leaf_core::media::local_store`), which creates the folder when it is
+/// not there. No request leaves the machine.
+async fn folder_canary(
+    endpoint: &str,
+    canary: Canary,
+    who: &'static str,
+) -> Result<(), StorageFailure> {
+    let refused = |message: &str| StorageFailure {
+        step: None,
+        error: FieldError::new(Field::StorageFolder, message),
+        left_behind: false,
+    };
+    let Some(dir) = leaf_core::media::local_store_dir(endpoint) else {
+        tracing::warn!("{who}: the storage folder is not given by its full path");
+        return Err(refused(FOLDER_NOT_ABSOLUTE));
+    };
+    // Opening the folder may create it. That is file work, so it runs off
+    // the runtime, and under the canary's deadline: a folder on a network
+    // drive that has gone away can hang.
+    let started = tokio::time::Instant::now();
+    let opening = tokio::task::spawn_blocking({
+        let dir = dir.clone();
+        move || leaf_core::media::local_store(&dir)
+    });
+    let store = match tokio::time::timeout_at(started + canary.deadline, opening).await {
+        Ok(Ok(Ok(store))) => store,
+        Ok(Ok(Err(e))) => {
+            tracing::warn!(error = %e, "{who}: the storage folder cannot be used");
+            return Err(refused(match e {
+                LocalStoreError::Create { .. } => FOLDER_NOT_CREATED,
+                LocalStoreError::Open { .. } => FOLDER_NOT_OPENED,
+                LocalStoreError::NotAbsolute => FOLDER_NOT_ABSOLUTE,
+            }));
+        }
+        Ok(Err(e)) => {
+            tracing::warn!(
+                folder = %dir.display(),
+                error = %e,
+                "{who}: opening the storage folder did not finish"
+            );
+            return Err(refused(FOLDER_NOT_OPENED));
+        }
+        Err(_elapsed) => {
+            tracing::warn!(
+                folder = %dir.display(),
+                deadline_secs = canary.deadline.as_secs(),
+                "{who}: opening the storage folder timed out"
+            );
+            return Err(refused(FOLDER_TIMED_OUT));
+        }
+    };
+    let canary = Canary {
+        deadline: canary.deadline.saturating_sub(started.elapsed()),
+        ..canary
+    };
+    run(&store, canary).await.map_err(|failure| {
+        let cause = match &failure.error {
+            CanaryError::Store(e) => e.to_string(),
+            CanaryError::WrongBytes => "other bytes than were stored came back".to_owned(),
+            CanaryError::TimedOut => "the deadline passed".to_owned(),
+        };
+        tracing::warn!(
+            step = failure.step.as_str(),
+            folder = %dir.display(),
+            cause,
+            "{who}: storage folder check failed"
+        );
+        if failure.left_behind {
+            tracing::warn!(
+                key = canary.key,
+                folder = %dir.display(),
+                "{who}: the test file could not be removed and may still be in the folder"
+            );
+        }
+        StorageFailure {
+            step: Some(failure.step),
+            error: FieldError::new(
+                Field::StorageFolder,
+                folder_failure(failure.step, &failure.error),
+            ),
+            left_behind: failure.left_behind,
+        }
+    })
+}
+
+/// What to say about a canary step a folder failed.
+const fn folder_failure(step: Step, error: &CanaryError) -> &'static str {
+    match (error, step) {
+        (CanaryError::TimedOut, _) => FOLDER_TIMED_OUT,
+        (CanaryError::WrongBytes, _) => FOLDER_WRONG_BYTES,
+        (CanaryError::Store(_), Step::Write) => FOLDER_NOT_WRITABLE,
+        (CanaryError::Store(_), Step::Read | Step::ReadRange) => FOLDER_NOT_READABLE,
+        (CanaryError::Store(_), Step::Delete) => FOLDER_NOT_DELETABLE,
+    }
+}
+
 // ---- R2 ----
+
+/// Checks that the S3 client can address `key` in this bucket at this
+/// endpoint, and names the setting at fault when it cannot.
+///
+/// The client builds its request URL as `<endpoint>/<bucket>/<key>` and
+/// panics on one that is not a URL (`object_store` 0.12: a space in the
+/// bucket name is enough). Such settings are refused here, in words, with
+/// the parser the client uses.
+fn addressable(r2: &R2Config, key: &str, allow_http: bool) -> Result<(), FieldError> {
+    let endpoint = r2.endpoint.trim_end_matches('/');
+    let endpoint_ok = endpoint.parse::<axum::http::Uri>().is_ok()
+        && reqwest::Url::parse(endpoint).is_ok_and(|url| {
+            url.host_str().is_some()
+                && (url.scheme() == "https" || (allow_http && url.scheme() == "http"))
+        });
+    if !endpoint_ok {
+        return Err(FieldError::new(Field::R2Endpoint, ENDPOINT_UNUSABLE));
+    }
+    let request = format!("{endpoint}/{}/{key}", r2.bucket);
+    if r2.bucket.contains('/') || request.parse::<axum::http::Uri>().is_err() {
+        return Err(FieldError::new(Field::R2Bucket, BUCKET_NAME_INVALID));
+    }
+    Ok(())
+}
 
 /// The canary's steps, in order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Step {
+pub enum Step {
+    /// Storing the test object.
     Write,
+    /// Reading all of it back.
     Read,
+    /// Reading a byte range of it.
+    ReadRange,
+    /// Removing it.
     Delete,
 }
 
 impl Step {
-    const fn as_str(self) -> &'static str {
+    /// The step as a word for a log line or a sentence.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Write => "write",
             Self::Read => "read",
+            Self::ReadRange => "ranged read",
             Self::Delete => "delete",
         }
     }
 }
 
+/// One canary run: where it writes, how much it reads, how long it may take.
+#[derive(Debug, Clone, Copy)]
+struct Canary {
+    /// Key of the object written and removed.
+    key: &'static str,
+    /// Also read a byte range of the object.
+    ranged: bool,
+    /// Limit for the write and the reads together; the delete that follows
+    /// them unharmed shares it.
+    deadline: Duration,
+    /// Limit for removing the object once a step has failed.
+    cleanup: Duration,
+}
+
+/// What stopped a canary step.
+#[derive(Debug)]
+enum CanaryError {
+    /// The store refused the step, or could not be reached.
+    Store(object_store::Error),
+    /// The store answered, with other bytes than were written.
+    WrongBytes,
+    /// The deadline passed during the step.
+    TimedOut,
+}
+
+/// A canary that did not finish.
+#[derive(Debug)]
+struct CanaryFailure {
+    /// The first step that failed.
+    step: Step,
+    error: CanaryError,
+    /// The object was written and is still in the bucket.
+    left_behind: bool,
+}
+
+/// Runs one step under the deadline.
+async fn timed<T>(
+    deadline: tokio::time::Instant,
+    step: Step,
+    work: impl Future<Output = object_store::Result<T>>,
+) -> Result<T, (Step, CanaryError)> {
+    match tokio::time::timeout_at(deadline, work).await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(e)) => Err((step, CanaryError::Store(e))),
+        Err(_elapsed) => Err((step, CanaryError::TimedOut)),
+    }
+}
+
+/// What the canary asks of a store: the four requests it makes. Every
+/// [`ObjectStore`] answers them; the tests also hand it stores that lose an
+/// answer or never give one, which no real store does on demand.
+trait CanaryStore: Sync {
+    /// Stores `body` at `path`.
+    fn put(
+        &self,
+        path: &ObjectPath,
+        body: bytes::Bytes,
+    ) -> impl Future<Output = object_store::Result<()>> + Send;
+
+    /// Reads all of the object at `path`.
+    fn get(
+        &self,
+        path: &ObjectPath,
+    ) -> impl Future<Output = object_store::Result<bytes::Bytes>> + Send;
+
+    /// Reads the bytes in `range` of the object at `path`.
+    fn get_range(
+        &self,
+        path: &ObjectPath,
+        range: Range<u64>,
+    ) -> impl Future<Output = object_store::Result<bytes::Bytes>> + Send;
+
+    /// Removes the object at `path`.
+    fn delete(&self, path: &ObjectPath) -> impl Future<Output = object_store::Result<()>> + Send;
+}
+
+impl<S: ObjectStore> CanaryStore for S {
+    async fn put(&self, path: &ObjectPath, body: bytes::Bytes) -> object_store::Result<()> {
+        ObjectStore::put(self, path, body.into()).await.map(drop)
+    }
+
+    async fn get(&self, path: &ObjectPath) -> object_store::Result<bytes::Bytes> {
+        ObjectStore::get(self, path).await?.bytes().await
+    }
+
+    async fn get_range(
+        &self,
+        path: &ObjectPath,
+        range: Range<u64>,
+    ) -> object_store::Result<bytes::Bytes> {
+        ObjectStore::get_range(self, path, range).await
+    }
+
+    async fn delete(&self, path: &ObjectPath) -> object_store::Result<()> {
+        ObjectStore::delete(self, path).await
+    }
+}
+
 /// Writes, reads back and deletes one small object: proves the endpoint,
 /// bucket and keys, and that the token may delete (leaf removes media).
-async fn canary(store: &AmazonS3) -> Result<(), (Step, object_store::Error)> {
-    let path = ObjectPath::from(CANARY_KEY);
-    store
-        .put(&path, bytes::Bytes::from_static(b"leaf").into())
-        .await
-        .map_err(|e| (Step::Write, e))?;
-    store.get(&path).await.map_err(|e| (Step::Read, e))?;
-    store.delete(&path).await.map_err(|e| (Step::Delete, e))?;
+///
+/// Once the write has succeeded the object is deleted whatever became of
+/// the reads, so a failed check leaves nothing in the bucket. A failed read
+/// is still what is reported; the delete then only decides `left_behind`.
+/// The same goes for a write that failed without an answer (see
+/// [`may_have_landed`]): the store may hold the object all the same.
+async fn run<S: CanaryStore + ?Sized>(store: &S, canary: Canary) -> Result<(), CanaryFailure> {
+    let path = ObjectPath::from(canary.key);
+    let deadline = tokio::time::Instant::now() + canary.deadline;
+    let body = bytes::Bytes::from_static(CANARY_BODY);
+    if let Err((step, error)) = timed(deadline, Step::Write, store.put(&path, body)).await {
+        let left_behind = may_have_landed(&error) && !removed(store, &path, canary.cleanup).await;
+        return Err(CanaryFailure {
+            step,
+            error,
+            left_behind,
+        });
+    }
+    match read_back(store, &path, canary.ranged, deadline).await {
+        Ok(()) => timed(deadline, Step::Delete, store.delete(&path))
+            .await
+            .map_err(|(step, error)| CanaryFailure {
+                step,
+                error,
+                left_behind: true,
+            }),
+        Err((step, error)) => Err(CanaryFailure {
+            step,
+            error,
+            left_behind: !removed(store, &path, canary.cleanup).await,
+        }),
+    }
+}
+
+/// Removes the canary's object after a step has failed, within a limit of
+/// its own, and says whether it is gone. A store that answers that there is
+/// no such object has none to remove.
+async fn removed<S: CanaryStore + ?Sized>(store: &S, path: &ObjectPath, limit: Duration) -> bool {
+    let until = tokio::time::Instant::now() + limit;
+    match timed(until, Step::Delete, store.delete(path)).await {
+        Ok(()) | Err((_, CanaryError::Store(object_store::Error::NotFound { .. }))) => true,
+        Err(_) => false,
+    }
+}
+
+/// Whether a write that failed may have been stored all the same.
+///
+/// It may when nothing came back that says otherwise: the deadline passed,
+/// the connection was lost once it was made, or the answer was a failure on
+/// the far side (a 5xx, as a proxy gives when it loses the store's answer)
+/// and not a refusal. It cannot when the store refused the write (401, 403,
+/// 404 and the other 4xx answers) or no connection was ever made.
+fn may_have_landed(error: &CanaryError) -> bool {
+    match error {
+        CanaryError::TimedOut => true,
+        CanaryError::Store(e @ object_store::Error::Generic { .. }) => match transport_failure(e) {
+            Some(_) => !http_causes(e).any(reqwest::Error::is_connect),
+            None => answered_status(&e.to_string()).is_some_and(|status| status >= 500),
+        },
+        // The store's other errors are its refusals, and bytes that differ
+        // come from a read.
+        CanaryError::Store(_) | CanaryError::WrongBytes => false,
+    }
+}
+
+/// Reads the canary back, whole and (when `ranged`) in part, and compares
+/// what comes back with what was written.
+async fn read_back<S: CanaryStore + ?Sized>(
+    store: &S,
+    path: &ObjectPath,
+    ranged: bool,
+    deadline: tokio::time::Instant,
+) -> Result<(), (Step, CanaryError)> {
+    let whole = timed(deadline, Step::Read, store.get(path)).await?;
+    if whole.as_ref() != CANARY_BODY {
+        return Err((Step::Read, CanaryError::WrongBytes));
+    }
+    if ranged {
+        let part = timed(
+            deadline,
+            Step::ReadRange,
+            store.get_range(path, CANARY_PART_RANGE),
+        )
+        .await?;
+        if part.as_ref() != CANARY_PART {
+            return Err((Step::ReadRange, CanaryError::WrongBytes));
+        }
+    }
     Ok(())
 }
 
@@ -447,6 +895,11 @@ fn r2_failure(step: Step, e: &object_store::Error, bucket: &str) -> FieldError {
             Some(Transport::Unreachable) => {
                 FieldError::new(Field::R2Endpoint, ENDPOINT_UNREACHABLE)
             }
+            // The whole file came back a moment ago: what this endpoint
+            // refuses is the part.
+            None if step == Step::ReadRange => {
+                FieldError::new(Field::R2Endpoint, RANGE_UNSUPPORTED)
+            }
             None => FieldError::new(Field::Form, R2_UNEXPECTED),
         },
     }
@@ -477,7 +930,7 @@ fn permission_denied(step: Step, bucket: &str) -> FieldError {
             ),
         ),
         // The write has proved the bucket name: the token is at fault.
-        Step::Read => FieldError::new(
+        Step::Read | Step::ReadRange => FieldError::new(
             Field::R2AccessKeyId,
             format!(
                 "This R2 API token isn't allowed to read files in “{bucket}”. Give it Object \
@@ -501,21 +954,32 @@ enum Transport {
     Unreachable,
 }
 
-/// Finds the HTTP client's own error in the cause chain, if any.
+/// The HTTP client's own errors in the cause chain of `e`.
+fn http_causes(e: &object_store::Error) -> impl Iterator<Item = &reqwest::Error> {
+    let first: &(dyn std::error::Error + 'static) = e;
+    std::iter::successors(Some(first), |err| err.source())
+        .filter_map(|err| err.downcast_ref::<reqwest::Error>())
+}
+
+/// How the request failed, when the HTTP client says no answer arrived.
 fn transport_failure(e: &object_store::Error) -> Option<Transport> {
-    let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(e);
-    while let Some(err) = cause {
-        if let Some(http) = err.downcast_ref::<reqwest::Error>() {
-            if http.is_timeout() {
-                return Some(Transport::TimedOut);
-            }
-            if http.is_connect() || http.is_request() {
-                return Some(Transport::Unreachable);
-            }
+    http_causes(e).find_map(|http| {
+        if http.is_timeout() {
+            Some(Transport::TimedOut)
+        } else if http.is_connect() || http.is_request() {
+            Some(Transport::Unreachable)
+        } else {
+            None
         }
-        cause = err.source();
-    }
-    None
+    })
+}
+
+/// The HTTP status the S3 client quotes for an answer it took as a failure
+/// ("… non-2xx status code: 502 Bad Gateway: …").
+fn answered_status(text: &str) -> Option<u16> {
+    const MARK: &str = "status code: ";
+    let rest = text.get(text.find(MARK)? + MARK.len()..)?;
+    rest.get(..3)?.parse().ok()
 }
 
 /// The `<Code>` of an S3 XML error body quoted in `text`.
@@ -755,33 +1219,172 @@ mod tests {
 
     // ---- R2 ----
 
-    /// S3 stand-in: answers PUT with `put`, GET with the object, and DELETE
-    /// with `delete` (status, body). Bodies are S3 XML error documents.
-    async fn r2(put: (u16, &'static str), delete: (u16, &'static str)) -> Stub {
+    /// How the S3 stand-in answers a read (a `GET`, whole or ranged).
+    #[derive(Clone, Copy)]
+    enum Read {
+        /// As S3 does: the stored object, or the part of it asked for.
+        Stored,
+        /// With this status and S3 XML error body.
+        Fails(u16, &'static str),
+        /// With these bytes instead of the stored ones.
+        Bytes(&'static [u8]),
+        /// With the whole object and a 200, whatever range was asked for.
+        IgnoresRange,
+    }
+
+    /// What the S3 stand-in does with each kind of request. `put` and
+    /// `delete` are (status, body); bodies are S3 XML error documents.
+    #[derive(Clone, Copy)]
+    struct S3 {
+        put: (u16, &'static str),
+        /// The object is stored even when `put` answers a failure, as when
+        /// something between leaf and the store loses the store's answer.
+        put_lands: bool,
+        get: Read,
+        range: Read,
+        delete: (u16, &'static str),
+    }
+
+    impl S3 {
+        /// A store where everything works.
+        const WORKING: Self = Self {
+            put: (200, ""),
+            put_lands: false,
+            get: Read::Stored,
+            range: Read::Stored,
+            delete: (204, ""),
+        };
+    }
+
+    /// What reached the stand-in, and the object it holds.
+    #[derive(Default)]
+    struct S3State {
+        puts: AtomicU32,
+        gets: AtomicU32,
+        ranges: AtomicU32,
+        deletes: AtomicU32,
+        /// Key and bytes of the stored object. A successful PUT stores it,
+        /// a successful DELETE removes it.
+        object: std::sync::Mutex<Option<(String, bytes::Bytes)>>,
+    }
+
+    impl S3State {
+        fn stored(&self) -> Option<(String, bytes::Bytes)> {
+            self.object.lock().unwrap().clone()
+        }
+
+        /// (PUTs, whole GETs, ranged GETs, DELETEs) received.
+        fn calls(&self) -> (u32, u32, u32, u32) {
+            (
+                self.puts.load(Ordering::SeqCst),
+                self.gets.load(Ordering::SeqCst),
+                self.ranges.load(Ordering::SeqCst),
+                self.deletes.load(Ordering::SeqCst),
+            )
+        }
+    }
+
+    /// `bytes=a-b` as the half-open span it selects.
+    fn requested_range(headers: &HeaderMap) -> Option<Range<usize>> {
+        let spec = headers.get(header::RANGE)?.to_str().ok()?;
+        let (first, last) = spec.strip_prefix("bytes=")?.split_once('-')?;
+        Some(first.parse().ok()?..last.parse::<usize>().ok()? + 1)
+    }
+
+    fn object_headers() -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::ETAG, "\"e1\"".parse().unwrap());
+        headers.insert(
+            header::LAST_MODIFIED,
+            "Wed, 21 Oct 2015 07:28:00 GMT".parse().unwrap(),
+        );
+        headers
+    }
+
+    /// S3 stand-in holding at most one object.
+    async fn s3(behaviour: S3, state: Arc<S3State>) -> Stub {
         let router = Router::new().route(
             "/{*key}",
-            any(move |method: Method| async move {
-                let answer = |(status, body): (u16, &'static str)| -> Response {
-                    let mut headers = HeaderMap::new();
-                    headers.insert(header::ETAG, "\"e1\"".parse().unwrap());
-                    (StatusCode::from_u16(status).unwrap(), headers, body).into_response()
-                };
-                match method {
-                    Method::PUT => answer(put),
-                    Method::DELETE => answer(delete),
-                    _ => {
-                        let mut headers = HeaderMap::new();
-                        headers.insert(header::ETAG, "\"e1\"".parse().unwrap());
-                        headers.insert(
-                            header::LAST_MODIFIED,
-                            "Wed, 21 Oct 2015 07:28:00 GMT".parse().unwrap(),
-                        );
-                        (StatusCode::OK, headers, "leaf").into_response()
+            any(
+                move |method: Method,
+                      uri: axum::http::Uri,
+                      headers: HeaderMap,
+                      body: bytes::Bytes| async move {
+                    let refuse = |(status, body): (u16, &'static str)| -> Response {
+                        (StatusCode::from_u16(status).unwrap(), body).into_response()
+                    };
+                    let key = uri.path().to_owned();
+                    match method {
+                        Method::PUT => {
+                            state.puts.fetch_add(1, Ordering::SeqCst);
+                            let refused = behaviour.put.0 >= 300;
+                            if !refused || behaviour.put_lands {
+                                *state.object.lock().unwrap() = Some((key, body));
+                            }
+                            if refused {
+                                return refuse(behaviour.put);
+                            }
+                            (StatusCode::OK, object_headers()).into_response()
+                        }
+                        Method::DELETE => {
+                            state.deletes.fetch_add(1, Ordering::SeqCst);
+                            if behaviour.delete.0 >= 300 {
+                                return refuse(behaviour.delete);
+                            }
+                            *state.object.lock().unwrap() = None;
+                            StatusCode::NO_CONTENT.into_response()
+                        }
+                        _ => {
+                            let range = requested_range(&headers);
+                            let read = if range.is_some() {
+                                state.ranges.fetch_add(1, Ordering::SeqCst);
+                                behaviour.range
+                            } else {
+                                state.gets.fetch_add(1, Ordering::SeqCst);
+                                behaviour.get
+                            };
+                            let stored = state.stored().filter(|(at, _)| *at == key);
+                            let Some((_, stored)) = stored else {
+                                return refuse((404, leak(s3_error("NoSuchKey"))));
+                            };
+                            let object = match read {
+                                Read::Fails(status, body) => return refuse((status, body)),
+                                Read::IgnoresRange => {
+                                    return (StatusCode::OK, object_headers(), stored)
+                                        .into_response();
+                                }
+                                Read::Bytes(other) => bytes::Bytes::from_static(other),
+                                Read::Stored => stored,
+                            };
+                            let Some(range) = range else {
+                                return (StatusCode::OK, object_headers(), object).into_response();
+                            };
+                            let mut headers = object_headers();
+                            headers.insert(
+                                header::CONTENT_RANGE,
+                                format!("bytes {}-{}/{}", range.start, range.end - 1, object.len())
+                                    .parse()
+                                    .unwrap(),
+                            );
+                            (StatusCode::PARTIAL_CONTENT, headers, object.slice(range))
+                                .into_response()
+                        }
                     }
-                }
-            }),
+                },
+            ),
         );
         serve(router).await
+    }
+
+    /// S3 stand-in that answers PUT with `put` and DELETE with `delete`,
+    /// and reads as S3 does.
+    async fn r2(put: (u16, &'static str), delete: (u16, &'static str)) -> Stub {
+        let behaviour = S3 {
+            put,
+            delete,
+            ..S3::WORKING
+        };
+        s3(behaviour, Arc::default()).await
     }
 
     fn s3_error(code: &str) -> String {
@@ -905,8 +1508,11 @@ mod tests {
                 });
             }
         });
+        // A write that got no answer is followed by an attempt to remove
+        // the object; here nothing would answer that either.
         let v = LiveValidator {
             r2_deadline: Duration::from_millis(200),
+            r2_cleanup: Duration::ZERO,
             ..validator("http://unused")
         };
         let err = v
@@ -915,6 +1521,509 @@ mod tests {
             .unwrap_err();
         hold.abort();
         assert_eq!(err, FieldError::new(Field::R2Endpoint, R2_TIMED_OUT));
+    }
+
+    // ---- the round trip `leaf doctor` runs ----
+
+    /// Runs the doctor's round trip against a stand-in that behaves as
+    /// told; returns the outcome and what the stand-in saw.
+    async fn round_trip(behaviour: S3) -> (Result<(), StorageFailure>, Arc<S3State>) {
+        let state = Arc::new(S3State::default());
+        let stub = s3(behaviour, Arc::clone(&state)).await;
+        let v = validator("http://unused");
+        let outcome = v.storage_round_trip(&r2_config(&stub.base)).await;
+        (outcome, state)
+    }
+
+    #[test]
+    fn the_ranged_read_asks_for_a_real_part_of_the_canary() {
+        let range = usize::try_from(CANARY_PART_RANGE.start).unwrap()
+            ..usize::try_from(CANARY_PART_RANGE.end).unwrap();
+        assert_eq!(&CANARY_BODY[range], CANARY_PART);
+        // A part, not the whole thing: a store that ignores the range must
+        // not pass by accident.
+        assert!(CANARY_PART.len() < CANARY_BODY.len());
+    }
+
+    #[tokio::test]
+    async fn round_trip_writes_reads_reads_a_part_and_deletes() {
+        let (outcome, state) = round_trip(S3::WORKING).await;
+        assert_eq!(outcome, Ok(()));
+        assert_eq!(state.calls(), (1, 1, 1, 1));
+        assert_eq!(state.stored(), None, "the canary is gone afterwards");
+    }
+
+    #[tokio::test]
+    async fn round_trip_uses_its_own_throwaway_key() {
+        // Held at the delete, so the object can be looked at.
+        let behaviour = S3 {
+            delete: (403, leak(s3_error("AccessDenied"))),
+            ..S3::WORKING
+        };
+        let (outcome, state) = round_trip(behaviour).await;
+        let (key, bytes) = state.stored().unwrap();
+        assert_eq!(key, format!("/leaf/{DOCTOR_CANARY_KEY}"));
+        assert_eq!(bytes.as_ref(), CANARY_BODY);
+        // Nothing leaf archives lives outside `g/`.
+        assert!(!DOCTOR_CANARY_KEY.starts_with("g/"));
+
+        // The delete is the failure, and the object is reported as left.
+        let failure = outcome.unwrap_err();
+        assert_eq!(failure.step, Some(Step::Delete));
+        assert!(failure.left_behind);
+        assert_eq!(failure.error.field, Field::R2AccessKeyId);
+        assert!(failure.error.message.contains("not delete"), "{failure:?}");
+    }
+
+    #[tokio::test]
+    async fn the_canary_is_removed_when_a_read_fails() {
+        // (what the stand-in does, step blamed, field blamed)
+        let cases = [
+            (
+                S3 {
+                    get: Read::Fails(403, leak(s3_error("AccessDenied"))),
+                    ..S3::WORKING
+                },
+                Step::Read,
+                Field::R2AccessKeyId,
+            ),
+            (
+                S3 {
+                    get: Read::Bytes(b"something else"),
+                    ..S3::WORKING
+                },
+                Step::Read,
+                Field::R2Endpoint,
+            ),
+            (
+                S3 {
+                    range: Read::Fails(403, leak(s3_error("AccessDenied"))),
+                    ..S3::WORKING
+                },
+                Step::ReadRange,
+                Field::R2AccessKeyId,
+            ),
+            (
+                S3 {
+                    range: Read::IgnoresRange,
+                    ..S3::WORKING
+                },
+                Step::ReadRange,
+                Field::R2Endpoint,
+            ),
+            (
+                S3 {
+                    range: Read::Bytes(b"leaf STORAGE check"),
+                    ..S3::WORKING
+                },
+                Step::ReadRange,
+                Field::R2Endpoint,
+            ),
+        ];
+        for (behaviour, step, field) in cases {
+            let (outcome, state) = round_trip(behaviour).await;
+            let failure = outcome.unwrap_err();
+            assert_eq!(failure.step, Some(step), "{failure:?}");
+            assert_eq!(failure.error.field, field, "{failure:?}");
+            assert!(!failure.left_behind, "{failure:?}");
+            let (_, _, _, deletes) = state.calls();
+            assert_eq!(deletes, 1, "{failure:?}");
+            assert_eq!(state.stored(), None, "{failure:?}");
+            // One plain sentence: no XML, no request details, no keys.
+            assert!(!failure.error.message.contains("</"), "{failure:?}");
+            assert!(!failure.error.message.contains("127.0.0.1"), "{failure:?}");
+            assert!(!failure.error.message.contains("AKID"), "{failure:?}");
+            assert!(!failure.error.message.contains("SECRET"), "{failure:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_store_without_byte_ranges_is_named() {
+        let behaviour = S3 {
+            range: Read::IgnoresRange,
+            ..S3::WORKING
+        };
+        let (outcome, _state) = round_trip(behaviour).await;
+        assert_eq!(outcome.unwrap_err().error.message, RANGE_UNSUPPORTED);
+
+        let behaviour = S3 {
+            get: Read::Bytes(b"something else"),
+            ..S3::WORKING
+        };
+        let (outcome, _state) = round_trip(behaviour).await;
+        assert_eq!(outcome.unwrap_err().error.message, R2_WRONG_BYTES);
+    }
+
+    #[tokio::test]
+    async fn a_failed_read_is_reported_even_when_the_cleanup_fails_too() {
+        let behaviour = S3 {
+            get: Read::Fails(403, leak(s3_error("AccessDenied"))),
+            delete: (403, leak(s3_error("AccessDenied"))),
+            ..S3::WORKING
+        };
+        let (outcome, state) = round_trip(behaviour).await;
+        let failure = outcome.unwrap_err();
+        assert_eq!(failure.step, Some(Step::Read));
+        assert!(failure.left_behind);
+        assert!(state.stored().is_some());
+    }
+
+    #[tokio::test]
+    async fn a_refused_write_leaves_nothing_to_remove() {
+        // S3's refusals, typed by the client (403, 404) or not (400): the
+        // store has said the object is not there, so nothing more is asked.
+        for put in [
+            (403, s3_error("AccessDenied")),
+            (404, s3_error("NoSuchBucket")),
+            (400, s3_error("InvalidArgument")),
+        ] {
+            let behaviour = S3 {
+                put: (put.0, leak(put.1)),
+                ..S3::WORKING
+            };
+            let (outcome, state) = round_trip(behaviour).await;
+            let failure = outcome.unwrap_err();
+            assert_eq!(failure.step, Some(Step::Write), "{failure:?}");
+            assert!(!failure.left_behind, "{failure:?}");
+            assert_eq!(state.calls(), (1, 0, 0, 0), "{failure:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_write_whose_answer_was_lost_is_removed_all_the_same() {
+        // The store took the object, and what came back was a 502 from
+        // something in between: no refusal, so the object may be there.
+        let behaviour = S3 {
+            put: (502, "<html>Bad gateway</html>"),
+            put_lands: true,
+            ..S3::WORKING
+        };
+        let (outcome, state) = round_trip(behaviour).await;
+        let failure = outcome.unwrap_err();
+        assert_eq!(failure.step, Some(Step::Write));
+        let (_, gets, ranges, deletes) = state.calls();
+        assert_eq!((gets, ranges, deletes), (0, 0, 1));
+        assert_eq!(state.stored(), None);
+        assert!(!failure.left_behind);
+
+        // When it cannot be removed either, that is reported.
+        let behaviour = S3 {
+            delete: (403, leak(s3_error("AccessDenied"))),
+            ..behaviour
+        };
+        let (outcome, state) = round_trip(behaviour).await;
+        let failure = outcome.unwrap_err();
+        assert_eq!(failure.step, Some(Step::Write));
+        assert!(failure.left_behind);
+        assert!(state.stored().is_some());
+
+        // A store that answers that there is no such object has none left.
+        let behaviour = S3 {
+            put_lands: false,
+            delete: (404, leak(s3_error("NoSuchKey"))),
+            ..behaviour
+        };
+        let (outcome, state) = round_trip(behaviour).await;
+        let failure = outcome.unwrap_err();
+        assert_eq!(failure.step, Some(Step::Write));
+        assert_eq!(state.calls().3, 1);
+        assert!(!failure.left_behind);
+    }
+
+    #[tokio::test]
+    async fn a_write_cut_off_on_the_way_is_followed_by_a_removal() {
+        // Takes each request and hangs up without a word: the write may
+        // have arrived. The method of every request is kept.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let record = Arc::clone(&seen);
+        let hang_up = tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                let mut head = Vec::new();
+                let mut buffer = [0_u8; 1024];
+                while !head.windows(4).any(|end| end == b"\r\n\r\n") {
+                    if socket.readable().await.is_err() {
+                        break;
+                    }
+                    match socket.try_read(&mut buffer) {
+                        Ok(0) => break,
+                        Ok(read) => head.extend_from_slice(&buffer[..read]),
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                        Err(_) => break,
+                    }
+                }
+                let head = String::from_utf8_lossy(&head);
+                let method = head.split_whitespace().next().unwrap_or_default();
+                record.lock().unwrap().push(method.to_owned());
+            }
+        });
+        let v = validator("http://unused");
+        let failure = v
+            .storage_round_trip(&r2_config(&format!("http://{addr}")))
+            .await
+            .unwrap_err();
+        hang_up.abort();
+        assert_eq!(failure.step, Some(Step::Write));
+        assert_eq!(
+            failure.error,
+            FieldError::new(Field::R2Endpoint, ENDPOINT_UNREACHABLE)
+        );
+        let seen = seen.lock().unwrap().clone();
+        assert!(seen.iter().any(|method| method == "DELETE"), "{seen:?}");
+        // The removal got no answer either, so the object may be there.
+        assert!(failure.left_behind);
+
+        // An endpoint no connection could be made to has taken nothing.
+        let failure = v
+            .storage_round_trip(&r2_config(&closed_port().await))
+            .await
+            .unwrap_err();
+        assert_eq!(failure.step, Some(Step::Write));
+        assert!(!failure.left_behind);
+    }
+
+    // ---- steps that never answer ----
+
+    /// A store for the canary whose steps can be made to never answer,
+    /// which the HTTP stand-in could only do by letting real time pass.
+    #[derive(Default)]
+    struct Fickle {
+        /// What it holds.
+        inner: object_store::memory::InMemory,
+        /// A write is stored, and its answer never comes.
+        put_goes_unanswered: bool,
+        get_hangs: bool,
+        delete_hangs: bool,
+        deletes: AtomicU32,
+    }
+
+    impl Fickle {
+        async fn holds_nothing(&self) -> bool {
+            let listing = self.inner.list_with_delimiter(None).await.unwrap();
+            listing.objects.is_empty()
+        }
+    }
+
+    impl CanaryStore for Fickle {
+        async fn put(&self, path: &ObjectPath, body: bytes::Bytes) -> object_store::Result<()> {
+            CanaryStore::put(&self.inner, path, body).await?;
+            if self.put_goes_unanswered {
+                return std::future::pending().await;
+            }
+            Ok(())
+        }
+
+        async fn get(&self, path: &ObjectPath) -> object_store::Result<bytes::Bytes> {
+            if self.get_hangs {
+                return std::future::pending().await;
+            }
+            CanaryStore::get(&self.inner, path).await
+        }
+
+        async fn get_range(
+            &self,
+            path: &ObjectPath,
+            range: Range<u64>,
+        ) -> object_store::Result<bytes::Bytes> {
+            CanaryStore::get_range(&self.inner, path, range).await
+        }
+
+        async fn delete(&self, path: &ObjectPath) -> object_store::Result<()> {
+            self.deletes.fetch_add(1, Ordering::SeqCst);
+            if self.delete_hangs {
+                return std::future::pending().await;
+            }
+            CanaryStore::delete(&self.inner, path).await
+        }
+    }
+
+    /// A canary with no time at all: a step passes only if its answer is
+    /// there the moment it is asked for. `Fickle` answers at once or never,
+    /// so no clock decides a test that uses this.
+    const NO_TIME: Canary = Canary {
+        key: DOCTOR_CANARY_KEY,
+        ranged: true,
+        deadline: Duration::ZERO,
+        cleanup: Duration::ZERO,
+    };
+
+    #[tokio::test]
+    async fn fickle_is_an_ordinary_store_until_told_otherwise() {
+        let store = Fickle::default();
+        run(&store, NO_TIME).await.unwrap();
+        assert_eq!(store.deletes.load(Ordering::SeqCst), 1);
+        assert!(store.holds_nothing().await);
+    }
+
+    #[tokio::test]
+    async fn the_canary_is_removed_when_a_read_runs_out_of_time() {
+        let store = Fickle {
+            get_hangs: true,
+            ..Fickle::default()
+        };
+        let failure = run(&store, NO_TIME).await.unwrap_err();
+        assert_eq!(failure.step, Step::Read);
+        assert!(
+            matches!(failure.error, CanaryError::TimedOut),
+            "{failure:?}"
+        );
+        // The deadline had passed; the delete still went out and worked.
+        assert_eq!(store.deletes.load(Ordering::SeqCst), 1);
+        assert!(!failure.left_behind);
+        assert!(store.holds_nothing().await);
+    }
+
+    #[tokio::test]
+    async fn the_canary_is_removed_when_its_write_runs_out_of_time() {
+        // Stored, and never answered: the deadline is what ends the write.
+        let store = Fickle {
+            put_goes_unanswered: true,
+            ..Fickle::default()
+        };
+        let failure = run(&store, NO_TIME).await.unwrap_err();
+        assert_eq!(failure.step, Step::Write);
+        assert!(
+            matches!(failure.error, CanaryError::TimedOut),
+            "{failure:?}"
+        );
+        assert_eq!(store.deletes.load(Ordering::SeqCst), 1);
+        assert!(!failure.left_behind);
+        assert!(store.holds_nothing().await);
+    }
+
+    #[tokio::test]
+    async fn an_object_that_cannot_be_removed_in_time_is_reported() {
+        for (store, step) in [
+            (
+                Fickle {
+                    get_hangs: true,
+                    delete_hangs: true,
+                    ..Fickle::default()
+                },
+                Step::Read,
+            ),
+            (
+                Fickle {
+                    put_goes_unanswered: true,
+                    delete_hangs: true,
+                    ..Fickle::default()
+                },
+                Step::Write,
+            ),
+        ] {
+            let failure = run(&store, NO_TIME).await.unwrap_err();
+            assert_eq!(failure.step, step);
+            assert_eq!(store.deletes.load(Ordering::SeqCst), 1, "{step:?}");
+            assert!(failure.left_behind, "{step:?}");
+            assert!(!store.holds_nothing().await, "{step:?}");
+        }
+    }
+
+    #[test]
+    fn the_status_of_a_failed_answer_is_read_from_the_clients_message() {
+        let said = |answer: &str| {
+            answered_status(&format!(
+                "Generic S3 error: Error performing PUT http://e/b/k in 12ms, after 1 retries, \
+                 max_retries: 1, retry_timeout: 10s  - Server returned non-2xx status code: \
+                 {answer}"
+            ))
+        };
+        assert_eq!(said("502 Bad Gateway: <html>"), Some(502));
+        assert_eq!(said("400 Bad Request: "), Some(400));
+        assert_eq!(said("50"), None);
+        assert_eq!(said("teapot"), None);
+        assert_eq!(answered_status("error sending request"), None);
+        assert_eq!(answered_status(""), None);
+    }
+
+    #[tokio::test]
+    async fn an_unusable_endpoint_fails_before_any_step() {
+        let v = validator("http://unused");
+        let failure = v
+            .storage_round_trip(&r2_config("not a url"))
+            .await
+            .unwrap_err();
+        assert_eq!(failure.step, None);
+        assert_eq!(
+            failure.error,
+            FieldError::new(Field::R2Endpoint, ENDPOINT_UNUSABLE)
+        );
+    }
+
+    #[tokio::test]
+    async fn settings_the_s3_client_cannot_address_are_refused_in_words() {
+        // The S3 client panics on a request URL that is not one, so each of
+        // these must be answered before it is asked: no request arrives.
+        let state = Arc::new(S3State::default());
+        let stub = s3(S3::WORKING, Arc::clone(&state)).await;
+        let v = validator("http://unused");
+        for bucket in ["my bucket", "leaf\tphotos", "a/b", "caf\u{e9} <1>"] {
+            let cfg = R2Config {
+                bucket: bucket.to_owned(),
+                ..r2_config(&stub.base)
+            };
+            let expected = FieldError::new(Field::R2Bucket, BUCKET_NAME_INVALID);
+            assert_eq!(v.validate_r2(&cfg).await, Err(expected), "{bucket:?}");
+            let failure = v.storage_round_trip(&cfg).await.unwrap_err();
+            assert_eq!(failure.step, None, "{bucket:?}");
+            assert_eq!(failure.error.field, Field::R2Bucket, "{bucket:?}");
+        }
+        for endpoint in [
+            "not a url",
+            "acc.r2.cloudflarestorage.com",
+            "ftp://acc.example",
+        ] {
+            let cfg = r2_config(endpoint);
+            let expected = FieldError::new(Field::R2Endpoint, ENDPOINT_UNUSABLE);
+            assert_eq!(v.validate_r2(&cfg).await, Err(expected), "{endpoint:?}");
+        }
+        assert_eq!(state.calls(), (0, 0, 0, 0));
+
+        // Plain HTTP is for the stand-ins only: the real validator, like
+        // run mode's store, refuses it.
+        let live = LiveValidator::new().unwrap();
+        assert_eq!(
+            live.validate_r2(&r2_config(&stub.base)).await,
+            Err(FieldError::new(Field::R2Endpoint, ENDPOINT_UNUSABLE))
+        );
+        assert_eq!(state.calls(), (0, 0, 0, 0));
+    }
+
+    #[tokio::test]
+    async fn the_setup_canary_reads_no_range_and_cleans_up_too() {
+        let state = Arc::new(S3State::default());
+        let stub = s3(S3::WORKING, Arc::clone(&state)).await;
+        let v = validator("http://unused");
+        assert_eq!(v.validate_r2(&r2_config(&stub.base)).await, Ok(()));
+        assert_eq!(state.calls(), (1, 1, 0, 1));
+
+        // A read the token may not make: the object still goes.
+        let state = Arc::new(S3State::default());
+        let behaviour = S3 {
+            get: Read::Fails(403, leak(s3_error("AccessDenied"))),
+            ..S3::WORKING
+        };
+        let stub = s3(behaviour, Arc::clone(&state)).await;
+        let err = v.validate_r2(&r2_config(&stub.base)).await.unwrap_err();
+        assert_eq!(err.field, Field::R2AccessKeyId);
+        assert_eq!(state.stored(), None);
+    }
+
+    #[tokio::test]
+    async fn the_canary_runs_over_any_object_store() {
+        let store = object_store::memory::InMemory::new();
+        let canary = Canary {
+            key: DOCTOR_CANARY_KEY,
+            ranged: true,
+            deadline: R2_DEADLINE,
+            cleanup: R2_CLEANUP_TIMEOUT,
+        };
+        run(&store, canary).await.unwrap();
+        // Nothing is left under any key.
+        let listing = store.list_with_delimiter(None).await.unwrap();
+        assert!(listing.objects.is_empty(), "{listing:?}");
+        assert!(listing.common_prefixes.is_empty(), "{listing:?}");
     }
 
     #[test]
@@ -934,5 +2043,201 @@ mod tests {
         let r2 = r2_config("https://acc.r2.cloudflarestorage.com");
         let masked = mask_keys("key AKID-1234 sig SECRET-5678 end", &r2);
         assert_eq!(masked, "key <access key id> sig <secret access key> end");
+    }
+
+    // ---- a folder on this machine ----
+
+    /// Storage settings for the folder at `dir`, as setup saves them: the
+    /// endpoint alone.
+    fn folder_config(dir: &std::path::Path) -> R2Config {
+        R2Config {
+            endpoint: leaf_core::media::local_endpoint(dir.to_str().unwrap()).unwrap(),
+            bucket: String::new(),
+            access_key_id: String::new(),
+            secret_access_key: String::new(),
+        }
+    }
+
+    /// The names in `dir`, sorted.
+    fn names_in(dir: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// The validator as setup and the doctor build it. Nothing in it allows
+    /// plain HTTP or points at a stand-in: a folder needs no network.
+    fn live() -> LiveValidator {
+        LiveValidator::new().unwrap()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_folder_canary_creates_the_folder_and_leaves_nothing_in_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("leaf data").join("media");
+        let cfg = folder_config(&dir);
+
+        assert_eq!(live().validate_r2(&cfg).await, Ok(()));
+        assert!(dir.is_dir(), "the folder is created");
+        assert!(names_in(&dir).is_empty());
+
+        // The doctor's round trip, with its ranged read, in the folder that
+        // is there now.
+        assert_eq!(live().storage_round_trip(&cfg).await, Ok(()));
+        assert!(names_in(&dir).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_folder_canary_writes_and_removes_its_own_file_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("media");
+        std::fs::create_dir(&dir).unwrap();
+        // What an interrupted run would leave, under each canary's key, and
+        // a day's file that is none of the canary's business.
+        std::fs::write(dir.join(CANARY_KEY), b"stale").unwrap();
+        std::fs::write(dir.join(DOCTOR_CANARY_KEY), b"stale").unwrap();
+        std::fs::create_dir(dir.join("g")).unwrap();
+        std::fs::write(dir.join("g").join("kept"), b"a day").unwrap();
+
+        let cfg = folder_config(&dir);
+        assert_eq!(live().validate_r2(&cfg).await, Ok(()));
+        assert_eq!(names_in(&dir), ["g", DOCTOR_CANARY_KEY]);
+        assert_eq!(live().storage_round_trip(&cfg).await, Ok(()));
+        assert_eq!(names_in(&dir), ["g"]);
+        assert_eq!(std::fs::read(dir.join("g").join("kept")).unwrap(), b"a day");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_folder_ignores_whatever_the_bucket_and_keys_hold() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A bucket the S3 client cannot even address, and placeholder keys:
+        // a config from before setup offered a folder looks like this.
+        let cfg = R2Config {
+            bucket: "not a bucket".to_owned(),
+            access_key_id: "local".to_owned(),
+            secret_access_key: "local".to_owned(),
+            ..folder_config(&tmp.path().join("media"))
+        };
+        assert_eq!(live().validate_r2(&cfg).await, Ok(()));
+        assert_eq!(live().storage_round_trip(&cfg).await, Ok(()));
+    }
+
+    #[tokio::test]
+    async fn a_folder_not_given_by_its_full_path_is_refused_in_words() {
+        for endpoint in ["file://media", "file://nas/media", "file://", "file:///"] {
+            let cfg = r2_config(endpoint);
+            let expected = FieldError::new(Field::StorageFolder, FOLDER_NOT_ABSOLUTE);
+            assert_eq!(live().validate_r2(&cfg).await, Err(expected), "{endpoint}");
+            let failure = live().storage_round_trip(&cfg).await.unwrap_err();
+            assert_eq!(failure.step, None, "{endpoint}");
+            assert_eq!(failure.error.field, Field::StorageFolder, "{endpoint}");
+            assert!(!failure.left_behind, "{endpoint}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_folder_that_cannot_be_created_says_so() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A file where a folder on the way should be.
+        std::fs::write(tmp.path().join("taken"), b"").unwrap();
+        let cfg = folder_config(&tmp.path().join("taken").join("media"));
+
+        let expected = FieldError::new(Field::StorageFolder, FOLDER_NOT_CREATED);
+        assert_eq!(live().validate_r2(&cfg).await, Err(expected));
+        let failure = live().storage_round_trip(&cfg).await.unwrap_err();
+        assert_eq!(failure.step, None);
+        assert_eq!(failure.error.message, FOLDER_NOT_CREATED);
+        assert_eq!(names_in(tmp.path()), ["taken"]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_folder_that_takes_no_write_says_so_at_the_write_step() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("media");
+        // A folder where each test file would go: the write cannot land,
+        // whoever leaf runs as.
+        std::fs::create_dir_all(dir.join(CANARY_KEY)).unwrap();
+        std::fs::create_dir_all(dir.join(DOCTOR_CANARY_KEY)).unwrap();
+        let cfg = folder_config(&dir);
+
+        let expected = FieldError::new(Field::StorageFolder, FOLDER_NOT_WRITABLE);
+        assert_eq!(live().validate_r2(&cfg).await, Err(expected));
+        let failure = live().storage_round_trip(&cfg).await.unwrap_err();
+        assert_eq!(failure.step, Some(Step::Write));
+        assert_eq!(failure.error.message, FOLDER_NOT_WRITABLE);
+        assert!(!failure.left_behind);
+        // No half-written file stays behind either.
+        assert_eq!(names_in(&dir), [DOCTOR_CANARY_KEY, CANARY_KEY]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_read_only_folder_says_leaf_cannot_save_files_there() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("media");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        // Root writes where the mode says no; there is nothing to see then.
+        if std::fs::write(dir.join("probe"), b"").is_ok() {
+            return;
+        }
+
+        let outcome = live().validate_r2(&folder_config(&dir)).await;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            outcome,
+            Err(FieldError::new(Field::StorageFolder, FOLDER_NOT_WRITABLE))
+        );
+        assert!(names_in(&dir).is_empty());
+    }
+
+    #[test]
+    fn each_folder_failure_says_what_the_folder_would_not_do() {
+        let refused = || {
+            CanaryError::Store(object_store::Error::Generic {
+                store: "LocalFileSystem",
+                source: "Permission denied (os error 13)".into(),
+            })
+        };
+        let cases = [
+            (Step::Write, refused(), FOLDER_NOT_WRITABLE),
+            (Step::Read, refused(), FOLDER_NOT_READABLE),
+            (Step::ReadRange, refused(), FOLDER_NOT_READABLE),
+            (Step::Delete, refused(), FOLDER_NOT_DELETABLE),
+            (Step::Read, CanaryError::WrongBytes, FOLDER_WRONG_BYTES),
+            (Step::ReadRange, CanaryError::WrongBytes, FOLDER_WRONG_BYTES),
+            (Step::Write, CanaryError::TimedOut, FOLDER_TIMED_OUT),
+            (Step::Read, CanaryError::TimedOut, FOLDER_TIMED_OUT),
+            (Step::Delete, CanaryError::TimedOut, FOLDER_TIMED_OUT),
+        ];
+        for (step, error, says) in cases {
+            assert_eq!(folder_failure(step, &error), says, "{step:?} {error:?}");
+        }
+        // The deadline the sentence names is the one the canary has.
+        assert!(FOLDER_TIMED_OUT.contains(&format!("{} seconds", R2_DEADLINE.as_secs())));
+        // A folder's sentences are about a folder: no bucket, no keys.
+        for copy in [
+            FOLDER_NOT_ABSOLUTE,
+            FOLDER_NOT_CREATED,
+            FOLDER_NOT_OPENED,
+            FOLDER_NOT_WRITABLE,
+            FOLDER_NOT_READABLE,
+            FOLDER_WRONG_BYTES,
+            FOLDER_NOT_DELETABLE,
+            FOLDER_TIMED_OUT,
+        ] {
+            for word in ["R2", "bucket", "key", "endpoint", "token"] {
+                assert!(!copy.contains(word), "{word} in {copy}");
+            }
+        }
     }
 }

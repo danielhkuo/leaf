@@ -48,7 +48,7 @@ pub async fn wrapped(
     // (day, posted_at, message_id, channel_id), ascending by day.
     let rows = data.posts.list_for_wrapped(s.id).await?;
     if rows.is_empty() {
-        let text = empty_series_text(s, &begun.asker);
+        let text = empty_series_text(s, &begun.asker, &data.app_name());
         begun.via.send(Answer::private(text)).await?;
         return Ok(());
     }

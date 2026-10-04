@@ -10,12 +10,13 @@
 //! the blocking pool.
 
 use std::io::Cursor;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
 use image::DynamicImage;
+use object_store::local::LocalFileSystem;
 use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, WriteMultipart};
 use tokio::io::AsyncReadExt as _;
@@ -159,6 +160,37 @@ pub enum MediaError {
     /// Local temp-file IO failed.
     #[error("media io: {0}")]
     Io(#[from] std::io::Error),
+    /// The folder a `file://` storage endpoint names cannot be used.
+    #[error("storage folder: {0}")]
+    Folder(#[from] LocalStoreError),
+}
+
+/// Why a folder on this machine cannot be the media store.
+#[derive(Debug, thiserror::Error)]
+pub enum LocalStoreError {
+    /// The endpoint starts with `file:` but is not `file://` followed by an
+    /// absolute path that names a folder.
+    #[error(
+        "the storage endpoint is not file:// followed by a folder's full path \
+         (such as file:///data/media)"
+    )]
+    NotAbsolute,
+    /// The folder is not there and could not be created.
+    #[error("creating {}: {source}", dir.display())]
+    Create {
+        /// The folder asked for.
+        dir: PathBuf,
+        /// What the filesystem said.
+        source: std::io::Error,
+    },
+    /// The folder is there and could not be opened as a store.
+    #[error("opening {}: {source}", dir.display())]
+    Open {
+        /// The folder asked for.
+        dir: PathBuf,
+        /// What the store said.
+        source: object_store::Error,
+    },
 }
 
 impl MediaError {
@@ -192,7 +224,7 @@ impl MediaError {
                 "{file} couldn't be processed, so it wasn't archived. \
                  Tell a server admin if this keeps happening."
             ),
-            Self::Store(_) | Self::Io(_) => format!(
+            Self::Store(_) | Self::Io(_) | Self::Folder(_) => format!(
                 "{file} wasn't archived because leaf's storage is unavailable right now. \
                  Try again in a few minutes, and tell a server admin if this keeps happening."
             ),
@@ -206,7 +238,10 @@ impl MediaError {
     /// second.
     #[must_use]
     pub const fn is_retryable(&self) -> bool {
-        matches!(self, Self::Fetch(_) | Self::Store(_) | Self::Io(_))
+        matches!(
+            self,
+            Self::Fetch(_) | Self::Store(_) | Self::Io(_) | Self::Folder(_)
+        )
     }
 }
 
@@ -335,16 +370,139 @@ pub fn thumb_key(m: &MediaMeta) -> String {
     )
 }
 
-/// Builds the R2-backed object store from Tier-1 configuration.
+/// How a storage endpoint that names a folder on this machine starts. What
+/// follows is the folder's absolute path, taken as written.
+const LOCAL_ENDPOINT_PREFIX: &str = "file://";
+
+/// The scheme of a folder endpoint. Like any URL scheme it is read without
+/// regard to case: `FILE:///data/media` is a folder too.
+const LOCAL_SCHEME: &str = "file:";
+
+/// `rest` when `text` starts with `prefix`, whatever the case of its ASCII
+/// letters.
+fn strip_prefix_ignore_ascii_case<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
+    let (head, rest) = text.split_at_checked(prefix.len())?;
+    head.eq_ignore_ascii_case(prefix).then_some(rest)
+}
+
+/// Whether `endpoint` is meant as a folder on this machine (any `file:`
+/// address, in any case) and not as an S3 endpoint. Whether it names a
+/// folder leaf can use is [`local_store_dir`]'s question.
+#[must_use]
+pub fn is_local_endpoint(endpoint: &str) -> bool {
+    strip_prefix_ignore_ascii_case(endpoint.trim_start(), LOCAL_SCHEME).is_some()
+}
+
+/// The folder a `file://` storage endpoint names: `file:///data/media` is
+/// `/data/media`. Media is then kept on this machine's disk instead of in a
+/// bucket, and the bucket and key settings are not used.
+///
+/// `None` unless the endpoint is `file://` followed by an absolute path
+/// that names a folder. A relative path (`file://media`), a host
+/// (`file://nas/media`), no path (`file://`) and the root alone
+/// (`file:///`) are all refused: where media lands must never depend on the
+/// directory leaf was started in. So is any path with `..` in it
+/// (`file:///data/..` is the root again, in other words). The path is taken
+/// as written; nothing in it is percent-decoded.
+#[must_use]
+pub fn local_store_dir(endpoint: &str) -> Option<PathBuf> {
+    let path = strip_prefix_ignore_ascii_case(endpoint.trim(), LOCAL_ENDPOINT_PREFIX)?;
+    let mut parts = Path::new(path).components();
+    let names_a_folder = parts
+        .clone()
+        .any(|part| matches!(part, Component::Normal(_)));
+    let climbs = parts.any(|part| matches!(part, Component::ParentDir));
+    (path.starts_with('/') && names_a_folder && !climbs).then(|| PathBuf::from(path))
+}
+
+/// The storage endpoint for the folder at `path`: what [`local_store_dir`]
+/// reads back. `None` unless `path` is absolute and names a folder.
+#[must_use]
+pub fn local_endpoint(path: &str) -> Option<String> {
+    let endpoint = format!("{LOCAL_ENDPOINT_PREFIX}{}", path.trim());
+    local_store_dir(&endpoint).map(|_| endpoint)
+}
+
+/// Opens the folder `dir` as the media store, creating it (and the folders
+/// above it) when it is not there yet.
+///
+/// A delete also removes the folders it leaves empty, so the day folders of
+/// an undone post do not pile up. `dir` itself is never removed.
+pub fn local_store(dir: &Path) -> Result<LocalFileSystem, LocalStoreError> {
+    std::fs::create_dir_all(dir).map_err(|source| LocalStoreError::Create {
+        dir: dir.to_owned(),
+        source,
+    })?;
+    let store = LocalFileSystem::new_with_prefix(dir).map_err(|source| LocalStoreError::Open {
+        dir: dir.to_owned(),
+        source,
+    })?;
+    Ok(store.with_automatic_cleanup(true))
+}
+
+/// Where the configured storage keeps media.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StorageTarget {
+    /// In a folder on this machine.
+    Folder(PathBuf),
+    /// In a bucket behind an S3 API (Cloudflare R2).
+    Bucket {
+        /// Host of the S3 endpoint; empty when the endpoint is not a URL.
+        host: String,
+        /// The bucket's name.
+        bucket: String,
+    },
+}
+
+impl StorageTarget {
+    /// Reads the target out of the storage settings. A `file:` endpoint
+    /// that names no usable folder is an error, never an S3 endpoint.
+    pub fn of(cfg: &crate::config::R2Config) -> Result<Self, LocalStoreError> {
+        if is_local_endpoint(&cfg.endpoint) {
+            return local_store_dir(&cfg.endpoint)
+                .map(Self::Folder)
+                .ok_or(LocalStoreError::NotAbsolute);
+        }
+        // The host alone: enough to tell stores apart in a log, and free of
+        // anything a URL can carry besides.
+        let host = reqwest::Url::parse(cfg.endpoint.trim())
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_owned))
+            .unwrap_or_default();
+        Ok(Self::Bucket {
+            host,
+            bucket: cfg.bucket.clone(),
+        })
+    }
+}
+
+/// Builds the object store from Tier-1 configuration.
+///
+/// That is R2 (or any S3 endpoint), or a folder on this machine for a
+/// `file://` endpoint (see [`local_store_dir`]). One line is logged saying
+/// which of the two is in use.
 pub fn r2_store(cfg: &crate::config::R2Config) -> Result<Arc<dyn ObjectStore>, MediaError> {
-    let store = object_store::aws::AmazonS3Builder::new()
-        .with_endpoint(&cfg.endpoint)
-        .with_bucket_name(&cfg.bucket)
-        .with_access_key_id(&cfg.access_key_id)
-        .with_secret_access_key(&cfg.secret_access_key)
-        .with_region("auto")
-        .build()?;
-    Ok(Arc::new(store))
+    match StorageTarget::of(cfg)? {
+        StorageTarget::Folder(dir) => {
+            let store = local_store(&dir)?;
+            tracing::info!(
+                folder = %dir.display(),
+                "storing media in a folder on this machine (the files are kept nowhere else)"
+            );
+            Ok(Arc::new(store))
+        }
+        StorageTarget::Bucket { host, bucket } => {
+            let store = object_store::aws::AmazonS3Builder::new()
+                .with_endpoint(&cfg.endpoint)
+                .with_bucket_name(&cfg.bucket)
+                .with_access_key_id(&cfg.access_key_id)
+                .with_secret_access_key(&cfg.secret_access_key)
+                .with_region("auto")
+                .build()?;
+            tracing::info!(endpoint = %host, %bucket, "storing media in an S3 bucket");
+            Ok(Arc::new(store))
+        }
+    }
 }
 
 /// The pipeline. Cheap to clone; share one per process.
@@ -527,9 +685,20 @@ impl MediaPipeline {
     /// object is preferable to a phantom database entry.
     pub async fn delete_keys(&self, keys: &[String]) {
         for key in keys {
-            if let Err(e) = self.store.delete(&ObjectPath::from(key.clone())).await {
+            if let Err(e) = self.delete_key(key).await {
                 tracing::warn!(key, error = %e, "failed to delete stored media object");
             }
+        }
+    }
+
+    /// Removes one stored object. One that is not there counts as removed:
+    /// an S3 store answers such a delete with success, and a folder must
+    /// not differ, or releasing the keys of an archive that failed before
+    /// anything was stored would log a failure for nothing.
+    async fn delete_key(&self, key: &str) -> object_store::Result<()> {
+        match self.store.delete(&ObjectPath::from(key.to_owned())).await {
+            Err(object_store::Error::NotFound { .. }) => Ok(()),
+            outcome => outcome,
         }
     }
 
@@ -1366,6 +1535,14 @@ printf poster > "$out""#;
                 "`clip.mov` wasn't archived because leaf's storage is unavailable right now. \
                  Try again in a few minutes, and tell a server admin if this keeps happening.",
             ),
+            (
+                MediaError::Folder(LocalStoreError::Create {
+                    dir: PathBuf::from("/sekrit/media"),
+                    source: std::io::Error::other("Permission denied"),
+                }),
+                "`clip.mov` wasn't archived because leaf's storage is unavailable right now. \
+                 Try again in a few minutes, and tell a server admin if this keeps happening.",
+            ),
         ];
         for (err, want) in cases {
             assert_eq!(err.user_message("clip.mov"), want, "{err:?}");
@@ -1386,6 +1563,7 @@ printf poster > "$out""#;
             (MediaError::Fetch(String::new()), true),
             (MediaError::Store(generic()), true),
             (MediaError::Io(std::io::Error::other("disk")), true),
+            (MediaError::Folder(LocalStoreError::NotAbsolute), true),
             (MediaError::Gone(String::new()), false),
             (MediaError::TooLarge { limit_mb: 100 }, false),
             (MediaError::UnsupportedType(String::new()), false),
@@ -1494,5 +1672,465 @@ printf poster > "$out""#;
             let resolved = content_type_for("file", Some(allowed)).unwrap();
             assert!(check_content_type(resolved).is_ok(), "{allowed}");
         }
+    }
+
+    // ---- a folder on this machine as the store ----
+
+    use crate::config::R2Config;
+
+    /// Storage settings for a folder. The bucket and keys hold placeholder
+    /// text, as in a config written before the setup page offered a folder.
+    fn folder_config(endpoint: &str) -> R2Config {
+        R2Config {
+            endpoint: endpoint.to_owned(),
+            bucket: "local".to_owned(),
+            access_key_id: "local".to_owned(),
+            secret_access_key: "local".to_owned(),
+        }
+    }
+
+    /// A folder that does not exist yet, two levels down in a fresh temp
+    /// dir, and the endpoint that names it. The space in its path must
+    /// survive the trip.
+    fn new_folder() -> (tempfile::TempDir, PathBuf, String) {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("leaf data").join("media");
+        let endpoint = local_endpoint(dir.to_str().unwrap()).unwrap();
+        (tmp, dir, endpoint)
+    }
+
+    /// The names in `dir`, sorted.
+    fn names_in(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn a_file_endpoint_names_a_folder_only_by_its_absolute_path() {
+        let folders = [
+            ("file:///data/media", "/data/media"),
+            ("  file:///data/media\n", "/data/media"),
+            ("file:///data/media/", "/data/media/"),
+            // Taken as written: a space is a space, and %20 is not one.
+            ("file:///Users/me/leaf media", "/Users/me/leaf media"),
+            ("file:///srv/leaf%20media", "/srv/leaf%20media"),
+            // A scheme is read in any case; the path keeps its own.
+            ("FILE:///data/Media", "/data/Media"),
+            ("File:///data/media", "/data/media"),
+            // Dots that are part of a name climb nowhere.
+            ("file:///data/..media/a..b", "/data/..media/a..b"),
+        ];
+        for (endpoint, dir) in folders {
+            assert_eq!(
+                local_store_dir(endpoint),
+                Some(PathBuf::from(dir)),
+                "{endpoint}"
+            );
+            assert!(is_local_endpoint(endpoint), "{endpoint}");
+        }
+
+        let refused = [
+            // Relative: where it lands would depend on the working directory.
+            "file://media",
+            "file://./media",
+            "file://../media",
+            "file:media",
+            // A host is not this machine.
+            "file://nas/media",
+            "file://localhost/data/media",
+            // No path, or the root alone.
+            "file://",
+            "file:///",
+            "file:////",
+            "file:///.",
+            "file:///..",
+            // `..` anywhere: the path could be the root, or anything else.
+            "file:///data/..",
+            "file:///data/../..",
+            "file:///data/../media",
+            "file:///data/media/..",
+            "FILE:///data/..",
+            // One slash short.
+            "file:/data/media",
+            // Any case of the scheme is still a folder, never an S3 endpoint.
+            "FILE://media",
+            "File:media",
+            "FILE:",
+        ];
+        for endpoint in refused {
+            assert_eq!(local_store_dir(endpoint), None, "{endpoint}");
+            // Still meant as a folder: never to be tried as an S3 endpoint.
+            assert!(is_local_endpoint(endpoint), "{endpoint}");
+        }
+
+        let not_folders = [
+            "https://acc.r2.cloudflarestorage.com",
+            "/data/media",
+            "profile://data/media",
+            "files:///data/media",
+            "fil",
+            // Not ASCII where the scheme would be: no folder, and no panic.
+            "fil\u{e9}:///data/media",
+            "",
+        ];
+        for endpoint in not_folders {
+            assert_eq!(local_store_dir(endpoint), None, "{endpoint}");
+            assert!(!is_local_endpoint(endpoint), "{endpoint}");
+        }
+    }
+
+    #[test]
+    fn a_folder_path_becomes_the_endpoint_that_reads_back_as_it() {
+        assert_eq!(
+            local_endpoint("/data/media").as_deref(),
+            Some("file:///data/media")
+        );
+        assert_eq!(
+            local_endpoint("  /data/media ").as_deref(),
+            Some("file:///data/media")
+        );
+        for path in ["/data/media", "/Users/me/leaf media", "/data/media/"] {
+            let endpoint = local_endpoint(path).unwrap();
+            assert_eq!(
+                local_store_dir(&endpoint),
+                Some(PathBuf::from(path)),
+                "{path}"
+            );
+        }
+        let refused = [
+            "",
+            "  ",
+            "media",
+            "./media",
+            "~/media",
+            "nas/media",
+            "C:\\media",
+            "/",
+            "//",
+        ];
+        for path in refused {
+            assert_eq!(local_endpoint(path), None, "{path:?}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_folder_store_is_created_and_round_trips_an_object() {
+        let (_tmp, dir, endpoint) = new_folder();
+        assert!(!dir.exists());
+        let store = r2_store(&folder_config(&endpoint)).unwrap();
+        assert!(dir.is_dir(), "the folder is created");
+
+        let path = ObjectPath::from("g/1/s/7/d/42/att9");
+        store
+            .put(&path, b"leaf on disk".to_vec().into())
+            .await
+            .unwrap();
+        // A plain file, where the key says.
+        let on_disk = tokio::fs::read(dir.join("g/1/s/7/d/42/att9"))
+            .await
+            .unwrap();
+        assert_eq!(on_disk, b"leaf on disk");
+
+        let whole = store.get(&path).await.unwrap().bytes().await.unwrap();
+        assert_eq!(whole.as_ref(), b"leaf on disk");
+        // Byte ranges, as a video player asks for them: a span, and the tail.
+        let part = store.get_range(&path, 5..7).await.unwrap();
+        assert_eq!(part.as_ref(), b"on");
+        let options = object_store::GetOptions {
+            range: Some(object_store::GetRange::Suffix(4)),
+            ..object_store::GetOptions::default()
+        };
+        let tail = store.get_opts(&path, options).await.unwrap();
+        assert_eq!(tail.range, 8..12);
+        assert_eq!(tail.meta.size, 12);
+        assert_eq!(tail.bytes().await.unwrap().as_ref(), b"disk");
+
+        store.delete(&path).await.unwrap();
+        assert!(matches!(
+            store.get(&path).await,
+            Err(object_store::Error::NotFound { .. })
+        ));
+        // The folders the delete emptied are gone; the store's own stays.
+        assert!(names_in(&dir).is_empty());
+        assert!(dir.is_dir());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_pipeline_archives_into_a_folder() {
+        let (_tmp, dir, endpoint) = new_folder();
+        let store = r2_store(&folder_config(&endpoint)).unwrap();
+        let p = MediaPipeline::new(store).unwrap();
+        let payload = png_bytes(1024, 512);
+        let (_d, path) = write_temp(&payload).await;
+
+        let stored = p.archive_file(&path, &meta("image/png")).await.unwrap();
+        let day = dir.join("g/g1/s/7/d/42");
+        assert_eq!(tokio::fs::read(day.join("att9")).await.unwrap(), payload);
+        let thumb = tokio::fs::read(day.join("thumb/att9.webp")).await.unwrap();
+        let decoded = image::load_from_memory(&thumb).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (256, 128));
+        assert_eq!(p.get_bytes(&stored.thumb_key).await.unwrap(), thumb);
+
+        // Undoing the day leaves nothing of it on disk.
+        p.delete_keys(&[stored.original_key, stored.thumb_key])
+            .await;
+        assert!(names_in(&dir).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_large_file_reaches_a_folder_through_the_multipart_path() {
+        let (_tmp, dir, endpoint) = new_folder();
+        let store = r2_store(&folder_config(&endpoint)).unwrap();
+        // No poster frame is tried: the bytes are no video.
+        let p = MediaPipeline::new(store)
+            .unwrap()
+            .with_ffmpeg_bin("leaf-test-no-such-ffmpeg");
+        // Over the threshold, and long enough to go up in three parts whose
+        // order matters: no two parts hold the same bytes.
+        let len = usize::try_from(DEFAULT_MULTIPART_THRESHOLD).unwrap() + 3 * 1024 * 1024;
+        let payload: Vec<u8> = (0..len)
+            .map(|i| u8::try_from((i ^ (i >> 16)) % 251).unwrap())
+            .collect();
+        let (_d, path) = write_temp(&payload).await;
+
+        let archived = p
+            .archive_file_detailed(&path, &meta("video/mp4"))
+            .await
+            .unwrap();
+        assert_eq!(archived.stored.size, payload.len() as u64);
+        let day = dir.join("g/g1/s/7/d/42");
+        let on_disk = tokio::fs::read(day.join("att9")).await.unwrap();
+        assert!(
+            on_disk == payload,
+            "the stored file differs from the original"
+        );
+        // The parts are staged in a file beside the target: none is left.
+        assert_eq!(names_in(&day), ["att9", "thumb"]);
+        // A part of it reads back from where it should.
+        let store = r2_store(&folder_config(&endpoint)).unwrap();
+        let start = payload.len() - 1024;
+        let tail = store
+            .get_range(
+                &ObjectPath::from(archived.stored.original_key),
+                start as u64..payload.len() as u64,
+            )
+            .await
+            .unwrap();
+        assert_eq!(tail.as_ref(), payload.get(start..).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn deleting_a_key_that_is_not_there_is_not_a_failure() {
+        let (_tmp, _dir, endpoint) = new_folder();
+        let store = r2_store(&folder_config(&endpoint)).unwrap();
+        // A folder answers this delete with "not found", where S3 and the
+        // in-memory store answer success.
+        let missing = ObjectPath::from("g/1/s/7/d/42/never-stored");
+        assert!(matches!(
+            store.delete(&missing).await,
+            Err(object_store::Error::NotFound { .. })
+        ));
+        let p = MediaPipeline::new(store).unwrap();
+        p.delete_key("g/1/s/7/d/42/never-stored").await.unwrap();
+    }
+
+    #[test]
+    fn a_file_endpoint_that_names_no_folder_builds_no_store() {
+        for endpoint in ["file://media", "file://nas/media", "file://", "file:///"] {
+            let err = r2_store(&folder_config(endpoint)).unwrap_err();
+            assert!(
+                matches!(err, MediaError::Folder(LocalStoreError::NotAbsolute)),
+                "{endpoint}: {err:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_that_cannot_be_created_is_named_with_the_reason() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A file where a folder on the way should be.
+        std::fs::write(tmp.path().join("taken"), b"").unwrap();
+        let dir = tmp.path().join("taken").join("media");
+        let endpoint = local_endpoint(dir.to_str().unwrap()).unwrap();
+
+        let err = r2_store(&folder_config(&endpoint)).unwrap_err();
+        assert!(
+            matches!(&err, MediaError::Folder(LocalStoreError::Create { dir: named, .. }) if *named == dir),
+            "{err:?}"
+        );
+        let said = err.to_string();
+        let start = format!("storage folder: creating {}: ", dir.display());
+        assert!(said.starts_with(&start), "{said}");
+    }
+
+    #[test]
+    fn the_storage_target_is_the_folder_or_the_bucket_at_its_host() {
+        assert_eq!(
+            StorageTarget::of(&folder_config("file:///data/media")).unwrap(),
+            StorageTarget::Folder(PathBuf::from("/data/media"))
+        );
+        assert!(matches!(
+            StorageTarget::of(&folder_config("file://media")),
+            Err(LocalStoreError::NotAbsolute)
+        ));
+
+        // (endpoint, host): the host alone, whatever else the URL carries.
+        let cases = [
+            (
+                "https://acc.r2.cloudflarestorage.com",
+                "acc.r2.cloudflarestorage.com",
+            ),
+            (" https://ACC.example:8443/path/ ", "acc.example"),
+            ("https://user:sekrit@acc.example", "acc.example"),
+            ("not a url", ""),
+        ];
+        for (endpoint, host) in cases {
+            let cfg = R2Config {
+                endpoint: endpoint.to_owned(),
+                bucket: "leaf-media".to_owned(),
+                ..folder_config("")
+            };
+            assert_eq!(
+                StorageTarget::of(&cfg).unwrap(),
+                StorageTarget::Bucket {
+                    host: host.to_owned(),
+                    bucket: "leaf-media".to_owned(),
+                },
+                "{endpoint}"
+            );
+        }
+    }
+
+    /// One logged event as a string: the message, then each field as
+    /// ` name=value`.
+    #[derive(Default)]
+    struct Line {
+        message: String,
+        fields: String,
+    }
+
+    impl tracing::field::Visit for Line {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            use std::fmt::Write as _;
+            if field.name() == "message" {
+                self.message = format!("{value:?}");
+            } else {
+                write!(self.fields, " {}={value:?}", field.name()).unwrap();
+            }
+        }
+    }
+
+    /// What this crate logged, with the thread that logged it.
+    static LOGGED: std::sync::Mutex<Vec<(std::thread::ThreadId, String)>> =
+        std::sync::Mutex::new(Vec::new());
+
+    /// [`LOGGED`], whatever became of a test that held it.
+    fn all_logged() -> std::sync::MutexGuard<'static, Vec<(std::thread::ThreadId, String)>> {
+        LOGGED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Takes the lines this thread logged out of [`LOGGED`].
+    fn take_logged() -> Vec<String> {
+        let me = std::thread::current().id();
+        let mut all = all_logged();
+        let (mine, others): (Vec<_>, Vec<_>) = std::mem::take(&mut *all)
+            .into_iter()
+            .partition(|(thread, _)| *thread == me);
+        *all = others;
+        drop(all);
+        mine.into_iter().map(|(_, line)| line).collect()
+    }
+
+    /// Records this crate's events into [`LOGGED`]. The S3 client logs
+    /// lines of its own while it is built; those are not leaf's.
+    struct Recorder;
+
+    impl tracing::Subscriber for Recorder {
+        fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+            metadata.target().starts_with("leaf_core")
+        }
+
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut line = Line::default();
+            event.record(&mut line);
+            let line = format!("{}{}", line.message, line.fields);
+            all_logged().push((std::thread::current().id(), line));
+        }
+
+        fn enter(&self, _: &tracing::span::Id) {}
+
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    /// Runs `work` and returns what leaf logged on this thread meanwhile.
+    ///
+    /// The recorder is installed once, for the whole test process. A
+    /// subscriber scoped to this thread would be the shorter way, and would
+    /// miss lines now and then: tracing remembers per call site whether
+    /// anyone listens, and when another test's thread reaches the call site
+    /// first it asks that thread's subscriber, which is none.
+    fn logged<T>(work: impl FnOnce() -> T) -> (T, Vec<String>) {
+        static INSTALLED: std::sync::Once = std::sync::Once::new();
+        INSTALLED.call_once(|| tracing::subscriber::set_global_default(Recorder).unwrap());
+
+        let _earlier = take_logged();
+        let out = work();
+        (out, take_logged())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn building_the_store_logs_one_line_saying_which_storage_is_in_use() {
+        let (_tmp, dir, endpoint) = new_folder();
+        let (store, lines) = logged(|| r2_store(&folder_config(&endpoint)));
+        store.unwrap();
+        assert_eq!(
+            lines,
+            [format!(
+                "storing media in a folder on this machine (the files are kept nowhere else) \
+                 folder={}",
+                dir.display()
+            )]
+        );
+
+        let cfg = R2Config {
+            endpoint: "https://acc.r2.cloudflarestorage.com".to_owned(),
+            bucket: "leaf-media".to_owned(),
+            access_key_id: "SECRET_KEYID".to_owned(),
+            secret_access_key: "SECRET_KEY".to_owned(),
+        };
+        let (store, lines) = logged(|| r2_store(&cfg));
+        store.unwrap();
+        // The endpoint's host and the bucket; no key.
+        assert_eq!(
+            lines,
+            [
+                "storing media in an S3 bucket endpoint=acc.r2.cloudflarestorage.com bucket=leaf-media"
+            ]
+        );
+
+        // A store that was not built is not announced.
+        let (store, lines) = logged(|| r2_store(&folder_config("file://media")));
+        assert!(store.is_err());
+        assert!(lines.is_empty(), "{lines:?}");
     }
 }

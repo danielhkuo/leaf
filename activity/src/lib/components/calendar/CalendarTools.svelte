@@ -153,11 +153,12 @@
     padding: 0 var(--space-sm);
     font-variant-numeric: tabular-nums;
   }
+  /* The right padding clears the chevron app.css draws (it ends 26px in), by
+   * the least that does: "Jump to month" has to fit half a 360px phone. */
   .month {
     min-width: 0;
     min-height: var(--touch-target);
-    padding: 0 var(--space-sm);
-    text-overflow: ellipsis;
+    padding: 0 var(--space-xl) 0 var(--space-sm);
   }
   .note {
     margin: 0;

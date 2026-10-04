@@ -40,6 +40,11 @@ interface GalleryState {
   epoch: number;
   /** True while {@link refreshAll} is fetching. */
   refreshing: boolean;
+  /**
+   * Bumped when a series' day index arrives in the cache, for what reads
+   * the cache without loading anything ({@link peekThumb}).
+   */
+  indexed: number;
 }
 
 export const gallery = $state<GalleryState>({
@@ -51,6 +56,7 @@ export const gallery = $state<GalleryState>({
   eligibilityStatus: 'loading',
   epoch: 0,
   refreshing: false,
+  indexed: 0,
 });
 
 /** The authed API client. Throws if used before {@link initGallery}. */
@@ -366,6 +372,7 @@ export function loadDaysIndex(seriesId: number, maxDay: number): Promise<DaySumm
     .then((rows) => {
       if (rows.length > 0 && started === generation) {
         indexCache.set(seriesId, { value: rows, at: Date.now() });
+        gallery.indexed += 1;
       }
       return rows;
     })
@@ -419,6 +426,24 @@ async function fetchIndex(
     for (const page of pages) all.push(...page);
   }
   return all;
+}
+
+/**
+ * A thumbnail from an index already in the cache: the day's own, or with
+ * `day` as `null` the newest there is. `null` when the index is not cached
+ * or has no picture to give. Never starts a request: it is for the
+ * minimised tile, which shows what is at hand. Read `gallery.indexed`
+ * alongside to hear when an index arrives.
+ */
+export function peekThumb(seriesId: number, day: number | null): string | null {
+  const rows = unexpired(indexCache.get(seriesId)) ?? [];
+  if (day !== null) return rows.find((row) => row.day === day)?.thumb_url ?? null;
+  // Indexed rather than `findLast`: the iOS 15.0-15.3 webview has neither it nor `at`.
+  for (let i = rows.length - 1; i >= 0; i -= 1) {
+    const thumb = rows[i]?.thumb_url;
+    if (thumb) return thumb;
+  }
+  return null;
 }
 
 // --- days -----------------------------------------------------------------

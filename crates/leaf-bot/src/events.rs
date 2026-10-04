@@ -1,14 +1,15 @@
 //! Gateway event handling.
 //!
-//! Guilds becoming available (create the settings row, greet once) and
-//! component presses and modal submits that no collector owns. The channel-selection logic is
-//! a pure function so the policy is testable without Discord.
+//! Guilds becoming available (create the settings row, greet once),
+//! component presses and modal submits that no collector owns, and the bot's
+//! own name whenever the gateway says it. The channel-selection logic is a
+//! pure function so the policy is testable without Discord.
 
 use leaf_core::db::GuildSettingsRepo;
 use poise::serenity_prelude as serenity;
 use tracing::{info, warn};
 
-use crate::{Data, Error, checks, components};
+use crate::{AppName, Data, Error, checks, components};
 
 /// The greeting for a server leaf has just been added to. `setup` is how
 /// the `/setup` command is written (see [`checks::setup_mention`]).
@@ -41,6 +42,7 @@ pub async fn handle(
     _framework: poise::FrameworkContext<'_, Data, Error>,
     data: &Data,
 ) -> Result<(), Error> {
+    record_bot_name(&data.app_name, event);
     match event {
         serenity::FullEvent::GuildCreate { guild, is_new } => {
             on_guild_available(ctx, guild, *is_new, data).await;
@@ -54,6 +56,31 @@ pub async fn handle(
         _ => {}
     }
     Ok(())
+}
+
+/// Keeps `name` to what the gateway says: takes the bot's name from `event`
+/// when it describes the bot, and leaves it alone otherwise.
+///
+/// The first Ready of a connection names the bot before this runs (`Data`
+/// is made from it). This is for what comes after: a rename, and the Ready
+/// of a new session, which may be the first to carry a name changed while
+/// leaf was not connected.
+fn record_bot_name(name: &AppName, event: &serenity::FullEvent) {
+    if let Some(bot) = bot_user(event) {
+        name.rename(bot);
+    }
+}
+
+/// The bot's own user, when `event` describes it. The gateway says who the
+/// bot is each time leaf identifies (at connect, and again whenever Discord
+/// has dropped the session and leaf starts a new one), and when the bot is
+/// renamed in the Developer Portal.
+const fn bot_user(event: &serenity::FullEvent) -> Option<&serenity::CurrentUser> {
+    match event {
+        serenity::FullEvent::Ready { data_about_bot } => Some(&data_about_bot.user),
+        serenity::FullEvent::UserUpdate { new, .. } => Some(new),
+        _ => None,
+    }
 }
 
 /// One text channel the bot could greet in.
@@ -182,7 +209,81 @@ async fn on_guild_available(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, reason = "tests may panic")]
+
     use super::*;
+
+    /// The bot user as the gateway describes it. `shown` is the display
+    /// name, where Discord gives the bot one.
+    fn bot(username: &str, shown: Option<&str>) -> serenity::json::Value {
+        serenity::json::json!({
+            "id": "901", "username": username, "global_name": shown, "bot": true,
+        })
+    }
+
+    /// What the gateway sends each time leaf identifies.
+    fn ready(user: &serenity::json::Value) -> serenity::FullEvent {
+        serenity::FullEvent::Ready {
+            data_about_bot: serenity::json::from_value(serenity::json::json!({
+                "v": 10,
+                "user": user,
+                "guilds": [],
+                "session_id": "s",
+                "resume_gateway_url": "wss://gateway.invalid",
+                "application": { "id": "901", "flags": 0 },
+            }))
+            .unwrap(),
+        }
+    }
+
+    /// What the gateway sends when the bot's own user changes.
+    fn user_update(user: serenity::json::Value) -> serenity::FullEvent {
+        serenity::FullEvent::UserUpdate {
+            old_data: None,
+            new: serenity::json::from_value(user).unwrap(),
+        }
+    }
+
+    #[test]
+    fn the_bot_s_name_is_kept_to_what_the_gateway_says() {
+        // As the connection leaves it: named from its first Ready, with the
+        // reminder scheduler holding the other end.
+        let (names, mut scheduler) = tokio::sync::watch::channel(String::new());
+        let first = serenity::json::from_value(bot("leaf-dev", None)).unwrap();
+        let name = AppName::of(names, &first);
+        assert_eq!(*scheduler.borrow_and_update(), "leaf-dev");
+
+        // The same Ready reaches the handler too: nothing new in it.
+        record_bot_name(&name, &ready(&bot("leaf-dev", None)));
+        assert!(!scheduler.has_changed().unwrap());
+
+        // Renamed in the Developer Portal while leaf is connected.
+        record_bot_name(&name, &user_update(bot("Daily Art Bot", None)));
+        assert_eq!(name.get(), "Daily Art Bot");
+        assert_eq!(*scheduler.borrow_and_update(), "Daily Art Bot");
+
+        // Renamed while Discord had dropped the session: the Ready of the
+        // new one is the first to say so.
+        record_bot_name(&name, &ready(&bot("leaf-two", None)));
+        assert_eq!(name.get(), "leaf-two");
+        assert_eq!(*scheduler.borrow_and_update(), "leaf-two");
+
+        // A display name, where Discord gives the bot one, is what it shows,
+        // whichever event says it.
+        record_bot_name(&name, &ready(&bot("leaf_two", Some("Leaf Two"))));
+        assert_eq!(name.get(), "Leaf Two");
+        record_bot_name(&name, &user_update(bot("leaf_two", Some("Leaf 2"))));
+        assert_eq!(name.get(), "Leaf 2");
+        assert_eq!(*scheduler.borrow_and_update(), "Leaf 2");
+
+        // Nothing else says who the bot is.
+        let resumed = serenity::FullEvent::Resume {
+            event: serenity::json::from_value(serenity::json::json!({})).unwrap(),
+        };
+        record_bot_name(&name, &resumed);
+        assert_eq!(name.get(), "Leaf 2");
+        assert!(!scheduler.has_changed().unwrap());
+    }
 
     fn ch(id: u64, position: u16, is_text: bool, can_send: bool) -> ChannelCandidate {
         ChannelCandidate {

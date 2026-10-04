@@ -2,6 +2,7 @@
   import { untrack } from 'svelte';
 
   import DayViewer from '../lib/components/viewer/DayViewer.svelte';
+  import type { Platform } from '../lib/sdk/types';
   import { gallery, getDay, loadDaysIndex, peekDay } from '../lib/stores/gallery.svelte';
   import type { Day, DaySummary, Series } from '../lib/types/api';
   import { accentVar } from '../lib/utils/accent';
@@ -11,10 +12,14 @@
   interface Props {
     series: Series;
     day: number;
+    /** Which Discord client this is: where an opened post shows differs. */
+    platform?: Platform | undefined;
     /** Called with the day on screen, so Home can bring its cell into view. */
     onClose: (lastDay?: number) => void;
+    /** Called as paging moves to another day: the shell names the day on screen. */
+    onDay?: ((day: number) => void) | undefined;
   }
-  let { series, day, onClose }: Props = $props();
+  let { series, day, platform, onClose, onDay }: Props = $props();
 
   // The viewer remounts per open, so the initial day is captured intentionally;
   // prev/next then drive `currentDay` locally.
@@ -130,9 +135,10 @@
     fresh = true;
     reloads += 1;
   }
-  function goRandom(): void {
-    const r = randomDay(days, currentDay);
-    if (r !== null) currentDay = r;
+  function show(target: number | null): void {
+    if (target === null) return;
+    currentDay = target;
+    onDay?.(target);
   }
 </script>
 
@@ -146,11 +152,14 @@
     timeZone={series.timezone}
     hasPrev={prev !== null}
     hasNext={next !== null}
-    onPrev={() => prev !== null && (currentDay = prev)}
-    onNext={() => next !== null && (currentDay = next)}
-    onRandom={days.some((d) => d !== currentDay) ? goRandom : undefined}
+    onPrev={() => show(prev)}
+    onNext={() => show(next)}
+    onRandom={days.some((d) => d !== currentDay)
+      ? () => show(randomDay(days, currentDay))
+      : undefined}
     onClose={() => onClose(currentDay)}
     onRetry={dayData || failed?.retry ? reload : undefined}
+    {platform}
   />
 </div>
 

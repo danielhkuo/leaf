@@ -2,11 +2,12 @@
   // Mirrors App.svelte's boot screens (markup and styles) for one fixed
   // state: the real shell starts the Discord handshake as it mounts, which a
   // browser tab cannot answer. Every word comes from the functions App uses
-  // (bootStatusText, bootErrorCopy), so the mock can only show a state the
-  // boot can produce.
+  // (bootStatusText, bootErrorCopy, bootTileText), so the mock can only show
+  // a state the boot can produce.
+  import Minimisable from '../lib/components/shared/Minimisable.svelte';
   import Button from '../lib/components/ui/Button.svelte';
   import { bootErrorCopy } from '../lib/sdk/bootError';
-  import { bootStatusText, type SessionState } from '../lib/stores/session.svelte';
+  import { bootStatusText, bootTileText, type SessionState } from '../lib/stores/session.svelte';
 
   interface Props {
     /** The boot state to show, as the session store holds it. */
@@ -20,48 +21,52 @@
   const noop = (): void => undefined;
 </script>
 
-<main class="boot">
-  {#if boot.status === 'loading'}
-    <div class="center">
-      <div class="center" role="status" aria-live="polite">
-        <span class="mark sway" aria-hidden="true">🍃</span>
-        <p class="status">{bootStatusText(boot.step, boot.slow)}</p>
+<Minimisable detail={bootTileText(boot.status)}>
+  <main class="boot">
+    {#if boot.status === 'loading'}
+      <!-- A heading for the page while a status line is all it shows. -->
+      <h1 class="sr-only">leaf</h1>
+      <div class="center">
+        <div class="center" role="status" aria-live="polite">
+          <span class="mark sway" aria-hidden="true">🍃</span>
+          <p class="status">{bootStatusText(boot.step, boot.slow)}</p>
+          {#if stuck}
+            <p class="hint">If Discord isn’t asking, close leaf and open it again.</p>
+          {/if}
+        </div>
         {#if stuck}
-          <p class="hint">If Discord isn’t asking, close leaf and open it again.</p>
+          <div class="actions">
+            <Button variant="secondary" onclick={noop}>Close leaf</Button>
+          </div>
         {/if}
       </div>
-      {#if stuck}
-        <div class="actions">
-          <Button variant="secondary" onclick={noop}>Close leaf</Button>
-        </div>
-      {/if}
-    </div>
-  {:else if failure && copy}
-    <div class="center" role={copy.tone === 'error' ? 'alert' : 'status'}>
-      <span class="mark" aria-hidden="true">{copy.tone === 'error' ? '🍂' : '🍃'}</span>
-      <h1>{copy.title}</h1>
-      <p class="message">{copy.message}</p>
-      {#if copy.retry || copy.close}
-        <div class="actions">
-          {#if copy.retry}
-            <Button variant="primary" onclick={noop}>{copy.retry}</Button>
-          {/if}
-          {#if copy.close}
-            <Button variant={copy.retry ? 'secondary' : 'primary'} onclick={noop}>
-              Close leaf
-            </Button>
-          {/if}
-        </div>
-      {/if}
-      {#if copy.details}
-        <details class="details">
-          <summary>Details</summary>
-          <p>{failure.detail}</p>
-        </details>
-      {/if}
-    </div>
-  {/if}
-</main>
+    {:else if failure && copy}
+      <div class="center" role={copy.tone === 'error' ? 'alert' : 'status'}>
+        <span class="mark" aria-hidden="true">{copy.tone === 'error' ? '🍂' : '🍃'}</span>
+        <h1>{copy.title}</h1>
+        <p class="message">{copy.message}</p>
+        {#if copy.retry || copy.close}
+          <div class="actions">
+            {#if copy.retry}
+              <Button variant="primary" onclick={noop}>{copy.retry}</Button>
+            {/if}
+            {#if copy.close}
+              <Button variant={copy.retry ? 'secondary' : 'primary'} onclick={noop}>
+                Close leaf
+              </Button>
+            {/if}
+          </div>
+        {/if}
+        {#if copy.details}
+          <details class="details">
+            <summary>Details</summary>
+            <p>{failure.detail}</p>
+          </details>
+        {/if}
+      </div>
+    {/if}
+  </main>
+</Minimisable>
 
 <style>
   .boot {

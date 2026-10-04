@@ -180,7 +180,14 @@ export const mySeriesSchema = z.object({
   state: z.string(),
   cadence: z.string(),
   channel_id: z.string().nullable(),
-  channel_name: z.string().nullable(),
+  /** Without `#`. Not there when leaf cannot see the channel (deleted, or hidden from it). */
+  channel_name: opt(z.string()),
+  /**
+   * True when the series' channel is gone or hidden from leaf. A server that
+   * does not send it says the same with no name; an older one may still send
+   * the name it last knew. Read both through `channelOf` (utils/channel.ts).
+   */
+  channel_missing: opt(z.boolean()),
   archived_days: z.number(),
   reminder_enabled: z.boolean(),
   /** Why the last reminder could not be delivered, if it could not. */

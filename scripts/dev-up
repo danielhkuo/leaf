@@ -1,0 +1,499 @@
+#!/usr/bin/env bash
+#
+# scripts/dev-up: bring the local dev environment up, so leaf can be tried in
+# a real Discord client. guide/06-local-dev.md explains the one-time setup.
+#
+# It builds the gallery and the leaf binary, starts leaf on 127.0.0.1, starts
+# the named tunnel when scripts/dev.env has one, and with --emulator boots the
+# Android emulator. Each step waits until the thing answers and prints one
+# line. It only ever starts things: what is already running is reported and
+# left alone, and a port held by something else is an error, never a kill.
+
+set -u
+
+# shellcheck source=scripts/dev-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/dev-lib.sh"
+
+usage() {
+  cat <<'EOF'
+Usage: scripts/dev-up [--emulator] [--no-tunnel] [--no-build] [--port N]
+
+Builds the gallery and leaf, starts leaf on 127.0.0.1, then the tunnel when
+scripts/dev.env names one, and waits until each answers. Safe to run again:
+what is already running is reported and left alone.
+
+  --emulator    also boot the Android emulator (LEAF_DEV_AVD) and wait for it
+  --no-tunnel   do not start the tunnel
+  --no-build    start what is already built
+  --port N      listen on 127.0.0.1:N instead of LEAF_DEV_PORT (default 3777)
+
+Settings come from scripts/dev.env (copy scripts/dev.env.example).
+scripts/dev-status shows what is running; scripts/dev-down stops it.
+EOF
+}
+
+want_emulator=0
+want_tunnel=1
+want_build=1
+port_flag=
+while [ $# -gt 0 ]; do
+  case $1 in
+  --emulator) want_emulator=1 ;;
+  --no-tunnel) want_tunnel=0 ;;
+  --no-build) want_build=0 ;;
+  --port)
+    # An empty value is a missing one, not a reason to use the default.
+    if [ $# -lt 2 ] || [ -z "$2" ]; then
+      dev_die "--port needs a port number."
+    fi
+    port_flag=$2
+    shift
+    ;;
+  --port=*)
+    port_flag=${1#--port=}
+    [ -n "$port_flag" ] || dev_die "--port needs a port number."
+    ;;
+  -h | --help)
+    usage
+    exit 0
+    ;;
+  *)
+    usage >&2
+    dev_die "“${1}” is not an option."
+    ;;
+  esac
+  shift
+done
+
+# Which mode leaf answered in: `setup` or `run`.
+LEAF_MODE=
+
+# Where cargo puts what it builds. cargo itself is asked, because the
+# directory can be set in a cargo config file as well as in the environment;
+# without an answer, it is what the environment says, or ./target.
+up_target_dir() {
+  local dir=
+  if command -v cargo >/dev/null 2>&1; then
+    dir=$(dev_json_string "$(cargo metadata --no-deps --format-version 1 2>/dev/null </dev/null)" target_directory)
+  fi
+  [ -n "$dir" ] || dir=${CARGO_TARGET_DIR:-${CARGO_BUILD_TARGET_DIR:-target}}
+  dev_abs_path "$dir"
+}
+
+# Builds the gallery and the binary (unless --no-build) and checks both are
+# there. Sets LEAF_BIN.
+up_build() {
+  local log
+
+  dev_step gallery
+  if [ "$want_build" -eq 0 ]; then
+    if [ -f "$DEV_STATIC_DIR/index.html" ]; then
+      dev_skip "--no-build: serving the build in $(dev_show_path "$DEV_STATIC_DIR")"
+    else
+      dev_failed "the gallery is not built (no $(dev_show_path "$DEV_STATIC_DIR")/index.html). Run scripts/dev-up without --no-build."
+      return 1
+    fi
+  elif ! command -v npm >/dev/null 2>&1; then
+    dev_failed "npm was not found on PATH. The gallery needs Node 22 or later."
+    return 1
+  elif [ ! -d "$DEV_REPO/activity/node_modules" ]; then
+    dev_failed "the gallery's packages are not installed. Run: npm --prefix activity install"
+    return 1
+  else
+    log=$DEV_RUN_DIR/build-gallery.log
+    if npm --prefix "$DEV_REPO/activity" run build >"$log" 2>&1 </dev/null; then
+      dev_ok "built into $(dev_show_path "$DEV_STATIC_DIR")"
+    else
+      dev_failed "npm --prefix activity run build failed"
+      dev_log_tail "$log"
+      return 1
+    fi
+  fi
+
+  dev_step binary
+  LEAF_BIN=$(up_target_dir)/debug/leaf
+  if [ "$want_build" -eq 0 ]; then
+    if [ -x "$LEAF_BIN" ]; then
+      dev_skip "--no-build: starting $(dev_show_path "$LEAF_BIN")"
+    else
+      dev_failed "leaf is not built (no $(dev_show_path "$LEAF_BIN")). Run scripts/dev-up without --no-build."
+      return 1
+    fi
+  elif ! command -v cargo >/dev/null 2>&1; then
+    dev_failed "cargo was not found on PATH. Install Rust with rustup; rust-toolchain.toml pins the version."
+    return 1
+  else
+    log=$DEV_RUN_DIR/build-leaf.log
+    if ! cargo build -p leaf >"$log" 2>&1 </dev/null; then
+      dev_failed "cargo build -p leaf failed"
+      dev_log_tail "$log"
+      return 1
+    elif [ ! -x "$LEAF_BIN" ]; then
+      dev_failed "cargo build -p leaf finished, but there is no binary at $(dev_show_path "$LEAF_BIN"). Set CARGO_TARGET_DIR to the directory cargo builds into, then run scripts/dev-up again."
+      return 1
+    else
+      dev_ok "built $(dev_show_path "$LEAF_BIN")"
+    fi
+  fi
+}
+
+# Waits for the leaf with this pid to answer. Sets LEAF_MODE. Returns 1 when
+# the process exited first, 2 when it did not answer in time.
+up_wait_leaf() {
+  local pid=$1 deadline=$((SECONDS + DEV_WAIT_LEAF))
+  LEAF_MODE=
+  while :; do
+    dev_proc_alive "$pid" || return 1
+    LEAF_MODE=$(dev_leaf_mode)
+    [ -n "$LEAF_MODE" ] && return 0
+    [ "$SECONDS" -lt "$deadline" ] || return 2
+    sleep "$DEV_POLL"
+  done
+}
+
+# Run mode: says where the bot's connection to Discord stands.
+up_gateway() {
+  local deadline=$((SECONDS + DEV_WAIT_GATEWAY))
+  dev_step gateway
+  while :; do
+    dev_read_gateway
+    [ "$DEV_GATEWAY" = starting ] || break
+    [ "$SECONDS" -lt "$deadline" ] || break
+    sleep "$DEV_POLL"
+  done
+  case $DEV_GATEWAY in
+  online) dev_ok "online: the bot is connected to Discord" ;;
+  starting)
+    dev_failed "still connecting to Discord after ${DEV_WAIT_GATEWAY}s. leaf keeps trying; scripts/dev-status shows where it stands."
+    ;;
+  error) dev_failed "the bot is not connected: ${DEV_GATEWAY_DETAIL:-leaf gave no reason}" ;;
+  *) dev_failed "$DEV_LOCAL_URL/api/status did not say where the bot stands" ;;
+  esac
+  [ -n "$DEV_GATEWAY_NOTICE" ] && dev_more "notice: $DEV_GATEWAY_NOTICE"
+  [ "$DEV_GATEWAY" = online ] || dev_log_tail "$(dev_log_file leaf)"
+  return 0
+}
+
+# What to print under a leaf that answers.
+up_leaf_answers() {
+  if [ "$LEAF_MODE" = setup ]; then
+    dev_setup_code_line
+    dev_more "open http://localhost:$DEV_PORT/setup and enter it to finish setup"
+  else
+    up_gateway
+  fi
+}
+
+# Starts leaf, or reports the one dev-up started earlier. Returns 1 when there
+# is no leaf to go on with.
+up_leaf() {
+  local state pid recorded conflict rc
+  local -a leaf_env
+
+  dev_component_state leaf
+  state=$?
+  if [ "$state" -eq 0 ]; then
+    pid=$DEV_PID
+    recorded=$(dev_info_get leaf port)
+    dev_step leaf
+    if [ -n "$recorded" ] && [ "$recorded" != "$DEV_PORT" ]; then
+      dev_failed "leaf is already running on port $recorded (pid $pid), not $DEV_PORT. Run scripts/dev-down first to move it."
+      return 1
+    fi
+    if up_wait_leaf "$pid"; then
+      if ! dev_port_is_held_by "$DEV_PORT" "$pid"; then
+        dev_failed "leaf is running (pid $pid), but $(dev_port_conflict "$DEV_PORT"), which dev-up did not start: what answers on $DEV_LOCAL_URL is not this leaf. scripts/dev-down stops this leaf; stop the other process yourself."
+        return 1
+      fi
+      dev_ok "already running: $LEAF_MODE mode on $DEV_LOCAL_URL (pid $pid)"
+      dev_more "to rebuild and restart it: scripts/dev-down, then scripts/dev-up"
+      up_leaf_answers
+      return 0
+    fi
+    dev_failed "running (pid $pid) but not answering on $DEV_LOCAL_URL. scripts/dev-down, then scripts/dev-up, restarts it."
+    dev_log_tail "$(dev_log_file leaf)"
+    return 1
+  fi
+  # A record of a process that has gone, or whose pid is someone else's now:
+  # nothing to stop, only to forget.
+  [ "$state" -eq 1 ] || dev_forget leaf
+
+  # Before the build, so a taken port costs seconds and not a compile.
+  conflict=$(dev_port_conflict "$DEV_PORT")
+  if [ -n "$conflict" ]; then
+    dev_step leaf
+    dev_failed "$conflict, which dev-up did not start. Stop it yourself, or use another port: scripts/dev-up --port N."
+    return 1
+  fi
+
+  up_build || return 1
+
+  dev_step leaf
+  leaf_env=(
+    "DATA_DIR=$DEV_DATA_DIR"
+    "STATIC_DIR=$DEV_STATIC_DIR"
+    "BIND_ADDR=127.0.0.1:$DEV_PORT"
+    # Plain text in the log file, not colour codes.
+    "NO_COLOR=1"
+  )
+  [ -n "${LOG_LEVEL:-}" ] && leaf_env+=("LOG_LEVEL=$LOG_LEVEL")
+  [ -n "${DEV_GUILD_ID:-}" ] && leaf_env+=("DEV_GUILD_ID=$DEV_GUILD_ID")
+  dev_spawn leaf "$LEAF_BIN" env "${leaf_env[@]}" "$LEAF_BIN"
+  pid=$DEV_PID
+  dev_info_add leaf port "$DEV_PORT"
+  dev_info_add leaf data "$DEV_DATA_DIR"
+
+  up_wait_leaf "$pid"
+  rc=$?
+  # The port was free before the build. If something took it meanwhile, the
+  # answer that ended the wait is that process's, not this leaf's.
+  if [ "$rc" -eq 0 ] && ! dev_port_is_held_by "$DEV_PORT" "$pid"; then
+    conflict=$(dev_port_conflict "$DEV_PORT")
+    dev_stop_recorded leaf
+    dev_failed "$conflict, which dev-up did not start. It took the port after dev-up found it free, so the leaf dev-up started could not listen there and was stopped. Stop that process yourself, or use another port: scripts/dev-up --port N."
+    dev_log_tail "$(dev_log_file leaf)"
+    dev_forget leaf
+    return 1
+  fi
+  case $rc in
+  0)
+    dev_ok "$LEAF_MODE mode on $DEV_LOCAL_URL (pid $pid)"
+    up_leaf_answers
+    return 0
+    ;;
+  1) dev_failed "leaf exited before it answered on $DEV_LOCAL_URL" ;;
+  *)
+    dev_stop_recorded leaf
+    dev_failed "leaf did not answer on $DEV_LOCAL_URL within ${DEV_WAIT_LEAF}s, so it was stopped"
+    ;;
+  esac
+  dev_log_tail "$(dev_log_file leaf)"
+  dev_forget leaf
+  return 1
+}
+
+# Waits until a URL answers 200. With a pid, gives up as soon as that process
+# exits (returns 1); returns 2 when the time is up.
+up_wait_url() {
+  local url=$1 pid=$2 deadline=$((SECONDS + DEV_WAIT_TUNNEL))
+  while :; do
+    if [ -n "$pid" ] && ! dev_proc_alive "$pid"; then
+      return 1
+    fi
+    [ "$(dev_http_code "$url")" = 200 ] && return 0
+    [ "$SECONDS" -lt "$deadline" ] || return 2
+    sleep "$DEV_POLL"
+  done
+}
+
+# A tunnel config that sends the hostname to another port explains a public
+# URL that answers with something else, or not at all.
+up_tunnel_port_note() {
+  if ! grep -Eq ":$DEV_PORT([^0-9]|\$)" "$DEV_TUNNEL_CONFIG" 2>/dev/null; then
+    dev_more "note: $DEV_TUNNEL_CONFIG does not mention port $DEV_PORT, so $DEV_PUBLIC_URL may not reach this leaf"
+  fi
+}
+
+up_tunnel() {
+  local state url pid foreign rc log
+  dev_step tunnel
+  if [ "$want_tunnel" -eq 0 ]; then
+    dev_skip "--no-tunnel"
+    return 0
+  fi
+  if [ -z "$DEV_TUNNEL_CONFIG" ]; then
+    dev_skip "LEAF_DEV_TUNNEL_CONFIG is not set (scripts/dev.env.example shows how)"
+    return 0
+  fi
+  if [ ! -f "$DEV_TUNNEL_CONFIG" ]; then
+    dev_failed "there is no tunnel config at $DEV_TUNNEL_CONFIG. Correct LEAF_DEV_TUNNEL_CONFIG in scripts/dev.env."
+    return 1
+  fi
+  if [ -z "$DEV_PUBLIC_URL" ]; then
+    dev_failed "LEAF_DEV_PUBLIC_URL is not set, so there is no address to check the tunnel at. Set it to the tunnel's https address in scripts/dev.env."
+    return 1
+  fi
+  url=$DEV_PUBLIC_URL$(dev_mode_path "$LEAF_MODE")
+  log=$(dev_log_file tunnel)
+
+  dev_component_state tunnel
+  state=$?
+  if [ "$state" -eq 0 ]; then
+    pid=$DEV_PID
+    if up_wait_url "$url" "$pid"; then
+      dev_ok "already running: $url answers (pid $pid)"
+      up_tunnel_port_note
+      return 0
+    fi
+    dev_failed "running (pid $pid), but $url does not answer. scripts/dev-down, then scripts/dev-up, restarts it."
+    up_tunnel_port_note
+    dev_log_tail "$log"
+    return 1
+  fi
+  [ "$state" -eq 1 ] || dev_forget tunnel
+
+  # A cloudflared someone started by hand for this same tunnel: use it rather
+  # than run a second connector beside it.
+  foreign=$(dev_find_process "tunnel " "--config $DEV_TUNNEL_CONFIG " | head -n 1)
+  if [ -n "$foreign" ]; then
+    if up_wait_url "$url" ""; then
+      dev_ok "$url answers through a cloudflared that dev-up did not start (pid $foreign); dev-down will leave it running"
+      up_tunnel_port_note
+      return 0
+    fi
+    dev_failed "a cloudflared that dev-up did not start (pid $foreign) runs this tunnel, but $url does not answer. Stop it yourself, then run scripts/dev-up again."
+    up_tunnel_port_note
+    return 1
+  fi
+
+  if ! command -v "$DEV_CLOUDFLARED" >/dev/null 2>&1; then
+    dev_failed "cloudflared was not found on PATH. Install it (brew install cloudflared), or run scripts/dev-up --no-tunnel."
+    return 1
+  fi
+  if [ -n "$DEV_TUNNEL_NAME" ]; then
+    dev_spawn tunnel "--config $DEV_TUNNEL_CONFIG" \
+      "$DEV_CLOUDFLARED" tunnel --config "$DEV_TUNNEL_CONFIG" run "$DEV_TUNNEL_NAME"
+  else
+    dev_spawn tunnel "--config $DEV_TUNNEL_CONFIG" \
+      "$DEV_CLOUDFLARED" tunnel --config "$DEV_TUNNEL_CONFIG" run
+  fi
+  pid=$DEV_PID
+  dev_info_add tunnel url "$DEV_PUBLIC_URL"
+
+  up_wait_url "$url" "$pid"
+  rc=$?
+  case $rc in
+  0)
+    dev_ok "$url answers (pid $pid)"
+    up_tunnel_port_note
+    return 0
+    ;;
+  1) dev_failed "cloudflared exited before $url answered" ;;
+  *)
+    dev_stop_recorded tunnel
+    dev_failed "$url did not answer within ${DEV_WAIT_TUNNEL}s, so the tunnel was stopped"
+    ;;
+  esac
+  up_tunnel_port_note
+  dev_log_tail "$log"
+  dev_forget tunnel
+  return 1
+}
+
+up_emulator() {
+  local state pid='' whose='' serial='' deadline rc recorded foreign=''
+  local -a emulator_command
+  [ "$want_emulator" -eq 1 ] || return 0
+  dev_step emulator
+  if [ -z "$DEV_AVD" ]; then
+    dev_failed "LEAF_DEV_AVD is not set. Name the virtual device in scripts/dev.env (emulator -list-avds lists them)."
+    return 1
+  fi
+  dev_find_sdk_tools
+  if [ -z "$DEV_EMULATOR_BIN" ] || [ -z "$DEV_ADB_BIN" ]; then
+    dev_failed "the Android SDK's emulator and adb were not found. Set ANDROID_HOME in scripts/dev.env to the SDK directory, the one that holds emulator/ and platform-tools/."
+    return 1
+  fi
+
+  dev_component_state emulator
+  state=$?
+  if [ "$state" -eq 0 ]; then
+    pid=$DEV_PID
+    whose=earlier
+    recorded=$(dev_info_get emulator avd)
+    if [ -n "$recorded" ] && [ "$recorded" != "$DEV_AVD" ]; then
+      dev_failed "the emulator dev-up started runs $recorded (pid $pid), not $DEV_AVD. Run scripts/dev-down --emulator first."
+      return 1
+    fi
+  else
+    [ "$state" -eq 1 ] || dev_forget emulator
+    foreign=$(dev_foreign_emulator)
+    if [ -n "$foreign" ]; then
+      # Started by hand: one AVD cannot run twice, and this one is not ours
+      # to stop. Only wait for it.
+      whose=foreign
+    else
+      whose=new
+      emulator_command=()
+      if [ -n "$DEV_ANDROID_HOME" ]; then
+        emulator_command+=(env "ANDROID_HOME=$DEV_ANDROID_HOME" "ANDROID_SDK_ROOT=$DEV_ANDROID_HOME")
+      fi
+      emulator_command+=("$DEV_EMULATOR_BIN" -avd "$DEV_AVD")
+      # shellcheck disable=SC2206  # extra arguments, split on spaces on purpose
+      [ -n "$DEV_EMULATOR_ARGS" ] && emulator_command+=($DEV_EMULATOR_ARGS)
+      dev_spawn emulator "-avd $DEV_AVD" "${emulator_command[@]}"
+      pid=$DEV_PID
+      dev_info_add emulator avd "$DEV_AVD"
+    fi
+  fi
+
+  deadline=$((SECONDS + DEV_WAIT_EMULATOR))
+  while :; do
+    if [ -n "$pid" ] && ! dev_proc_alive "$pid"; then
+      rc=1
+      break
+    fi
+    # Looked up until adb lists it; after that only the boot flag is asked.
+    [ -n "$serial" ] || serial=$(dev_emulator_serial)
+    if [ -n "$serial" ] && dev_emulator_booted "$serial"; then
+      rc=0
+      break
+    fi
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      rc=2
+      break
+    fi
+    sleep "$DEV_POLL"
+  done
+
+  case $rc:$whose in
+  0:new) dev_ok "$DEV_AVD is booted on $serial (pid $pid)" ;;
+  0:earlier) dev_ok "already running: $DEV_AVD is booted on $serial (pid $pid)" ;;
+  0:foreign)
+    dev_ok "$DEV_AVD is booted on $serial, in an emulator that dev-up did not start (pid $foreign); dev-down will leave it running"
+    ;;
+  1:*)
+    dev_failed "the emulator exited before Android finished booting"
+    dev_log_tail "$(dev_log_file emulator)"
+    dev_forget emulator
+    return 1
+    ;;
+  2:new)
+    dev_stop_recorded emulator "$DEV_WAIT_STOP_EMULATOR"
+    dev_failed "Android had not finished booting after ${DEV_WAIT_EMULATOR}s, so the emulator was stopped. LEAF_DEV_WAIT_EMULATOR sets how long to wait."
+    dev_log_tail "$(dev_log_file emulator)"
+    dev_forget emulator
+    return 1
+    ;;
+  2:earlier)
+    dev_failed "the emulator is running (pid $pid), but Android has not finished booting after ${DEV_WAIT_EMULATOR}s. Run scripts/dev-up --emulator again to keep waiting."
+    dev_log_tail "$(dev_log_file emulator)"
+    return 1
+    ;;
+  *)
+    dev_failed "an emulator that dev-up did not start runs $DEV_AVD (pid $foreign), but Android has not finished booting after ${DEV_WAIT_EMULATOR}s."
+    return 1
+    ;;
+  esac
+  return 0
+}
+
+dev_load_settings "$port_flag"
+dev_require curl
+dev_make_run_dir
+dev_lock
+trap dev_unlock EXIT
+trap 'printf "\ninterrupted. What had started is still running: scripts/dev-status shows it, scripts/dev-down stops it.\n" >&2; exit 130' INT TERM
+cd "$DEV_REPO" || dev_die "cannot enter $DEV_REPO."
+
+if up_leaf; then
+  up_tunnel
+  up_emulator
+fi
+
+if [ "$DEV_FAILED" -ne 0 ]; then
+  printf '\nNot everything is up. scripts/dev-status shows what is running; scripts/dev-down stops it.\n'
+  exit 1
+fi
+printf '\nUp. scripts/dev-status shows this again; scripts/dev-down stops it.\n'
+exit 0

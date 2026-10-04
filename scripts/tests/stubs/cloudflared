@@ -1,0 +1,87 @@
+#!/usr/bin/env python3
+"""Stand-in for cloudflared, for scripts/tests/run.
+
+Run as `cloudflared tunnel --config <file> run [<name>]`, it plays the public
+end of a tunnel on 127.0.0.1: every request gets HTTP 530 (what Cloudflare
+answers while a tunnel has no connection) until the tunnel is "connected",
+and after that the origin's own answer. Nothing leaves this machine.
+
+  STUB_TUNNEL         ok (default), never (530 for ever) or die (exit 1)
+  STUB_TUNNEL_PORT    the port that plays the public URL
+  STUB_TUNNEL_ORIGIN  where requests are passed on to: 127.0.0.1:<leaf's port>
+  STUB_TUNNEL_COLD    how many requests get 530 before the tunnel connects
+  STUB_IGNORE_TERM    ignore SIGTERM when this names `tunnel`
+  STUB_STATE          a directory: `cloudflared.args` gets the arguments.
+                      While a file `tunnel.down` is there, every request gets
+                      530 again: a tunnel that has lost its connection
+  STUB_READY_FIFO     a fifo that gets one line once the port is open
+"""
+
+import http.client
+import http.server
+import os
+import signal
+import sys
+
+MODE = os.environ.get("STUB_TUNNEL", "ok")
+STATE = os.environ.get("STUB_STATE", "")
+ORIGIN = os.environ.get("STUB_TUNNEL_ORIGIN", "")
+cold_left = int(os.environ.get("STUB_TUNNEL_COLD", "0"))
+
+
+def log(message):
+    print("2026-10-03T12:00:00Z INF " + message, flush=True)
+
+
+def on_term(_signum, _frame):
+    log("Initiating graceful shutdown due to signal terminated ...")
+    sys.exit(0)
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *_args):
+        pass
+
+    def do_GET(self):
+        global cold_left
+        status = 530
+        if STATE and os.path.exists(os.path.join(STATE, "tunnel.down")):
+            pass
+        elif MODE == "ok" and cold_left > 0:
+            cold_left -= 1
+        elif MODE == "ok":
+            host, _, port = ORIGIN.rpartition(":")
+            try:
+                origin = http.client.HTTPConnection(host, int(port), timeout=2)
+                origin.request("GET", self.path)
+                status = origin.getresponse().status
+                origin.close()
+            except OSError:
+                status = 502
+        self.send_response(status)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+
+def main():
+    if STATE:
+        with open(os.path.join(STATE, "cloudflared.args"), "w", encoding="utf-8") as record:
+            record.write(" ".join(sys.argv[1:]) + "\n")
+    if "tunnel" in os.environ.get("STUB_IGNORE_TERM", ""):
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    else:
+        signal.signal(signal.SIGTERM, on_term)
+    if MODE == "die":
+        print("2026-10-03T12:00:00Z ERR Tunnel credentials file not found", flush=True)
+        sys.exit(1)
+    server = http.server.HTTPServer(("127.0.0.1", int(os.environ["STUB_TUNNEL_PORT"])), Handler)
+    log("Starting tunnel (stand-in)")
+    fifo = os.environ.get("STUB_READY_FIFO")
+    if fifo:
+        with open(fifo, "w", encoding="utf-8") as ready:
+            ready.write("ready\n")
+    server.serve_forever()
+
+
+if __name__ == "__main__":
+    main()

@@ -12,6 +12,10 @@ docs/
 PLAN.md
 .env
 leaf.conf
+# The local dev environment (scripts/dev-up): its settings, and its logs and
+# pid files. leaf's dev log holds a setup code.
+scripts/dev.env
+.dev-run/
 # Copies of real data (see .gitignore): never into a build layer or its cache.
 *.tgz
 *.tar.gz

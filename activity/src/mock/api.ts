@@ -7,7 +7,13 @@
 // It keeps what was done to it (a series created, settings saved) until the
 // page reloads, so those flows can be walked through to the end.
 
-import type { CreateSeriesInput, Eligibility, Series, UpdateSeriesInput } from '../lib/types/api';
+import type {
+  CreateSeriesInput,
+  Eligibility,
+  Series,
+  SeriesOptions,
+  UpdateSeriesInput,
+} from '../lib/types/api';
 import {
   dayOf,
   eligibilityOk,
@@ -30,6 +36,8 @@ export interface Scenario {
   series?: Series[] | undefined;
   /** Whether the viewer may start a series. */
   eligibility?: Eligibility | undefined;
+  /** The forms' choices: the server's series channels and its roles. */
+  options?: SeriesOptions | undefined;
   /** Requests for a day never answer: the viewer stays on its loading state. */
   holdDays?: boolean | undefined;
   /**
@@ -195,9 +203,11 @@ function answer(
     return ok(state.series);
   }
   if (first === 'eligibility') return ok(scenario.eligibility ?? eligibilityOk);
-  if (first === 'options') return ok(options);
+  const choices = scenario.options ?? options;
+  if (first === 'options') return ok(choices);
   if (first === 'mine') {
-    return ok(state.series.filter((s) => s.is_owner).map((s) => mineOf(s, state.owner.get(s.id))));
+    const owned = state.series.filter((s) => s.is_owner);
+    return ok(owned.map((s) => mineOf(s, state.owner.get(s.id), choices.channels)));
   }
 
   const found = state.series.find((s) => s.id === Number(first));

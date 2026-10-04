@@ -30,8 +30,18 @@
 //!
 //! A DM that cannot be delivered never falls back to a channel ping: that
 //! would name the creator in public, which they did not choose.
+//!
+//! A reminder says how to archive, and those steps name leaf's app as
+//! Discord's menus list it. The gateway says what that is when it connects,
+//! which is after the scheduler starts, so the first pass waits a moment for
+//! it ([`APP_NAME_PATIENCE`]).
+//!
+//! A DM names the series' channel and links to it only while leaf can see
+//! the channel (see [`crate::channels`]). Once it cannot, the DM says so
+//! instead and points at Series settings, where the creator picks another.
 
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::error::Error as _;
 use std::num::NonZeroU64;
 use std::sync::Arc;
@@ -45,7 +55,9 @@ use poise::serenity_prelude as serenity;
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
+use crate::channels::{self, Sight};
 use crate::checks::now_unix;
+use crate::menus;
 
 /// How often the scheduler wakes. One minute is fine: reminder times have
 /// minute resolution and the predicate is idempotent across ticks.
@@ -68,10 +80,11 @@ const RETRY_BASE_SECS: i64 = 60;
 /// Stateless, so the button still works after a restart.
 pub const REM_OFF_PREFIX: &str = "leaf:rem-off:";
 
-/// The archive gesture, for the middle of a sentence. Same words as the
-/// hint the query commands give.
-const ARCHIVE_STEPS: &str =
-    "long-press the post (right-click on desktop), then Apps, then Archive to Series";
+/// How long the first pass waits for the gateway to say what leaf's app is
+/// called. Connecting takes a second or two; past this the gateway is
+/// unreachable, and a reminder that is due goes out describing the app
+/// instead of naming it.
+const APP_NAME_PATIENCE: Duration = Duration::from_secs(15);
 
 /// Where the rest of the reminder settings live. A DM has no server, so the
 /// gallery cannot be opened from it.
@@ -124,22 +137,57 @@ impl Gate {
 
 static GATE: Gate = Gate::new();
 
-/// Runs the scheduler until `shutdown` flips. The first tick fires
-/// immediately on startup, so a reminder whose window is still open after a
-/// restart goes out at once.
+/// Runs the scheduler until `shutdown` flips. The first tick fires on
+/// startup, so a reminder whose window is still open after a restart goes
+/// out then.
 ///
 /// Safe to call once per gateway connection attempt: while a scheduler is
 /// ticking, one more call waits to take over when it ends and any further
 /// call returns at once.
-pub async fn run(http: Arc<serenity::Http>, series: SeriesRepo, shutdown: watch::Receiver<bool>) {
-    drive(&GATE, Live(http), series, shutdown, now_unix).await;
+///
+/// `app_name` is the name Discord's menus list leaf's app under, empty until
+/// the gateway has said it. The reminders name it in their steps, so the
+/// first tick waits for it, [`APP_NAME_PATIENCE`] at most.
+///
+/// `cache` is the gateway's: what stands in for Discord's channel list when
+/// that cannot be had (see [`Sight::look`]).
+pub async fn run(
+    http: Arc<serenity::Http>,
+    cache: Arc<serenity::Cache>,
+    series: SeriesRepo,
+    app_name: watch::Receiver<String>,
+    shutdown: watch::Receiver<bool>,
+) {
+    drive(
+        &GATE,
+        Live { http, cache },
+        series,
+        app_name,
+        APP_NAME_PATIENCE,
+        shutdown,
+        now_unix,
+    )
+    .await;
 }
 
-/// [`run`], with the gate, the Discord calls and the clock passed in.
+/// Waits until the app's name is known, for `patience` at most. False when
+/// it still is not: the time ran out, or the gateway connection that would
+/// have said it is gone.
+async fn app_name_known(app_name: &mut watch::Receiver<String>, patience: Duration) -> bool {
+    let said = app_name.wait_for(|name| !name.trim().is_empty());
+    tokio::time::timeout(patience, said)
+        .await
+        .is_ok_and(|waited| waited.is_ok())
+}
+
+/// [`run`], with the gate, the Discord calls, the clock and how long the
+/// first pass waits for the app's name (`patience`) passed in.
 async fn drive<C: Courier>(
     gate: &Gate,
     courier: C,
     series: SeriesRepo,
+    mut app_name: watch::Receiver<String>,
+    patience: Duration,
     mut shutdown: watch::Receiver<bool>,
     clock: fn() -> i64,
 ) {
@@ -157,8 +205,19 @@ async fn drive<C: Courier>(
         _ = shutdown.changed() => return,
     };
     drop(queued);
+    // The first pass sends at once, and what it sends names the app.
+    let named = tokio::select! {
+        biased;
+        named = app_name_known(&mut app_name, patience) => named,
+        _ = shutdown.changed() => return,
+    };
+    if !named {
+        // A reminder that describes the app is worth more than none: the
+        // gateway may stay unreachable for the whole due window.
+        warn!("reminders: Discord has not said what leaf's app is called; going on without it");
+    }
     info!("reminder scheduler started");
-    let mut scheduler = Scheduler::new(courier, series);
+    let mut scheduler = Scheduler::new(courier, series, app_name);
     loop {
         if *shutdown.borrow() {
             break;
@@ -492,10 +551,17 @@ trait Courier: Send + Sync {
         channel: serenity::ChannelId,
         message: serenity::CreateMessage,
     ) -> impl Future<Output = Result<(), Failure>> + Send;
+
+    /// Which channels of `guild` leaf can see. Never fails: when nothing
+    /// can be found out, every channel counts as seen.
+    fn sight(&self, guild: serenity::GuildId) -> impl Future<Output = Sight> + Send;
 }
 
-/// Discord itself, over the gateway client's HTTP handle.
-struct Live(Arc<serenity::Http>);
+/// Discord itself, over the gateway client's HTTP handle and its cache.
+struct Live {
+    http: Arc<serenity::Http>,
+    cache: Arc<serenity::Cache>,
+}
 
 impl Courier for Live {
     async fn guild_name(&self, guild: serenity::GuildId) -> Result<String, Failure> {
@@ -506,7 +572,7 @@ impl Courier for Live {
             serenity::Route::Guild { guild_id: guild },
             serenity::LightMethod::Get,
         );
-        match self.0.fire::<serenity::json::Value>(request).await {
+        match self.http.fire::<serenity::json::Value>(request).await {
             Ok(found) => Ok(found
                 .get("name")
                 .and_then(serenity::json::Value::as_str)
@@ -521,7 +587,7 @@ impl Courier for Live {
         guild: serenity::GuildId,
         user: serenity::UserId,
     ) -> Result<(), Failure> {
-        match self.0.get_member(guild, user).await {
+        match self.http.get_member(guild, user).await {
             Ok(_) => Ok(()),
             Err(e) => Err(Failure::of(&e)),
         }
@@ -533,7 +599,7 @@ impl Courier for Live {
         message: serenity::CreateMessage,
     ) -> Result<(), Failure> {
         let channel = user
-            .create_dm_channel(&self.0)
+            .create_dm_channel(&self.http)
             .await
             .map_err(|e| Failure::of(&e))?;
         self.post(channel.id, message).await
@@ -556,10 +622,14 @@ impl Courier for Live {
             serenity::LightMethod::Post,
         )
         .body(Some(body));
-        match self.0.request(request).await {
+        match self.http.request(request).await {
             Ok(_) => Ok(()),
             Err(e) => Err(Failure::of(&e)),
         }
+    }
+
+    async fn sight(&self, guild: serenity::GuildId) -> Sight {
+        Sight::look(&self.http, &self.cache, guild).await
     }
 }
 
@@ -616,9 +686,19 @@ enum Server {
     Gone,
 }
 
-/// Server lookups made during one pass, so several series in one server
-/// cost one request.
-type Servers = HashMap<serenity::GuildId, Server>;
+/// What the scheduler asked about servers during one pass, so several
+/// series in one server cost one request of each kind.
+#[derive(Debug, Default)]
+struct Servers {
+    named: HashMap<serenity::GuildId, Server>,
+    sights: HashMap<serenity::GuildId, Sight>,
+}
+
+impl Servers {
+    fn new() -> Self {
+        Self::default()
+    }
+}
 
 /// Parses a stored snowflake. `None` for anything that is not a non-zero
 /// number: serenity's id constructors panic on zero.
@@ -631,7 +711,7 @@ async fn lookup_server<C: Courier>(
     guild: serenity::GuildId,
     seen: &mut Servers,
 ) -> Server {
-    if let Some(known) = seen.get(&guild) {
+    if let Some(known) = seen.named.get(&guild) {
         return known.clone();
     }
     let server = match courier.guild_name(guild).await {
@@ -645,16 +725,38 @@ async fn lookup_server<C: Courier>(
             Server::Unnamed
         }
     };
-    seen.insert(guild, server.clone());
+    seen.named.insert(guild, server.clone());
     server
 }
 
+/// Where a DM says the series posts: its channel while leaf can see it.
+async fn lookup_place<C: Courier>(
+    courier: &C,
+    guild: serenity::GuildId,
+    channel: Option<serenity::ChannelId>,
+    seen: &mut Servers,
+) -> Place {
+    let Some(channel) = channel else {
+        return Place::Unset;
+    };
+    let sight = match seen.sights.entry(guild) {
+        Entry::Occupied(known) => known.into_mut(),
+        Entry::Vacant(unknown) => unknown.insert(courier.sight(guild).await),
+    };
+    if sight.sees(&channel.to_string()) {
+        Place::Channel(channel)
+    } else {
+        Place::Lost
+    }
+}
+
 /// Sends the nudge for `day`: a DM to the creator, or a ping in the series'
-/// first channel.
+/// first channel. `app` is the name Discord lists leaf's app under.
 async fn send<C: Courier>(
     courier: &C,
     c: &ReminderCandidate,
     day: i64,
+    app: &str,
     servers: &mut Servers,
 ) -> Outcome {
     let (Some(guild), Some(creator)) = (
@@ -689,14 +791,15 @@ async fn send<C: Courier>(
             Server::Named(name) => Some(name),
             Server::Unnamed => None,
         };
-        let message = dm_message(c, day, guild, channel, server.as_deref());
+        let place = lookup_place(courier, guild, channel, servers).await;
+        let message = dm_message(c, day, guild, place, server.as_deref(), app);
         courier.dm(creator, message).await
     } else {
         let Some(channel) = channel else {
             return Outcome::Refused(ReminderFailureKind::ChannelMissing);
         };
         courier
-            .post(channel, channel_message(c, day, creator))
+            .post(channel, channel_message(c, day, creator, app))
             .await
     };
 
@@ -727,14 +830,17 @@ fn settle(failure: Failure, dm: bool) -> Outcome {
 struct Scheduler<C> {
     courier: C,
     series: SeriesRepo,
+    /// The name Discord lists leaf's app under, as the gateway last said it.
+    app_name: watch::Receiver<String>,
     retries: Retries,
 }
 
 impl<C: Courier> Scheduler<C> {
-    fn new(courier: C, series: SeriesRepo) -> Self {
+    fn new(courier: C, series: SeriesRepo, app_name: watch::Receiver<String>) -> Self {
         Self {
             courier,
             series,
+            app_name,
             retries: Retries::default(),
         }
     }
@@ -790,7 +896,9 @@ impl<C: Courier> Scheduler<C> {
             return;
         }
 
-        let sending = send(&self.courier, c, day, servers);
+        // Read for each reminder: the bot may be renamed while leaf runs.
+        let app = self.app_name.borrow().clone();
+        let sending = send(&self.courier, c, day, &app, servers);
         let outcome = tokio::time::timeout(SEND_TIMEOUT, sending)
             .await
             .unwrap_or_else(|_| {
@@ -973,22 +1081,37 @@ fn off_button(series_id: i64) -> serenity::CreateButton {
         .label("Turn off reminders")
 }
 
+/// Where a series posts, as far as a DM can say.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Place {
+    /// In its channel, which leaf can see: named, and linked to.
+    Channel(serenity::ChannelId),
+    /// Its channel is one leaf can no longer see. A mention of it would
+    /// read "#unknown" and a link to it would lead nowhere, so the DM has
+    /// neither and says what happened.
+    Lost,
+    /// It has no channel, or what is stored is not a channel id.
+    Unset,
+}
+
 /// The DM: what is missing and where, how to archive it, and a way out.
+/// `app` is the name Discord lists leaf's app under, for the steps.
 fn dm_message(
     c: &ReminderCandidate,
     day: i64,
     guild: serenity::GuildId,
-    channel: Option<serenity::ChannelId>,
+    place: Place,
     server: Option<&str>,
+    app: &str,
 ) -> serenity::CreateMessage {
     let mut buttons = Vec::with_capacity(2);
-    if let Some(channel) = channel {
+    if let Place::Channel(channel) = place {
         let url = format!("https://discord.com/channels/{guild}/{channel}");
         buttons.push(serenity::CreateButton::new_link(url).label("Open channel"));
     }
     buttons.push(off_button(c.series_id));
     serenity::CreateMessage::new()
-        .content(dm_text(c, day, channel, server))
+        .content(dm_text(c, day, place, server, app))
         // Series and server names are other people's text: shown, never
         // parsed for mentions.
         .allowed_mentions(serenity::CreateAllowedMentions::new())
@@ -1001,9 +1124,10 @@ fn channel_message(
     c: &ReminderCandidate,
     day: i64,
     creator: serenity::UserId,
+    app: &str,
 ) -> serenity::CreateMessage {
     serenity::CreateMessage::new()
-        .content(channel_text(c, day, creator))
+        .content(channel_text(c, day, creator, app))
         .allowed_mentions(serenity::CreateAllowedMentions::new().users([creator]))
         .components(vec![serenity::CreateActionRow::Buttons(vec![off_button(
             c.series_id,
@@ -1015,27 +1139,40 @@ fn channel_message(
 fn dm_text(
     c: &ReminderCandidate,
     day: i64,
-    channel: Option<serenity::ChannelId>,
+    place: Place,
     server: Option<&str>,
+    app: &str,
 ) -> String {
     let name = display_name(&c.name);
-    let place = server.map_or_else(String::new, |s| format!(" in {}", display_name(s.trim())));
-    let posted = channel.map_or_else(String::new, |ch| format!(" in <#{ch}>"));
+    let server = server.map_or_else(String::new, |s| format!(" in {}", display_name(s.trim())));
+    let posted = match place {
+        Place::Channel(channel) => format!(" in <#{channel}>"),
+        Place::Lost | Place::Unset => String::new(),
+    };
     // Discord renders the timestamp as "2 days ago", in the reader's language.
     let last_post = c.last_post_at.map_or_else(String::new, |at| {
         format!("Your last archived post was <t:{at}:R>. ")
     });
+    let settings = if place == Place::Lost {
+        format!(
+            "{}. To pick another, or to change your reminders, {SETTINGS_HINT}.",
+            channels::lost("this series' channel")
+        )
+    } else {
+        format!("To change your reminders, {SETTINGS_HINT}.")
+    };
     format!(
-        "🍃 Day {day} of **{name}**{place} isn't archived yet.\n\
-         Once it's posted{posted}, {ARCHIVE_STEPS}.\n\
-         -# {last_post}To change your reminders, {SETTINGS_HINT}."
+        "🍃 Day {day} of **{name}**{server} isn't archived yet.\n\
+         Once it's posted{posted}, {}.\n\
+         -# {last_post}{settings}",
+        menus::archive_steps(app)
     )
 }
 
 /// The channel ping's text. Everyone in the channel reads it, so a series
 /// not everyone may see (private, role-only, or still a sprout) is not
 /// named: its creator is mentioned and knows which one is meant.
-fn channel_text(c: &ReminderCandidate, day: i64, creator: serenity::UserId) -> String {
+fn channel_text(c: &ReminderCandidate, day: i64, creator: serenity::UserId, app: &str) -> String {
     let series = if c.listed {
         format!("**{}**", display_name(&c.name))
     } else {
@@ -1043,7 +1180,8 @@ fn channel_text(c: &ReminderCandidate, day: i64, creator: serenity::UserId) -> S
     };
     format!(
         "🍃 <@{creator}> Day {day} of {series} isn't archived yet. \
-         Once it's posted here, {ARCHIVE_STEPS}."
+         Once it's posted here, {}.",
+        menus::archive_steps(app)
     )
 }
 
@@ -1061,12 +1199,18 @@ mod tests {
     use serenity::json::Value;
 
     use super::*;
+    use crate::stub::{self, Stub, stub};
 
     // -- fixtures ----------------------------------------------------------
 
     const GUILD: &str = "100";
     const CREATOR: &str = "111";
     const CHANNEL: &str = "222";
+    /// What Discord lists the app as in these tests: not "leaf".
+    const APP: &str = "leaf-dev";
+    /// A wait for the app's name that outlasts any test, so what ends it
+    /// there is never the clock.
+    const NO_HURRY: Duration = Duration::from_hours(1);
 
     /// Tuesday 2026-06-09 18:00 UTC: half an hour into the 17:30 window.
     fn now() -> i64 {
@@ -1227,6 +1371,11 @@ mod tests {
         member: Mutex<Result<(), Failure>>,
         guild: Mutex<Result<String, Failure>>,
         sending: Mutex<Result<(), Failure>>,
+        /// Which channels leaf can see. Unknown unless a test says.
+        sight: Mutex<Sight>,
+        /// How often the channels were asked for. Not among `calls`: those
+        /// are the requests a reminder is made of.
+        looks: AtomicUsize,
         /// Shared, so two schedulers can write to one record.
         calls: Arc<Mutex<Vec<Call>>>,
     }
@@ -1237,6 +1386,8 @@ mod tests {
                 member: Mutex::new(Ok(())),
                 guild: Mutex::new(Ok("Cozy Art Server".to_owned())),
                 sending: Mutex::new(Ok(())),
+                sight: Mutex::new(Sight::unknown()),
+                looks: AtomicUsize::new(0),
                 calls: Arc::default(),
             }
         }
@@ -1257,6 +1408,11 @@ mod tests {
 
         fn sending(&self, answer: Result<(), Failure>) {
             *self.sending.lock().unwrap() = answer;
+        }
+
+        /// From now on leaf can see exactly `channels`.
+        fn sees(&self, channels: &[&str]) {
+            *self.sight.lock().unwrap() = Sight::of(channels.iter().copied());
         }
     }
 
@@ -1304,10 +1460,20 @@ mod tests {
             });
             self.sending.lock().unwrap().clone()
         }
+
+        async fn sight(&self, _guild: serenity::GuildId) -> Sight {
+            self.looks.fetch_add(1, Ordering::SeqCst);
+            self.sight.lock().unwrap().clone()
+        }
     }
 
     fn scheduler(db: &Db) -> Scheduler<Fake> {
-        Scheduler::new(Fake::default(), db.series.clone())
+        Scheduler::new(Fake::default(), db.series.clone(), named())
+    }
+
+    /// The app's name as the gateway said it at connect.
+    fn named() -> watch::Receiver<String> {
+        watch::channel(APP.to_owned()).1
     }
 
     /// A shutdown flag that is never raised.
@@ -1482,6 +1648,121 @@ mod tests {
                 Some(("channel_missing".to_owned(), now()))
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_dm_names_and_links_the_channel_only_while_leaf_can_see_it() {
+        let db = Db::new().await;
+        db.behind("Daily Johan", true, &[CHANNEL]).await;
+        db.behind("Sketchbook", true, &["333"]).await;
+        let mut scheduler = scheduler(&db);
+        // Channel 333 was deleted (or hidden from leaf).
+        scheduler.courier.sees(&[CHANNEL]);
+
+        scheduler.tick(now(), &running()).await;
+
+        let sends = scheduler.courier.sends();
+        let dm_about = |series: &str| -> Value {
+            sends
+                .iter()
+                .find_map(|call| match call {
+                    Call::Dm { message, .. } if text_at(message, "/content").contains(series) => {
+                        Some(message.clone())
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("no DM about {series} in {sends:?}"))
+        };
+
+        let seen = dm_about("Daily Johan");
+        assert!(text_at(&seen, "/content").contains("Once it's posted in <#222>, "));
+        assert_eq!(
+            text_at(&seen, "/components/0/components/0/url"),
+            "https://discord.com/channels/100/222"
+        );
+
+        let lost = dm_about("Sketchbook");
+        let text = text_at(&lost, "/content");
+        // No mention that would read "#unknown", and no link to nowhere.
+        assert!(!text.contains("<#"), "{text}");
+        assert!(text.contains("\nOnce it's posted, on a phone, "), "{text}");
+        assert!(
+            text.contains(
+                "leaf can no longer see this series' channel (deleted, or hidden from leaf). To \
+                 pick another, or to change your reminders, open leaf's gallery"
+            ),
+            "{text}"
+        );
+        assert_eq!(
+            text_at(&lost, "/components/0/components/0/custom_id"),
+            rem_off_id(2)
+        );
+        assert_eq!(lost.pointer("/components/0/components/1"), None);
+        assert!(!lost.to_string().contains("discord.com/channels"), "{lost}");
+
+        // Both series are in one server: its channels were asked for once.
+        assert_eq!(scheduler.courier.looks.load(Ordering::SeqCst), 1);
+        // The next pass asks again: a channel may be back by then.
+        let mut servers = Servers::new();
+        let again = lookup_place(
+            &scheduler.courier,
+            serenity::GuildId::new(100),
+            Some(serenity::ChannelId::new(333)),
+            &mut servers,
+        )
+        .await;
+        assert_eq!(again, Place::Lost);
+        assert_eq!(scheduler.courier.looks.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn the_channels_are_asked_for_only_when_a_dm_would_name_one() {
+        let db = Db::new().await;
+        // A ping goes to the channel itself: Discord's answer to the post
+        // says whether it is there. A DM for a series with no channel has
+        // none to name.
+        let ping = db.behind("Sketchbook", false, &[CHANNEL]).await;
+        db.behind("Unbound", true, &[]).await;
+        db.behind("Odd", true, &["not-a-channel"]).await;
+        let mut scheduler = scheduler(&db);
+        scheduler.courier.sees(&[]);
+        scheduler.courier.sending(Err(refusal(10_003)));
+
+        scheduler.tick(now(), &running()).await;
+
+        assert_eq!(scheduler.courier.looks.load(Ordering::SeqCst), 0);
+        // The ping was still tried, and its refusal recorded as before.
+        let sends = scheduler.courier.sends();
+        assert!(
+            sends
+                .iter()
+                .any(|call| matches!(call, Call::Post { channel: 222, .. })),
+            "{sends:?}"
+        );
+        assert_eq!(
+            db.error(ping).await,
+            Some(("channel_missing".to_owned(), now()))
+        );
+        // Without a sight (the default here) a DM names what is stored.
+        let unknown = Fake::default();
+        let place = lookup_place(
+            &unknown,
+            serenity::GuildId::new(100),
+            Some(serenity::ChannelId::new(222)),
+            &mut Servers::new(),
+        )
+        .await;
+        assert_eq!(place, Place::Channel(serenity::ChannelId::new(222)));
+        assert_eq!(
+            lookup_place(
+                &unknown,
+                serenity::GuildId::new(100),
+                None,
+                &mut Servers::new()
+            )
+            .await,
+            Place::Unset
+        );
     }
 
     #[tokio::test]
@@ -1837,8 +2118,17 @@ mod tests {
                 .count()
         };
 
-        let start =
-            |stopping| tokio::spawn(drive(&GATE, failing(), db.series.clone(), stopping, now));
+        let start = |stopping| {
+            tokio::spawn(drive(
+                &GATE,
+                failing(),
+                db.series.clone(),
+                named(),
+                NO_HURRY,
+                stopping,
+                now,
+            ))
+        };
 
         let (stop_first, first_stopping) = watch::channel(false);
         let (stop_second, second_stopping) = watch::channel(false);
@@ -1902,6 +2192,8 @@ mod tests {
             &GATE,
             Fake::default(),
             db.series.clone(),
+            named(),
+            NO_HURRY,
             stopping,
             now,
         ));
@@ -1913,6 +2205,242 @@ mod tests {
         drop(ticking);
     }
 
+    // -- the app's name ---------------------------------------------------
+
+    /// The text of the only message sent so far.
+    fn only_send(calls: &[Call]) -> String {
+        let sends: Vec<&Value> = calls
+            .iter()
+            .filter_map(|call| match call {
+                Call::Dm { message, .. } | Call::Post { message, .. } => Some(message),
+                _ => None,
+            })
+            .collect();
+        let [message] = sends.as_slice() else {
+            panic!("expected one message, got {sends:?}");
+        };
+        text_at(message, "/content").to_owned()
+    }
+
+    #[tokio::test]
+    async fn the_wait_for_the_app_s_name_ends_when_it_is_said_or_cannot_be() {
+        // Known already: no wait, even with no patience at all.
+        assert!(app_name_known(&mut named(), Duration::ZERO).await);
+
+        // Said while waiting: the gateway connected.
+        let (names, mut unnamed) = watch::channel(String::new());
+        let waiting =
+            tokio::spawn(
+                async move { app_name_known(&mut unnamed, Duration::from_secs(30)).await },
+            );
+        names.send(APP.to_owned()).unwrap();
+        assert!(waiting.await.unwrap());
+
+        // Still not said when the patience runs out. A blank name is none.
+        let (names, mut unnamed) = watch::channel(String::new());
+        assert!(!app_name_known(&mut unnamed, Duration::ZERO).await);
+        names.send("  ".to_owned()).unwrap();
+        assert!(!app_name_known(&mut unnamed, Duration::ZERO).await);
+
+        // The connection that would have said it is gone: no point waiting.
+        drop(names);
+        assert!(!app_name_known(&mut unnamed, Duration::from_secs(30)).await);
+    }
+
+    #[tokio::test]
+    async fn the_first_pass_waits_for_the_app_s_name_and_then_names_it() {
+        static GATE: Gate = Gate::new();
+
+        let db = Db::new().await;
+        let id = db.behind("Daily Johan", true, &[CHANNEL]).await;
+        let log = Arc::<Mutex<Vec<Call>>>::default();
+        let fake = Fake {
+            calls: Arc::clone(&log),
+            ..Fake::default()
+        };
+        // leaf has just started: the gateway has not said who the bot is.
+        let (names, unnamed) = watch::channel(String::new());
+        let (stop, stopping) = watch::channel(false);
+        let ticking = tokio::spawn(drive(
+            &GATE,
+            fake,
+            db.series.clone(),
+            unnamed,
+            NO_HURRY,
+            stopping,
+            now,
+        ));
+
+        // It is the scheduler now, and a reminder is due. Time for it to
+        // send if it were going to: each read is a round trip through the
+        // database it uses.
+        until(|| GATE.active.try_lock().is_err()).await;
+        for _ in 0..50 {
+            db.mark(id).await;
+            tokio::task::yield_now().await;
+        }
+        assert!(log.lock().unwrap().is_empty());
+
+        // The gateway connects, and the reminder goes out naming the app.
+        names.send(APP.to_owned()).unwrap();
+        until(|| {
+            log.lock()
+                .unwrap()
+                .iter()
+                .any(|c| matches!(c, Call::Dm { .. }))
+        })
+        .await;
+        let sent = only_send(&log.lock().unwrap());
+        assert!(
+            sent.contains("(scroll down to find it), **leaf-dev**, then **Archive to Series**"),
+            "{sent}"
+        );
+
+        stop.send(true).unwrap();
+        ticking.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_scheduler_told_to_stop_while_it_waits_for_the_name_stops() {
+        static GATE: Gate = Gate::new();
+
+        let db = Db::new().await;
+        db.behind("Daily Johan", true, &[CHANNEL]).await;
+        let log = Arc::<Mutex<Vec<Call>>>::default();
+        let fake = Fake {
+            calls: Arc::clone(&log),
+            ..Fake::default()
+        };
+        // No name is coming and the wait for one outlasts this test: only
+        // being told to stop can end it.
+        let (_names, unnamed) = watch::channel(String::new());
+        let (stop, stopping) = watch::channel(false);
+        let waiting = tokio::spawn(drive(
+            &GATE,
+            fake,
+            db.series.clone(),
+            unnamed,
+            NO_HURRY,
+            stopping,
+            now,
+        ));
+        until(|| GATE.active.try_lock().is_err()).await;
+
+        stop.send(true).unwrap();
+        until(|| waiting.is_finished()).await;
+        waiting.await.unwrap();
+        // Nothing went out, and the next scheduler can start.
+        assert!(log.lock().unwrap().is_empty());
+        assert!(GATE.active.try_lock().is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_scheduler_that_is_never_told_the_name_starts_without_it() {
+        static GATE: Gate = Gate::new();
+
+        let db = Db::new().await;
+        let id = db.behind("Daily Johan", true, &[CHANNEL]).await;
+        let log = Arc::<Mutex<Vec<Call>>>::default();
+        let fake = Fake {
+            calls: Arc::clone(&log),
+            ..Fake::default()
+        };
+        // The gateway has not connected, and the wait for it is over as
+        // soon as it begins.
+        let (_names, unnamed) = watch::channel(String::new());
+        let (stop, stopping) = watch::channel(false);
+        let ticking = tokio::spawn(drive(
+            &GATE,
+            fake,
+            db.series.clone(),
+            unnamed,
+            Duration::ZERO,
+            stopping,
+            now,
+        ));
+
+        // Discord's REST API still answers, so the reminder that is due goes
+        // out, describing the app it cannot name. (A scheduler that gave up
+        // instead ends the wait too, with nothing sent.)
+        let sent = || {
+            let calls = log.lock().unwrap();
+            calls.iter().any(|c| matches!(c, Call::Dm { .. }))
+        };
+        until(|| sent() || ticking.is_finished()).await;
+        let text = only_send(&log.lock().unwrap());
+        assert!(
+            text.contains(
+                "tap **Apps** (scroll down to find it), this bot's name, then **Archive to \
+                 Series**."
+            ),
+            "{text}"
+        );
+
+        stop.send(true).unwrap();
+        ticking.await.unwrap();
+        assert_eq!(db.mark(id).await, Some(2));
+    }
+
+    #[tokio::test]
+    async fn a_reminder_names_the_app_as_the_gateway_last_said_it() {
+        let db = Db::new().await;
+        db.behind("Daily Johan", false, &[CHANNEL]).await;
+        let (names, name) = watch::channel(APP.to_owned());
+        let mut scheduler = Scheduler::new(Fake::default(), db.series.clone(), name);
+        // Sends fail in a way that may pass, so the same day is sent twice.
+        scheduler.courier.sending(Err(outage()));
+
+        scheduler.tick(now(), &running()).await;
+        // The bot is renamed in the Developer Portal while leaf runs.
+        names.send("Daily Art Bot".to_owned()).unwrap();
+        scheduler.tick(now() + RETRY_BASE_SECS, &running()).await;
+
+        let sends = scheduler.courier.sends();
+        let [
+            Call::Post { message: first, .. },
+            Call::Post {
+                message: second, ..
+            },
+        ] = sends.as_slice()
+        else {
+            panic!("expected two pings, got {sends:?}");
+        };
+        let first = text_at(first, "/content");
+        assert!(
+            first.contains("(scroll down to find it), **leaf-dev**, then **Archive to Series**"),
+            "{first}"
+        );
+        let second = text_at(second, "/content");
+        assert!(
+            second.contains(
+                "(scroll down to find it), **Daily Art Bot**, then **Archive to Series**"
+            ),
+            "{second}"
+        );
+        assert!(!second.contains("leaf-dev"), "{second}");
+    }
+
+    #[tokio::test]
+    async fn a_reminder_still_goes_out_when_the_app_s_name_never_arrived() {
+        let db = Db::new().await;
+        let id = db.behind("Daily Johan", true, &[CHANNEL]).await;
+        // The gateway never connected, but Discord's REST API answers.
+        let unnamed = watch::channel(String::new()).1;
+        let mut scheduler = Scheduler::new(Fake::default(), db.series.clone(), unnamed);
+
+        scheduler.tick(now(), &running()).await;
+
+        let sent = only_send(&scheduler.courier.calls());
+        assert!(
+            sent.contains(
+                "on a phone, press and hold the post, tap **Apps** (scroll down to find it), \
+                 this bot's name, then **Archive to Series**."
+            ),
+            "{sent}"
+        );
+        assert_eq!(db.mark(id).await, Some(2));
+    }
+
     #[tokio::test]
     async fn stored_ids_that_are_not_snowflakes_never_reach_discord() {
         let courier = Fake::default();
@@ -1920,7 +2448,7 @@ mod tests {
             let mut c = candidate();
             c.guild_id = guild.to_owned();
             c.creator_id = creator.to_owned();
-            let outcome = send(&courier, &c, 42, &mut Servers::new()).await;
+            let outcome = send(&courier, &c, 42, APP, &mut Servers::new()).await;
             assert_eq!(outcome, Outcome::Skipped(Absent::BadId));
         }
         assert!(courier.calls().is_empty());
@@ -1936,95 +2464,12 @@ mod tests {
 
     // -- serenity glue -----------------------------------------------------
 
-    /// A loopback stand-in for Discord's REST API: one canned answer per
-    /// route, one request per connection, and a record of what was asked.
-    struct Stub {
-        base: String,
-        requests: Arc<Mutex<Vec<(String, String)>>>,
-        server: tokio::task::JoinHandle<()>,
-    }
-
-    impl Drop for Stub {
-        fn drop(&mut self) {
-            self.server.abort();
-        }
-    }
-
-    /// `answers` are `(start of the request line, status, JSON body)`.
-    async fn stub(answers: &'static [(&'static str, u16, &'static str)]) -> Stub {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base = format!("http://{}", listener.local_addr().unwrap());
-        let requests = Arc::new(Mutex::new(Vec::new()));
-        let seen = Arc::clone(&requests);
-        let server = tokio::spawn(async move {
-            loop {
-                let (stream, _) = listener.accept().await.unwrap();
-                let (line, body) = read_request(&stream).await;
-                let (status, answer) = answers
-                    .iter()
-                    .find(|(start, ..)| line.starts_with(start))
-                    .map_or((404, "{}"), |(_, status, answer)| (*status, *answer));
-                seen.lock().unwrap().push((line, body));
-                let response = format!(
-                    "HTTP/1.1 {status} Stub\r\ncontent-type: application/json\r\n\
-                     content-length: {}\r\nconnection: close\r\n\r\n{answer}",
-                    answer.len()
-                );
-                write_all(&stream, response.as_bytes()).await;
-            }
-        });
-        Stub {
-            base,
-            requests,
-            server,
-        }
-    }
-
-    /// Reads one HTTP request; returns its request line and body.
-    async fn read_request(stream: &tokio::net::TcpStream) -> (String, String) {
-        let mut bytes = Vec::new();
-        loop {
-            stream.readable().await.unwrap();
-            let mut chunk = [0_u8; 4096];
-            match stream.try_read(&mut chunk) {
-                Ok(0) => panic!("the request ended early"),
-                Ok(n) => bytes.extend(chunk.iter().take(n)),
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
-                Err(e) => panic!("reading the request: {e}"),
-            }
-            let text = String::from_utf8_lossy(&bytes);
-            let Some((head, body)) = text.split_once("\r\n\r\n") else {
-                continue;
-            };
-            let length = head
-                .lines()
-                .filter_map(|line| line.split_once(':'))
-                .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
-                .map_or(0, |(_, value)| value.trim().parse::<usize>().unwrap());
-            if body.len() >= length {
-                return (head.lines().next().unwrap().to_owned(), body.to_owned());
-            }
-        }
-    }
-
-    async fn write_all(stream: &tokio::net::TcpStream, mut bytes: &[u8]) {
-        while !bytes.is_empty() {
-            stream.writable().await.unwrap();
-            match stream.try_write(bytes) {
-                Ok(n) => bytes = bytes.get(n..).unwrap(),
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-                Err(e) => panic!("writing the response: {e}"),
-            }
-        }
-    }
-
+    /// Discord at `base`, with a gateway cache that has no server in it.
     fn live(base: &str) -> Live {
-        Live(Arc::new(
-            serenity::HttpBuilder::new("test-token")
-                .proxy(base)
-                .ratelimiter_disabled(true)
-                .build(),
-        ))
+        Live {
+            http: Arc::new(stub::http(base)),
+            cache: Arc::new(serenity::Cache::new()),
+        }
     }
 
     #[tokio::test]
@@ -2065,7 +2510,14 @@ mod tests {
 
         // A DM to someone whose DMs are closed: the channel opens, the
         // message is refused.
-        let message = dm_message(&candidate(), 42, guild, Some(channel), Some("Cozy"));
+        let message = dm_message(
+            &candidate(),
+            42,
+            guild,
+            Place::Channel(channel),
+            Some("Cozy"),
+            APP,
+        );
         let refused = live.dm(creator, message).await.unwrap_err();
         assert_eq!(refused.status, Some(403));
         assert_eq!(refused.code, Some(50_007));
@@ -2081,10 +2533,17 @@ mod tests {
         assert_eq!(opened, r#"{"recipient_id":"111"}"#);
         // What went over the wire is what the builders made.
         let sent: Value = serenity::json::from_str(sent.as_str()).unwrap();
-        let built = dm_message(&candidate(), 42, guild, Some(channel), Some("Cozy"));
+        let built = dm_message(
+            &candidate(),
+            42,
+            guild,
+            Place::Channel(channel),
+            Some("Cozy"),
+            APP,
+        );
         assert_eq!(sent, serenity::json::to_value(built).unwrap());
 
-        let message = channel_message(&candidate(), 42, creator);
+        let message = channel_message(&candidate(), 42, creator, APP);
         let refused = live.post(channel, message).await.unwrap_err();
         assert_eq!(refused.code, Some(50_013));
         assert_eq!(
@@ -2128,7 +2587,7 @@ mod tests {
         .await;
         let live = live(&stub.base);
         let ping = |channel| {
-            let message = channel_message(&candidate(), 42, serenity::UserId::new(111));
+            let message = channel_message(&candidate(), 42, serenity::UserId::new(111), APP);
             live.post(serenity::ChannelId::new(channel), message)
         };
 
@@ -2174,7 +2633,7 @@ mod tests {
         let db = Db::new().await;
         let dm = db.behind("Daily Johan", true, &[CHANNEL]).await;
         let ping = db.behind("Sketchbook", false, &[CHANNEL]).await;
-        let mut scheduler = Scheduler::new(live(&stub.base), db.series.clone());
+        let mut scheduler = Scheduler::new(live(&stub.base), db.series.clone(), named());
 
         // The minutes a send that failed would be tried again at.
         for minute in [0, 1, 3, 7, 15, 31] {
@@ -2206,6 +2665,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_live_dm_follows_discord_s_list_of_the_server_s_channels() {
+        // The series posts in channel 222, and Discord no longer lists it.
+        let stub = stub(&[
+            ("GET /api/v10/guilds/100/members/111 ", 200, MEMBER),
+            (
+                "GET /api/v10/guilds/100/channels ",
+                200,
+                r#"[{"id":"999"}]"#,
+            ),
+            ("GET /api/v10/guilds/100 ", 200, SPARSE_GUILD),
+            ("POST /api/v10/users/@me/channels ", 200, DM_CHANNEL),
+            ("POST /api/v10/channels/555/messages ", 200, "{}"),
+        ])
+        .await;
+        let db = Db::new().await;
+        db.behind("Daily Johan", true, &[CHANNEL]).await;
+        let mut scheduler = Scheduler::new(live(&stub.base), db.series.clone(), named());
+
+        scheduler.tick(now(), &running()).await;
+
+        let requests = stub.requests.lock().unwrap().clone();
+        let (_, sent) = requests
+            .iter()
+            .find(|(line, _)| line.starts_with("POST /api/v10/channels/555/messages "))
+            .unwrap_or_else(|| panic!("no DM among {requests:?}"));
+        let sent: Value = serenity::json::from_str(sent.as_str()).unwrap();
+        assert_eq!(
+            sent,
+            serenity::json::to_value(dm_message(
+                &db.series
+                    .reminder_candidates()
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .next()
+                    .unwrap(),
+                2,
+                serenity::GuildId::new(100),
+                Place::Lost,
+                Some("Cozy Art Server"),
+                APP,
+            ))
+            .unwrap()
+        );
+        assert!(!text_at(&sent, "/content").contains("<#222>"));
+    }
+
+    #[tokio::test]
     async fn the_server_lookup_reads_only_the_name() {
         let stub = stub(&[
             ("GET /api/v10/guilds/100 ", 200, SPARSE_GUILD),
@@ -2228,7 +2735,7 @@ mod tests {
         let base = format!("http://{}", listener.local_addr().unwrap());
         drop(listener);
 
-        let message = channel_message(&candidate(), 42, serenity::UserId::new(111));
+        let message = channel_message(&candidate(), 42, serenity::UserId::new(111), APP);
         let failed = live(&base)
             .post(serenity::ChannelId::new(222), message)
             .await
@@ -2301,10 +2808,17 @@ mod tests {
         let guild = serenity::GuildId::new(100);
         let channel = serenity::ChannelId::new(222);
         assert_eq!(
-            dm_text(&candidate(), 42, Some(channel), Some("Cozy Art Server")),
+            dm_text(
+                &candidate(),
+                42,
+                Place::Channel(channel),
+                Some("Cozy Art Server"),
+                APP
+            ),
             "🍃 Day 42 of **Daily Johan** in Cozy Art Server isn't archived yet.\n\
-             Once it's posted in <#222>, long-press the post (right-click on desktop), then \
-             Apps, then Archive to Series.\n\
+             Once it's posted in <#222>, on a phone, press and hold the post, tap **Apps** \
+             (scroll down to find it), **leaf-dev**, then **Archive to Series**. On desktop: \
+             right-click it, **Apps**, **Archive to Series**.\n\
              -# Your last archived post was <t:1780000000:R>. To change your reminders, open \
              leaf's gallery in the server, open the series and tap the gear (Series settings)."
         );
@@ -2313,20 +2827,23 @@ mod tests {
         let mut bare = candidate();
         bare.last_post_at = None;
         assert_eq!(
-            dm_text(&bare, 42, None, None),
-            "🍃 Day 42 of **Daily Johan** isn't archived yet.\n\
-             Once it's posted, long-press the post (right-click on desktop), then Apps, then \
-             Archive to Series.\n\
-             -# To change your reminders, open leaf's gallery in the server, open the series \
-             and tap the gear (Series settings)."
+            dm_text(&bare, 42, Place::Unset, None, APP),
+            format!(
+                "🍃 Day 42 of **Daily Johan** isn't archived yet.\n\
+                 Once it's posted, {}.\n\
+                 -# To change your reminders, open leaf's gallery in the server, open the \
+                 series and tap the gear (Series settings).",
+                menus::archive_steps(APP)
+            )
         );
 
         let message = serenity::json::to_value(dm_message(
             &candidate(),
             42,
             guild,
-            Some(channel),
+            Place::Channel(channel),
             Some("Cozy Art Server"),
+            APP,
         ))
         .unwrap();
         // Nothing in the text can ping anyone.
@@ -2359,9 +2876,39 @@ mod tests {
         );
         assert_eq!(message.pointer("/flags"), None);
 
+        // A channel leaf can no longer see is neither named nor linked to;
+        // the small print says what happened and where to pick another.
+        assert_eq!(
+            dm_text(&candidate(), 42, Place::Lost, Some("Cozy Art Server"), APP),
+            format!(
+                "🍃 Day 42 of **Daily Johan** in Cozy Art Server isn't archived yet.\n\
+                 Once it's posted, {}.\n\
+                 -# Your last archived post was <t:1780000000:R>. leaf can no longer see this \
+                 series' channel (deleted, or hidden from leaf). To pick another, or to change \
+                 your reminders, open leaf's gallery in the server, open the series and tap the \
+                 gear (Series settings).",
+                menus::archive_steps(APP)
+            )
+        );
+        let lost = serenity::json::to_value(dm_message(
+            &candidate(),
+            42,
+            guild,
+            Place::Lost,
+            Some("Cozy Art Server"),
+            APP,
+        ))
+        .unwrap();
+        assert_eq!(
+            text_at(&lost, "/components/0/components/0/custom_id"),
+            "leaf:rem-off:7"
+        );
+        assert_eq!(lost.pointer("/components/0/components/1"), None);
+
         // Without a channel there is nowhere to link to.
         let message =
-            serenity::json::to_value(dm_message(&candidate(), 42, guild, None, None)).unwrap();
+            serenity::json::to_value(dm_message(&candidate(), 42, guild, Place::Unset, None, APP))
+                .unwrap();
         assert_eq!(
             text_at(&message, "/components/0/components/0/custom_id"),
             "leaf:rem-off:7"
@@ -2375,12 +2922,14 @@ mod tests {
         c.reminder_dm = false;
         let creator = serenity::UserId::new(111);
         assert_eq!(
-            channel_text(&c, 42, creator),
+            channel_text(&c, 42, creator, APP),
             "🍃 <@111> Day 42 of **Daily Johan** isn't archived yet. Once it's posted here, \
-             long-press the post (right-click on desktop), then Apps, then Archive to Series."
+             on a phone, press and hold the post, tap **Apps** (scroll down to find it), \
+             **leaf-dev**, then **Archive to Series**. On desktop: right-click it, **Apps**, \
+             **Archive to Series**."
         );
 
-        let message = serenity::json::to_value(channel_message(&c, 42, creator)).unwrap();
+        let message = serenity::json::to_value(channel_message(&c, 42, creator, APP)).unwrap();
         assert_eq!(
             message.pointer("/allowed_mentions"),
             Some(&serenity::json::json!({ "parse": [], "users": ["111"], "roles": [] }))
@@ -2401,14 +2950,14 @@ mod tests {
         c.reminder_dm = false;
         c.listed = false;
         let creator = serenity::UserId::new(111);
-        let ping = channel_text(&c, 42, creator);
+        let ping = channel_text(&c, 42, creator, APP);
         assert!(
             ping.starts_with("🍃 <@111> Day 42 of your series isn't archived yet."),
             "{ping}"
         );
         assert!(!ping.contains("Daily Johan"), "{ping}");
         // The DM is the creator's alone, so it still names the series.
-        assert!(dm_text(&c, 42, None, None).contains("**Daily Johan**"));
+        assert!(dm_text(&c, 42, Place::Unset, None, APP).contains("**Daily Johan**"));
 
         // The same goes for the line added when the button is pressed.
         let done = TurnOff::Done("Daily Johan".to_owned());
@@ -2429,15 +2978,15 @@ mod tests {
         c.name = "<@&999> **@everyone**".to_owned();
         let creator = serenity::UserId::new(111);
 
-        let ping = channel_text(&c, 42, creator);
+        let ping = channel_text(&c, 42, creator, APP);
         assert!(ping.contains(r"**\<@&999\> \*\*@everyone\*\***"), "{ping}");
-        let message = serenity::json::to_value(channel_message(&c, 42, creator)).unwrap();
+        let message = serenity::json::to_value(channel_message(&c, 42, creator, APP)).unwrap();
         assert_eq!(
             message.pointer("/allowed_mentions"),
             Some(&serenity::json::json!({ "parse": [], "users": ["111"], "roles": [] }))
         );
 
-        let dm = dm_text(&c, 42, None, Some(" **Shouty** <@1> "));
+        let dm = dm_text(&c, 42, Place::Unset, Some(" **Shouty** <@1> "), APP);
         assert!(
             dm.contains(r" in \*\*Shouty\*\* \<@1\> isn't archived yet."),
             "{dm}"
@@ -2449,11 +2998,11 @@ mod tests {
         // The series can be several days behind when the reminder goes out.
         let creator = serenity::UserId::new(111);
         for text in [
-            dm_text(&candidate(), 42, None, Some("Cozy Art Server")),
-            channel_text(&candidate(), 42, creator),
+            dm_text(&candidate(), 42, Place::Unset, Some("Cozy Art Server"), APP),
+            channel_text(&candidate(), 42, creator, APP),
         ] {
             assert!(!text.to_lowercase().contains("streak"), "{text}");
-            assert!(text.contains("Archive to Series"), "{text}");
+            assert!(text.contains(&menus::archive_steps(APP)), "{text}");
             assert!(text.contains("Day 42"), "{text}");
         }
     }
@@ -2598,8 +3147,9 @@ mod tests {
             &c,
             2,
             serenity::GuildId::new(100),
-            Some(serenity::ChannelId::new(222)),
+            Place::Channel(serenity::ChannelId::new(222)),
             Some("Cozy Art Server"),
+            APP,
         )
     }
 
@@ -2608,7 +3158,7 @@ mod tests {
         let mut c = candidate();
         c.series_id = id;
         c.reminder_dm = false;
-        channel_message(&c, 2, serenity::UserId::new(111))
+        channel_message(&c, 2, serenity::UserId::new(111), APP)
     }
 
     /// The answers to presses the stub has seen, in order.
@@ -2628,7 +3178,7 @@ mod tests {
     #[tokio::test]
     async fn a_press_in_the_dm_turns_reminders_off_and_takes_the_button_away() {
         let stub = stub(&[CALLBACK]).await;
-        let http = live(&stub.base).0;
+        let http = live(&stub.base).http;
         let db = Db::new().await;
         let id = db.behind("Daily Johan", true, &[CHANNEL]).await;
         let reminder = serenity::json::to_value(dm_reminder(id)).unwrap();
@@ -2677,7 +3227,7 @@ mod tests {
     #[tokio::test]
     async fn a_press_on_the_ping_counts_only_from_the_creator() {
         let stub = stub(&[CALLBACK]).await;
-        let http = live(&stub.base).0;
+        let http = live(&stub.base).http;
         let db = Db::new().await;
         let id = db.behind("Daily Johan", false, &[CHANNEL]).await;
         let reminder = serenity::json::to_value(ping_reminder(id)).unwrap();
@@ -2731,7 +3281,7 @@ mod tests {
     #[tokio::test]
     async fn a_press_for_a_series_that_is_gone_or_already_off_settles_the_message() {
         let stub = stub(&[CALLBACK]).await;
-        let http = live(&stub.base).0;
+        let http = live(&stub.base).http;
         let db = Db::new().await;
         let id = db.behind("Daily Johan", true, &[CHANNEL]).await;
         db.series
@@ -2773,7 +3323,7 @@ mod tests {
     #[tokio::test]
     async fn other_buttons_are_left_to_the_router() {
         let stub = stub(&[CALLBACK]).await;
-        let http = live(&stub.base).0;
+        let http = live(&stub.base).http;
         let db = Db::new().await;
         let id = db.behind("Daily Johan", true, &[CHANNEL]).await;
 
@@ -2792,7 +3342,7 @@ mod tests {
     #[tokio::test]
     async fn a_press_that_cannot_be_saved_gets_a_private_apology() {
         let stub = stub(&[CALLBACK]).await;
-        let http = live(&stub.base).0;
+        let http = live(&stub.base).http;
         let db = Db::new().await;
         let id = db.behind("Daily Johan", true, &[CHANNEL]).await;
         let press = press(&rem_off_id(id), CREATOR, false, dm_reminder(id));
@@ -2818,7 +3368,7 @@ mod tests {
     async fn the_change_stands_when_discord_does_not_take_the_answer() {
         // Every route answers 404: the press has expired.
         let stub = stub(&[]).await;
-        let http = live(&stub.base).0;
+        let http = live(&stub.base).http;
         let db = Db::new().await;
         let id = db.behind("Daily Johan", true, &[CHANNEL]).await;
         let press = press(&rem_off_id(id), CREATOR, false, dm_reminder(id));

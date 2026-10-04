@@ -9,8 +9,11 @@ import {
   dayIndex,
   eligibilityBlocked,
   GUILD_ID,
+  homeSeries,
   options,
+  optionsChannelUnseen,
   series,
+  seriesChannelGone,
   stats,
   VIEWER_DAY,
   worstCase,
@@ -65,6 +68,7 @@ describe('mock gallery API', () => {
     expect(mine.map((s) => s.id)).toEqual([7, 1, 8, 9]);
     expect(mine.find((s) => s.id === 7)).toMatchObject({
       channel_name: 'daily-sketch',
+      channel_missing: false,
       archived_days: 124,
       reminder_enabled: true,
     });
@@ -73,6 +77,43 @@ describe('mock gallery API', () => {
     expect(settings).toMatchObject({ state: 'sprout', start_day: 1, reminder_error: 'dm_closed' });
 
     expect((await failure(api.getSettings(GUILD_ID, 2))).kind).toBe('not_found');
+  });
+
+  it('sends no name for a channel that was deleted, flags it, and names it again once changed', async () => {
+    const api = client({ series: seriesChannelGone });
+    const own = async (): Promise<unknown> =>
+      (await api.listMySeries(GUILD_ID)).find((s) => s.id === 7);
+
+    const gone = await own();
+    expect(gone).toMatchObject({ channel_missing: true });
+    expect(gone).not.toHaveProperty('channel_name');
+    // The settings still hold the channel's id, which is no longer on offer.
+    const settings = await api.getSettings(GUILD_ID, 7);
+    expect(options.channels.some((c) => c.id === settings.channel_id)).toBe(false);
+
+    const [, other] = options.channels;
+    await api.patchSeries(GUILD_ID, 7, { channel_id: other!.id });
+    expect(await own()).toMatchObject({ channel_name: other!.name, channel_missing: false });
+  });
+
+  it('still offers a deleted channel, with no name, where /setup has not been run since', async () => {
+    const api = client({ series: seriesChannelGone, options: optionsChannelUnseen });
+
+    const settings = await api.getSettings(GUILD_ID, 7);
+    // The series' channel is the only one on offer, and leaf cannot name it.
+    expect((await api.getOptions(GUILD_ID)).channels).toEqual([
+      { id: settings.channel_id, name: null },
+    ]);
+    const own = (await api.listMySeries(GUILD_ID)).find((s) => s.id === 7);
+    expect(own).toMatchObject({ channel_missing: true });
+    expect(own).not.toHaveProperty('channel_name');
+  });
+
+  it('does not flag a series that has no channel at all, as the server does not', async () => {
+    const api = client({ series: [{ ...homeSeries, channel_ids: [] }] });
+    const [own] = await api.listMySeries(GUILD_ID);
+    expect(own).toMatchObject({ channel_id: null, channel_missing: false });
+    expect(own).not.toHaveProperty('channel_name');
   });
 
   it('serves no days for a revoked series, as the server does', async () => {

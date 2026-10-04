@@ -813,6 +813,101 @@ mod tests {
         }
     }
 
+    /// The same answers from a folder on this machine. That store differs
+    /// from the one in memory where it matters here: its entity tag is
+    /// unquoted (inode, time and size), a suffix range is resolved by the
+    /// store against the file, and a range past the end fails with an error
+    /// of its own that `open_range` has to turn into a 416.
+    #[tokio::test]
+    async fn a_folder_on_this_machine_serves_parts_tags_and_416() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = leaf_core::media::local_store(&dir.path().join("media")).unwrap();
+        let path = ObjectPath::from("g/1/s/2/d/3/video");
+        store
+            .put(&path, bytes::Bytes::from_static(BYTES).into())
+            .await
+            .unwrap();
+        let ask = async |pairs: &[(header::HeaderName, &str)]| {
+            serve(&store, &path, "video/mp4", &request(pairs))
+                .await
+                .unwrap()
+        };
+
+        let whole = ask(&[]).await;
+        assert_eq!(whole.status(), StatusCode::OK);
+        assert_eq!(header_of(&whole, &header::CONTENT_LENGTH), Some("26"));
+        assert_eq!(header_of(&whole, &header::ACCEPT_RANGES), Some("bytes"));
+        let etag = header_of(&whole, &header::ETAG).unwrap().to_owned();
+        assert!(
+            etag.len() > 2 && etag.starts_with('"') && etag.ends_with('"'),
+            "{etag}"
+        );
+        assert_eq!(body_of(whole).await, BYTES);
+
+        for (range, content_range, body) in [
+            ("bytes=0-1", "bytes 0-1/26", &BYTES[..2]),
+            ("bytes=10-", "bytes 10-25/26", &BYTES[10..]),
+            ("bytes=-4", "bytes 22-25/26", &BYTES[22..]),
+            ("bytes=-100", "bytes 0-25/26", BYTES),
+            ("bytes=20-999", "bytes 20-25/26", &BYTES[20..]),
+        ] {
+            let response = ask(&[(header::RANGE, range)]).await;
+            assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT, "{range}");
+            assert_eq!(
+                header_of(&response, &header::CONTENT_RANGE),
+                Some(content_range),
+                "{range}"
+            );
+            assert_eq!(
+                header_of(&response, &header::CONTENT_LENGTH),
+                Some(body.len().to_string().as_str()),
+                "{range}"
+            );
+            assert_eq!(header_of(&response, &header::ETAG), Some(etag.as_str()));
+            assert_eq!(body_of(response).await, body, "{range}");
+        }
+
+        for range in ["bytes=26-", "bytes=26-30", "bytes=999-", "bytes=-0"] {
+            let response = ask(&[(header::RANGE, range)]).await;
+            assert_eq!(
+                response.status(),
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                "{range}"
+            );
+            assert_eq!(
+                header_of(&response, &header::CONTENT_RANGE),
+                Some("bytes */26"),
+                "{range}"
+            );
+        }
+
+        // The tag the client was given is the tag that matches.
+        let response = ask(&[(header::IF_NONE_MATCH, &etag)]).await;
+        assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(header_of(&response, &header::ETAG), Some(etag.as_str()));
+        assert!(body_of(response).await.is_empty());
+        let response = ask(&[(header::IF_NONE_MATCH, "\"another-copy\"")]).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = ask(&[(header::RANGE, "bytes=2-3"), (header::IF_RANGE, &etag)]).await;
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(body_of(response).await, b"cd");
+        let response = ask(&[
+            (header::RANGE, "bytes=2-3"),
+            (header::IF_RANGE, "\"another-copy\""),
+        ])
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(body_of(response).await, BYTES);
+
+        // A file that is not there, with or without a range.
+        let gone = ObjectPath::from("g/1/s/2/d/3/gone");
+        for pairs in [&[][..], &[(header::RANGE, "bytes=0-1")][..]] {
+            let outcome = serve(&store, &gone, "video/mp4", &request(pairs)).await;
+            assert!(matches!(outcome, Err(object_store::Error::NotFound { .. })));
+        }
+    }
+
     #[tokio::test]
     async fn an_unwritable_content_type_falls_back() {
         let (store, path) = store().await;

@@ -22,6 +22,7 @@
   import type { DaySummary, Series, Stats } from '../lib/types/api';
   import { accentVar } from '../lib/utils/accent';
   import { buildMonths, weekStartFor, type CalendarMonth } from '../lib/utils/calendar';
+  import { channelOf, type SeriesChannel } from '../lib/utils/channel';
   import { describeError, isRetryable } from '../lib/utils/errors';
 
   interface Props {
@@ -30,6 +31,8 @@
     canGoBack: boolean;
     /** Which Discord client this is: the archive steps differ. */
     platform?: Platform;
+    /** What the application is called in Discord: the steps name it. */
+    appName?: string;
     /** The series was just created: say so above the first steps. */
     created?: boolean;
     /**
@@ -43,6 +46,7 @@
     userId,
     canGoBack,
     platform = 'desktop',
+    appName,
     created = false,
     reveal = null,
   }: Props = $props();
@@ -118,21 +122,23 @@
   });
 
   // The owner's archive steps name the series' channel, and only the owner's
-  // own list carries channel names. Fetched when the steps are on screen
-  // (the empty state, or the "How to archive" disclosure opened); the steps
-  // read fine without it.
-  let howToOpen = $state(false);
-  let channel = $state<{ id: number; name: string | null } | null>(null);
+  // own list says what it is called, or that it is gone (deleted, or hidden
+  // from leaf): then the steps name none and a note above them says so.
+  // Asked again after a refresh, since a channel can go while leaf is open.
+  // Until it answers, and if it fails, the steps read fine without a name.
+  let channel = $state<({ id: number } & SeriesChannel) | null>(null);
   const channelName = $derived(channel?.id === series.id ? channel.name : null);
+  const channelGone = $derived(channel?.id === series.id && channel.gone);
   $effect(() => {
     const id = series.id;
-    if (!isOwner || revoked || (hasDays && !howToOpen)) return;
-    if (untrack(() => channel?.id) === id) return;
+    void gallery.epoch;
+    if (!isOwner || revoked) return;
     let cancelled = false;
     getApi()
       .listMySeries(getGuildId())
       .then((mine) => {
-        if (!cancelled) channel = { id, name: mine.find((s) => s.id === id)?.channel_name ?? null };
+        const own = mine.find((s) => s.id === id);
+        if (own && !cancelled) channel = { id, ...channelOf(own) };
       })
       .catch(() => {
         /* keep the generic wording */
@@ -252,7 +258,7 @@
   });
 </script>
 
-<div class="home" style="--accent:{accent}" bind:this={root}>
+<main class="home" style="--accent:{accent}" bind:this={root}>
   <header class="bar">
     {#if canGoBack}
       <IconButton
@@ -299,6 +305,20 @@
   {:else if sproutNote}
     <Callout title={sproutNote.title}>{sproutNote.body}</Callout>
   {/if}
+  {#if channelGone && !revoked}
+    <Callout title="This series’ channel is gone" tone="warning">
+      It was deleted or hidden from leaf, so nothing posted there can be archived.
+      {#snippet action()}
+        <Button
+          size="sm"
+          variant="secondary"
+          onclick={() => nav.push({ name: 'seriesSettings', seriesId: series.id })}
+        >
+          Choose another channel
+        </Button>
+      {/snippet}
+    </Callout>
+  {/if}
 
   {#if revoked}
     <!-- Nothing more to show: days and stats are not served for it. -->
@@ -306,7 +326,7 @@
     <section class="onboard" aria-labelledby="{uid}-start">
       {#if justCreated}<p class="eyebrow">Series created</p>{/if}
       <h2 id="{uid}-start">Archive your first post</h2>
-      <ArchiveSteps {platform} {channelName} />
+      <ArchiveSteps {platform} {channelName} {appName} />
       <div class="actions">
         <Button variant="primary" disabled={gallery.refreshing} onclick={() => void checkAgain()}>
           {gallery.refreshing ? 'Checking…' : 'Check again'}
@@ -346,7 +366,7 @@
         {/if}
         <p class="note" role="status">{note}</p>
       </div>
-      <aside class="side">
+      <div class="side">
         {#if !stats && statsError}
           <ErrorState
             title="Couldn’t load the stats"
@@ -357,13 +377,13 @@
           <StatsPanel {stats} lastPostedAt={newestPost} />
         {/if}
         {#if isOwner}
-          <details class="howto" ontoggle={(e) => (howToOpen = e.currentTarget.open)}>
+          <details class="howto">
             <summary>How to archive a post</summary>
-            <ArchiveSteps {platform} {channelName} />
+            <ArchiveSteps {platform} {channelName} {appName} />
           </details>
         {/if}
-      </aside>
-      <main class="main">
+      </div>
+      <div class="main">
         {#if index}
           {#if index.length > 0}
             <Calendar {index} {layout} {weekStart} timeZone={series.timezone} onOpenDay={openDay} />
@@ -379,10 +399,10 @@
         {:else}
           <Skeleton height="340px" radius="var(--radius-xl)" label="Loading the calendar" />
         {/if}
-      </main>
+      </div>
     </div>
   {/if}
-</div>
+</main>
 
 <style>
   .home {

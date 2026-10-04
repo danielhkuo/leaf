@@ -2,7 +2,8 @@
   // The one failure state for anything that did not load: what happened, what
   // to do about it, and the buttons that do it. `onRetry` re-runs the load in
   // place; `onBack` leaves the screen. `message` is a human sentence (see
-  // describeError) — never raw request or exception text.
+  // describeError) — never raw request or exception text. `page` is for a
+  // failure that is the whole screen: its title is then the page's heading.
   import Button from '../ui/Button.svelte';
   import Callout from './Callout.svelte';
 
@@ -13,6 +14,7 @@
     onBack?: (() => void) | undefined;
     retryLabel?: string;
     backLabel?: string;
+    page?: boolean;
   }
   let {
     title,
@@ -21,6 +23,7 @@
     onBack,
     retryLabel = 'Try again',
     backLabel = 'Back',
+    page = false,
   }: Props = $props();
 </script>
 
@@ -33,6 +36,7 @@
 
 <Callout
   {title}
+  heading={page}
   tone="error"
   children={message ? body : undefined}
   action={onRetry || onBack ? actions : undefined}

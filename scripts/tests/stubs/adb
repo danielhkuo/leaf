@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+#
+# Stand-in for adb, for scripts/tests/run. It answers the three questions the
+# dev scripts ask, from files the stand-in emulator leaves in STUB_STATE:
+#
+#   adb devices
+#   adb -s <serial> emu avd name
+#   adb -s <serial> shell getprop sys.boot_completed
+#
+# emulator-5552 is always listed first: another, already booted emulator whose
+# AVD is `other-avd`, so picking "the first emulator" instead of the one that
+# runs the wanted AVD shows up as a wrong answer. emulator-5554 is the
+# stand-in emulator, listed while it runs.
+#
+#   STUB_BOOT_AFTER  which sys.boot_completed question is the first to be
+#                    answered `1` (default 1), or `never`
+#   STUB_STATE       `adb.boot-polls` counts the questions asked of 5554
+
+set -u
+state=${STUB_STATE:?}
+
+if [ "${1:-}" = devices ]; then
+  echo "List of devices attached"
+  printf 'emulator-5552\tdevice\n'
+  [ -f "$state/emulator.running" ] && printf 'emulator-5554\tdevice\n'
+  echo
+  exit 0
+fi
+
+[ "${1:-}" = -s ] || exit 1
+serial=$2
+shift 2
+case "$*" in
+"emu avd name")
+  if [ "$serial" = emulator-5552 ]; then
+    printf 'other-avd\r\nOK\r\n'
+  elif [ -f "$state/emulator.running" ]; then
+    printf '%s\r\nOK\r\n' "$(cat "$state/emulator.running")"
+  else
+    exit 1
+  fi
+  ;;
+"shell getprop sys.boot_completed")
+  if [ "$serial" = emulator-5552 ]; then
+    printf '1\r\n'
+    exit 0
+  fi
+  asked=$(cat "$state/adb.boot-polls" 2>/dev/null || echo 0)
+  asked=$((asked + 1))
+  echo "$asked" >"$state/adb.boot-polls"
+  after=${STUB_BOOT_AFTER:-1}
+  if [ "$after" != never ] && [ "$asked" -ge "$after" ]; then
+    printf '1\r\n'
+  else
+    printf '\r\n'
+  fi
+  ;;
+*) exit 1 ;;
+esac

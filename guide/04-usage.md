@@ -8,7 +8,7 @@ roles (**admin**, **creator**, **viewer**) overlap freely; you can be all three.
 
 | Word | Meaning |
 | --- | --- |
-| **gallery** | leaf's app inside Discord, where series are browsed and managed. Discord's own word for this kind of app is "Activity"; in Discord's menus it is listed simply as **leaf**. |
+| **gallery** | leaf's app inside Discord, where series are browsed and managed. Discord's own word for this kind of app is "Activity"; Discord's menus list it under your bot's name. |
 | **series** | One person's ongoing, numbered archive: "Daily Sketch", Day 1, Day 2, and so on. A server can have many. |
 | **day** | One numbered entry of a series ("Day 42"). A day holds the files of one post. Day numbers count posts, not calendar dates. |
 | **post** | The Discord message a day was made from. leaf never edits or deletes it. |
@@ -17,6 +17,12 @@ roles (**admin**, **creator**, **viewer**) overlap freely; you can be all three.
 | **series channel** | A channel the server allows posts to be archived from (chosen in `/setup`). |
 | **sprout** | A new series that only its creator can see in the gallery until it has enough days. Admins see it in the admin panel and through the chat commands. |
 | **revoked**, **taken down** | A series an admin has hidden and frozen. Nothing is deleted. |
+
+Where this guide says to choose **leaf** in one of Discord's menus, look for
+your bot's name: the name Discord shows next to the bot's own messages. It is
+"leaf" only if that is what you named the bot in the Developer Portal
+([02-discord.md](02-discord.md)). leaf's own messages (the how-to, `/leaf`,
+reminders) take that name from Discord and use it, whatever it is.
 
 ## Opening the gallery
 
@@ -89,6 +95,15 @@ minutes, the form closes without saving.
 `/setup` can be run again at any time. It opens filled in with the saved
 values, so it is also how you change channels later.
 
+A saved channel that was deleted is never shown as `#unknown`: leaf counts it
+instead ("and 1 that leaf can no longer see"). The same goes for a channel
+Discord has stopped listing for the bot because leaf's role may not view it;
+leaf can't tell the two apart. The form takes such a channel off the list when
+you save and says so first; if it is only hidden from leaf, pick it again in
+the menu to keep it. When a series posts in a channel leaf can no longer see,
+the form names the series: its creator picks another channel in Series
+settings, in the gallery.
+
 ### After Save
 
 The form turns into a summary: the channels, who can start a series, the
@@ -97,9 +112,10 @@ timezone. Under it:
 - **Open gallery**.
 - **Post a how-to in #channel**: leaf posts one public message in the first
   series channel it can write in, telling members how to start a series and how
-  to archive a post, with an **Open gallery** button under it. It is the one
-  public explanation members get, so it is worth pressing. (Anyone can read the
-  same text privately with `/leaf`.)
+  to archive a post (the phone steps and the desktop steps, with the app under
+  the name Discord lists it by), with an **Open gallery** button under it. It
+  is the one public explanation members get, so it is worth pressing. (Anyone
+  can read the same text privately with `/leaf`.)
 - **Admin panel**: a link to the web panel for this server.
 
 The buttons work for about 10 minutes after the last press. To get them back,
@@ -218,9 +234,14 @@ The new series opens with the steps for archiving your first post.
 Archiving happens in chat, on the message itself:
 
 1. Post your photo or video in a series channel (or a thread under one).
-2. **On a phone**, press and hold the message, tap **Apps**, then **Archive to
-   Series**. **On desktop**, right-click it, choose **Apps**, then **Archive to
-   Series**.
+2. **On a phone**, press and hold the message. In the menu that opens, tap
+   **Apps** (scroll down in the menu to find it), then **leaf** in the list of
+   apps, then **Archive to Series**. **On desktop**, right-click the message,
+   choose **Apps**, then **Archive to Series**.
+
+   After your first archive, Discord's phone app also lists **Archive to
+   Series** under **Frequently Used Commands** at the top of **Apps**, so you
+   can tap it there and skip the list of apps.
 3. If leaf can't tell which of your series it is for, it asks: a button per
    series (a menu when you have more than five). It doesn't ask when you have
    one series, or when exactly one of yours uses that channel.
@@ -252,7 +273,7 @@ The result carries buttons, which work for about 14 minutes:
 
 | What you see | What to do |
 | --- | --- |
-| "leaf doesn't archive from this channel." | Post in one of the series channels it lists, or ask an admin to add this one with `/setup`. |
+| "leaf doesn't archive from this channel." | Post in one of the series channels it lists, or ask an admin to add this one with `/setup`. If it says the series channels are ones leaf can no longer see, they were deleted or hidden from leaf: an admin chooses new ones with `/setup`. |
 | "Day N … is already archived from another post." | **Use Day N+1** takes the next free day, **Pick another day** reopens the form, **Replace Day N** stores this post instead and deletes the other post's files. |
 | "This post is already Day N of …" | The message is archived already. **Archive as another day**, **Change day** (renumbers the entry, also days later), **Remove Day N**, or **Open gallery**. With more than one entry, only **Archive as another day** and **Open gallery** are offered. |
 | A question before a day far from the expected one | A day 7 or more past the next one, or before the series' first day, is more often a typo. **Yes, Day N** goes ahead; **Change day** reopens the form. |
@@ -290,8 +311,9 @@ In Series settings, **Remind me when I'm behind** sends a nudge when the next
 day isn't archived by the time you choose (8 PM in your device's timezone
 unless you change it):
 
-- You choose a **DM** or a **ping in the series channel**. The ping is a
-  public message that mentions you. It names the series only when everyone in
+- You choose a **DM** or a **ping in the series channel**. Either one says
+  which day is missing and repeats the steps for archiving a post. The ping is
+  a public message that mentions you. It names the series only when everyone in
   the server can see it; for a private, role-limited or sprout series it says
   "your series". A DM that can't be delivered is never replaced by a ping.
 - One nudge per missing day, sent within 6 hours of the chosen time and
@@ -302,6 +324,9 @@ unless you change it):
   send it. Weekdays series aren't nudged on Saturday or Sunday. Freeform
   series have no reminders, and nothing is sent for a series before its first
   archived day.
+- A DM names the series channel and links to it. When that channel was
+  deleted or hidden from leaf, the DM says so instead and points at Series
+  settings, where you pick another.
 - If a reminder can't be delivered (your DMs are closed to the server, the
   series channel is gone, or leaf isn't allowed to post there), leaf doesn't
   keep trying for that day. Series settings then shows "leaf couldn't deliver
@@ -326,12 +351,12 @@ can't see is never suggested or named.
 | `/gallery [series]` | anyone | Opens the gallery, on the named series if you give one ([above](#opening-the-gallery)). |
 | `/leaf` | anyone | A private how-to for this server: starting a series, archiving a post, the gallery, with an **Open gallery** button. Before `/setup` has been run it says so instead. |
 | `/setup` | Manage Server | The server settings form ([above](#first-setup)). |
-| **Archive to Series** (on a message: Apps) | creators | Archives the message as a day of your series ([above](#archive-a-post)). |
+| **Archive to Series** (on a message: Apps; on a phone, Apps then **leaf**) | creators | Archives the message as a day of your series ([above](#archive-a-post)). |
 | `/search day:<number> [series]` | anyone who can see the series | One day: its picture, caption, date and a link to the post. |
 | `/status [series]` | anyone who can see the series | A private summary: how many days are archived, the latest post, which day numbers are missing, and which days have no stored media. |
 | `/random [series]` | anyone who can see the series | A random day, one with a picture when the series has any. |
 | `/delete day:<number> [series]` | the series' creator, or an admin | Shows the day and asks before deleting it and its stored files. |
-| **Remove Archive Entry** (on a message: Apps) | the series' creator, an admin, or the person who posted the message | The same delete, starting from the message. |
+| **Remove Archive Entry** (on a message: Apps; on a phone, Apps then **leaf**) | the series' creator, an admin, or the person who posted the message | The same delete, starting from the message. |
 | `/export [series]` | Manage Server | The series' day index as a JSON file ([above](#export-and-import)). |
 | `/import file:<json> [series]` | Manage Server | Imports day numbers and dates, without media ([above](#export-and-import)). |
 | `/wrapped [series] [year]` | anyone who can see the series | A year in review: posts, longest run, busiest month, first and last post. |

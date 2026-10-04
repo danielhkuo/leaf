@@ -1,8 +1,9 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/svelte';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { Session } from '../lib/sdk/handshake';
 import { nav } from '../lib/stores/nav.svelte';
+import { FULL_SIZE, resizeTo, TILE_SIZE } from '../lib/test/viewport';
 import type { LaunchIntent, Series } from '../lib/types/api';
 import Gallery from './Gallery.svelte';
 
@@ -19,6 +20,7 @@ const mocks = vi.hoisted(() => ({
   },
   initGallery: vi.fn(),
   lastSeries: vi.fn(),
+  peekThumb: vi.fn(),
   refreshAll: vi.fn(),
   rememberSeries: vi.fn(),
   takeLaunchIntent: vi.fn(),
@@ -29,14 +31,21 @@ const mocks = vi.hoisted(() => ({
   picker: vi.fn(),
 }));
 
-vi.mock('../lib/stores/gallery.svelte', () => ({
-  gallery: mocks.gallery,
-  initGallery: mocks.initGallery,
-  lastSeries: mocks.lastSeries,
-  refreshAll: mocks.refreshAll,
-  rememberSeries: mocks.rememberSeries,
-  takeLaunchIntent: mocks.takeLaunchIntent,
-}));
+vi.mock('../lib/stores/gallery.svelte', async () => {
+  // Reactive, as the real store's state is: the shell has to notice a
+  // session that ends while it is on screen.
+  const { reactive } = await import('../lib/test/reactive.svelte');
+  mocks.gallery = reactive(mocks.gallery);
+  return {
+    gallery: mocks.gallery,
+    initGallery: mocks.initGallery,
+    lastSeries: mocks.lastSeries,
+    peekThumb: mocks.peekThumb,
+    refreshAll: mocks.refreshAll,
+    rememberSeries: mocks.rememberSeries,
+    takeLaunchIntent: mocks.takeLaunchIntent,
+  };
+});
 vi.mock('../lib/sdk/actions', () => ({
   closeActivity: mocks.closeActivity,
   onForeground: mocks.onForeground,
@@ -70,6 +79,7 @@ function session(extra: Partial<Session> = {}): Session {
     guildId: 'g1',
     channelId: null,
     platform: 'mobile',
+    appName: 'leaf',
     customId: null,
     token: 't',
     expiresAt: Date.now() + 3_600_000,
@@ -82,7 +92,9 @@ function session(extra: Partial<Session> = {}): Session {
  * browser reflects to the attribute and jsdom does not.
  */
 function homeInert(container: HTMLElement): boolean {
-  const layer = container.querySelector('div') as (HTMLElement & { inert?: boolean }) | null;
+  const layer = container.querySelector('.screens > div') as
+    | (HTMLElement & { inert?: boolean })
+    | null;
   return layer?.inert === true;
 }
 
@@ -105,6 +117,7 @@ beforeEach(() => {
   for (const fn of [
     mocks.initGallery,
     mocks.lastSeries,
+    mocks.peekThumb,
     mocks.refreshAll,
     mocks.rememberSeries,
     mocks.takeLaunchIntent,
@@ -118,6 +131,7 @@ beforeEach(() => {
   }
   mocks.initGallery.mockResolvedValue(undefined);
   mocks.lastSeries.mockReturnValue(null);
+  mocks.peekThumb.mockReturnValue(null);
   mocks.refreshAll.mockResolvedValue(true);
   mocks.takeLaunchIntent.mockResolvedValue(null);
   mocks.closeActivity.mockResolvedValue(true);
@@ -133,11 +147,21 @@ describe('Gallery', () => {
     expect(lastProps<{ day: number }>(mocks.viewer).day).toBe(4);
     expect(homeInert(container)).toBe(true);
     expect(mocks.rememberSeries).toHaveBeenCalledWith(1);
+    // The viewer words "Open original post" for the client it is in.
+    expect(lastProps<{ platform: string }>(mocks.viewer).platform).toBe('mobile');
 
     nav.back();
     expect(nav.current).toEqual({ name: 'home', seriesId: 1 });
     nav.back();
     expect(nav.current).toEqual({ name: 'picker' });
+  });
+
+  it('tells the viewer when the client is a desktop one', async () => {
+    mocks.takeLaunchIntent.mockResolvedValue({ seriesId: 1, day: 4 });
+    render(Gallery, { props: { session: session({ platform: 'desktop' }) } });
+
+    await waitFor(() => expect(nav.current).toEqual({ name: 'viewer', seriesId: 1, day: 4 }));
+    expect(lastProps<{ platform: string }>(mocks.viewer).platform).toBe('desktop');
   });
 
   it('lifts inert when the viewer closes', async () => {
@@ -318,6 +342,213 @@ describe('Gallery', () => {
     expect(mocks.closeActivity).toHaveBeenCalled();
     // One attempt and one retry: nothing loops on a failed import.
     expect(logged).toHaveBeenCalledTimes(2);
+    logged.mockRestore();
+  });
+});
+
+// Discord for Android does not bring a running Activity forward, so "Open
+// gallery" pressed in chat while leaf is a tile reaches leaf only if leaf
+// asks. It asks on a timer, and nothing else in leaf polls: these hold the
+// timer to running while the tile is up and the session is good, and not
+// otherwise.
+describe('Gallery, minimised to a tile', () => {
+  /** How often the tile asks (TILE_INTENT_EVERY_MS in Gallery.svelte). */
+  const EVERY_MS = 4_000;
+  const PHONE = { width: 375, height: 667 };
+
+  afterEach(() => {
+    vi.useRealTimers();
+    resizeTo(FULL_SIZE);
+  });
+
+  const pass = (ms: number): Promise<unknown> => vi.advanceTimersByTimeAsync(ms);
+  const asks = (): number => mocks.takeLaunchIntent.mock.calls.length;
+
+  /**
+   * The gallery on its first view, with what the boot asked for forgotten.
+   * The clock is the test's from before the mount, so a timer started at
+   * any point is one it can see and run.
+   */
+  async function open(): Promise<HTMLElement> {
+    vi.useFakeTimers();
+    const { container } = render(Gallery, { props: { session: session() } });
+    await pass(0);
+    expect(mocks.picker).toHaveBeenCalled();
+    mocks.takeLaunchIntent.mockClear();
+    return container;
+  }
+
+  /** The card's words, top to bottom, and its picture. */
+  function card(container: HTMLElement): { words: string[]; picture: string | null } {
+    const tile = container.querySelector('main.tile');
+    return {
+      words: [...(tile?.querySelectorAll('h1, p') ?? [])].map((el) => el.textContent ?? ''),
+      picture: tile?.querySelector('img')?.getAttribute('src') ?? null,
+    };
+  }
+
+  it('asks nothing at full size, however long it is open', async () => {
+    await open();
+    await pass(10 * 60_000);
+    expect(asks()).toBe(0);
+    // A phone with its keyboard up, or on its side: still not a tile.
+    resizeTo({ width: 375, height: 300 });
+    await pass(60_000);
+    expect(asks()).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('asks every few seconds while it is a tile, and stops when leaf is opened again', async () => {
+    await open();
+    resizeTo(TILE_SIZE);
+    await pass(EVERY_MS - 1);
+    expect(asks()).toBe(0);
+    await pass(1);
+    expect(asks()).toBe(1);
+    await pass(2 * EVERY_MS);
+    expect(asks()).toBe(3);
+
+    resizeTo(PHONE);
+    await pass(10 * EVERY_MS);
+    expect(asks()).toBe(3);
+    expect(vi.getTimerCount()).toBe(0);
+
+    // Minimised again, it starts again.
+    resizeTo(TILE_SIZE);
+    await pass(EVERY_MS);
+    expect(asks()).toBe(4);
+  });
+
+  it('stops asking when the session ends, and does not start without one', async () => {
+    const container = await open();
+    resizeTo(TILE_SIZE);
+    await pass(EVERY_MS);
+    expect(asks()).toBe(1);
+
+    mocks.gallery.status = 'expired';
+    await pass(10 * EVERY_MS);
+    expect(asks()).toBe(1);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(card(container).words).toEqual(['leaf', 'Session ended']);
+
+    // Opened and minimised again: there is still no session to ask with.
+    resizeTo(PHONE);
+    resizeTo(TILE_SIZE);
+    await pass(10 * EVERY_MS);
+    expect(asks()).toBe(1);
+  });
+
+  it('does not ask while the gallery has not loaded', async () => {
+    mocks.gallery.status = 'error';
+    vi.useFakeTimers();
+    render(Gallery, { props: { session: session() } });
+    await pass(0);
+    expect(screen.getByText('Couldn’t load the gallery')).toBeInTheDocument();
+
+    resizeTo(TILE_SIZE);
+    await pass(10 * EVERY_MS);
+    expect(asks()).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('leaves the first view’s own ask alone while leaf is still opening', async () => {
+    let answer: (intent: LaunchIntent | null) => void = () => undefined;
+    mocks.takeLaunchIntent.mockReturnValueOnce(new Promise((r) => (answer = r)));
+    resizeTo(TILE_SIZE);
+    vi.useFakeTimers();
+    const { container } = render(Gallery, { props: { session: session() } });
+    await pass(10 * EVERY_MS);
+    // The one ask is the boot's, and the card says what leaf is doing.
+    expect(asks()).toBe(1);
+    expect(card(container).words).toEqual(['leaf', 'Opening…']);
+
+    // Opened where the launch asked: that is not a press waiting for a tap.
+    answer({ seriesId: 2, day: 7 });
+    await pass(0);
+    expect(card(container).words).toEqual(['S2', 'Day 7']);
+    await pass(EVERY_MS);
+    expect(asks()).toBe(2);
+  });
+
+  it('does not ask again while an answer is still on its way', async () => {
+    await open();
+    let answer: (intent: LaunchIntent | null) => void = () => undefined;
+    mocks.takeLaunchIntent.mockReturnValueOnce(new Promise((r) => (answer = r)));
+    resizeTo(TILE_SIZE);
+    await pass(5 * EVERY_MS);
+    expect(asks()).toBe(1);
+
+    answer(null);
+    await pass(EVERY_MS);
+    expect(asks()).toBe(2);
+  });
+
+  it('opens what was pressed behind the card, and the card says to tap', async () => {
+    const container = await open();
+    resizeTo(TILE_SIZE);
+    await pass(0);
+    // On the list there is nothing to name, and nothing waiting.
+    expect(card(container)).toEqual({ words: ['leaf'], picture: null });
+
+    mocks.peekThumb.mockImplementation((id: number, day: number | null) => `thumb-${id}-${day}`);
+    mocks.takeLaunchIntent.mockResolvedValueOnce({ seriesId: 2, day: 7 });
+    await pass(EVERY_MS);
+    expect(nav.current).toEqual({ name: 'viewer', seriesId: 2, day: 7 });
+    expect(card(container)).toEqual({
+      words: ['S2', 'Day 7', 'Tap to open'],
+      picture: 'thumb-2-7',
+    });
+    // Nothing on the card to press: the tap is Discord's.
+    expect(container.querySelector('main.tile :is(button, a, [tabindex])')).toBeNull();
+
+    // A second press, on a series this time, replaces the first.
+    mocks.takeLaunchIntent.mockResolvedValueOnce({ seriesId: 1, day: null });
+    await pass(EVERY_MS);
+    expect(nav.current).toEqual({ name: 'home', seriesId: 1 });
+    expect(card(container).words).toEqual(['S1', 'Day 10', 'Tap to open']);
+
+    // Tapped: leaf is open on it. Minimised again, the same screen is not waiting.
+    resizeTo(PHONE);
+    await pass(0);
+    expect(container.querySelector('main.tile')).toBeNull();
+    resizeTo(TILE_SIZE);
+    await pass(0);
+    expect(card(container).words).toEqual(['S1', 'Day 10']);
+  });
+
+  it('says nothing of a press that opened nothing', async () => {
+    const container = await open();
+    nav.push({ name: 'home', seriesId: 1 });
+    resizeTo(TILE_SIZE);
+    // A series this person cannot see, before and after a refresh.
+    mocks.takeLaunchIntent.mockResolvedValueOnce({ seriesId: 99, day: 1 });
+    await pass(EVERY_MS);
+
+    expect(mocks.refreshAll).toHaveBeenCalledWith();
+    expect(nav.current).toEqual({ name: 'home', seriesId: 1 });
+    expect(card(container).words).toEqual(['S1', 'Day 10']);
+  });
+
+  it('still asks after a press it failed to follow', async () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const container = await open();
+    nav.push({ name: 'home', seriesId: 1 });
+    resizeTo(TILE_SIZE);
+    // A series the list on screen lacks, and the refresh to find it throws.
+    const thrown = new Error('the refresh threw');
+    mocks.takeLaunchIntent.mockResolvedValueOnce({ seriesId: 99, day: 1 });
+    mocks.refreshAll.mockRejectedValueOnce(thrown);
+    await pass(EVERY_MS);
+    expect(asks()).toBe(1);
+    // That press is lost, and said so in the log: nothing is waiting.
+    expect(logged).toHaveBeenCalledWith('leaf: following a press in chat failed', thrown);
+    expect(card(container).words).toEqual(['S1', 'Day 10']);
+
+    // The next one is asked for, and followed.
+    mocks.takeLaunchIntent.mockResolvedValueOnce({ seriesId: 2, day: 7 });
+    await pass(EVERY_MS);
+    expect(asks()).toBe(2);
+    expect(card(container).words).toEqual(['S2', 'Day 7', 'Tap to open']);
     logged.mockRestore();
   });
 });

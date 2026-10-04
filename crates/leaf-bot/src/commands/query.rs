@@ -22,7 +22,7 @@ use crate::commands::series_lookup::{
     open_gallery_button, rerun_hint, scoped_id, select_one, settle, taken_down_text,
 };
 use crate::components::{self, FlightKey, INFLIGHT};
-use crate::{Context, Data, Error, checks};
+use crate::{Context, Data, Error, checks, menus};
 
 /// Longest caption a day card shows; the full text is one tap away.
 const CAPTION_MAX_CHARS: usize = 500;
@@ -43,9 +43,6 @@ const FALLBACK_REACTION: &str = "🍃";
 /// The warning leaf used to put on a post archived twice.
 const LEGACY_WARNING_REACTION: &str = "⚠";
 
-/// How to archive, for a creator whose series is still empty.
-const ARCHIVE_HINT: &str = "To archive a post, long-press it (right-click on desktop), then \
-     Apps, then Archive to Series.";
 /// Remove Archive Entry on a message nothing was archived from.
 const NOT_ARCHIVED: &str = "🍂 That message isn't archived in any series.";
 /// Remove Archive Entry by someone who may not remove that entry.
@@ -105,7 +102,8 @@ pub async fn random(
     if let Some(day) = picked {
         show_day(&mut begun.via, &begun.asker, &begun.series, day).await
     } else {
-        let text = empty_series_text(&begun.series, &begun.asker);
+        let app = begun.via.data().app_name();
+        let text = empty_series_text(&begun.series, &begun.asker, &app);
         begun.via.send(Answer::private(text)).await?;
         Ok(())
     }
@@ -126,7 +124,7 @@ pub async fn status(
     let posts = &begun.via.data().posts;
     let days = posts.all_days(series.id).await?;
     if days.is_empty() {
-        let text = empty_series_text(series, &begun.asker);
+        let text = empty_series_text(series, &begun.asker, &begun.via.data().app_name());
         begun.via.send(Answer::private(text)).await?;
         return Ok(());
     }
@@ -312,8 +310,8 @@ async fn show_day(
     let data = via.data();
     let Some((post, media)) = data.posts.get(series.id, day).await? else {
         let near = data.posts.neighbor_days(series.id, day).await?;
-        via.send(Answer::private(day_miss_text(series, day, near, asker)))
-            .await?;
+        let text = day_miss_text(series, day, near, asker, &data.app_name());
+        via.send(Answer::private(text)).await?;
         return Ok(());
     };
     let private = private_series(series);
@@ -512,27 +510,33 @@ fn ends_in_spoiler(text: &str) -> bool {
 }
 
 /// The reply for a day that is not archived: the nearest days that are.
+/// `app` is for a series with none at all (see [`empty_series_text`]).
 fn day_miss_text(
     series: &Series,
     day: i64,
     (previous, next): (Option<i64>, Option<i64>),
     asker: &Asker,
+    app: &str,
 ) -> String {
     let nearest = match (previous, next) {
         (Some(p), Some(n)) => format!("The nearest archived days are Day {p} and Day {n}."),
         (Some(p), None) => format!("The latest archived day is Day {p}."),
         (None, Some(n)) => format!("The first archived day is Day {n}."),
-        (None, None) => return empty_series_text(series, asker),
+        (None, None) => return empty_series_text(series, asker, app),
     };
     format!("🍂 {} has no Day {day}. {nearest}", bold(&series.name))
 }
 
 /// The reply for a series with nothing archived. Its creator also learns
-/// how to archive; anyone else just learns it is empty.
-pub(crate) fn empty_series_text(series: &Series, asker: &Asker) -> String {
+/// how to archive (`app` is the name Discord lists leaf's app under, for
+/// those steps); anyone else just learns it is empty.
+pub(crate) fn empty_series_text(series: &Series, asker: &Asker, app: &str) -> String {
     let name = bold(&series.name);
     if asker.owns(series) {
-        format!("🌱 {name} has nothing archived yet. {ARCHIVE_HINT}")
+        format!(
+            "🌱 {name} has nothing archived yet. To archive a post: {}.",
+            menus::archive_steps(app)
+        )
     } else {
         format!("🌱 {name} has nothing archived yet.")
     }
@@ -740,7 +744,7 @@ async fn confirm_delete(via: &mut Via<'_>, request: &DeleteRequest<'_>) -> Resul
     let Some((post, media)) = data.posts.get(series.id, day).await? else {
         let text = if named {
             let near = data.posts.neighbor_days(series.id, day).await?;
-            day_miss_text(series, day, near, request.asker)
+            day_miss_text(series, day, near, request.asker, &data.app_name())
         } else {
             // Found through its message a moment ago, so it was just
             // deleted; the days around it are not theirs to learn.
@@ -915,13 +919,7 @@ async fn try_delete(
     data.media.delete_keys(&freed).await;
     let (removed, kept) = freed_files(&media, &freed);
     let line = removed_log_line(&series, day, app.interaction.user.id);
-    let note = log_quiet(
-        &app.serenity_context.http,
-        request.settings,
-        asker.is_admin,
-        &line,
-    )
-    .await;
+    let note = log_quiet(app, request.settings, asker.is_admin, &line).await;
     Ok(Outcome::Deleted {
         series: Box::new(series),
         removed,
@@ -1165,12 +1163,13 @@ fn removed_log_line(series: &Series, day: i64, actor: serenity::UserId) -> Strin
 /// [`components::log_line`]). Returns a note for an admin when the write
 /// failed.
 async fn log_quiet(
-    http: &serenity::Http,
+    app: App<'_>,
     settings: &GuildSettings,
     is_admin: bool,
     line: &str,
 ) -> Option<String> {
-    components::log_line(http, settings, line)
+    let setup = checks::setup_mention(app.data);
+    components::log_line(&app.serenity_context.http, settings, line, &setup)
         .await
         .filter(|_| is_admin)
 }
@@ -1187,6 +1186,9 @@ mod tests {
     use leaf_core::domain::{Cadence, DetectionMode};
 
     use super::*;
+
+    /// What Discord lists the app as in these tests: not "leaf".
+    const APP: &str = "leaf-dev";
 
     fn series(name: &str, creator: &str) -> Series {
         Series {
@@ -1317,28 +1319,41 @@ mod tests {
         let s = series("Daily *art*", "creator");
         let viewer = asker("viewer", false);
         assert_eq!(
-            day_miss_text(&s, 42, (Some(41), Some(45)), &viewer),
+            day_miss_text(&s, 42, (Some(41), Some(45)), &viewer, APP),
             r"🍂 **Daily \*art\*** has no Day 42. The nearest archived days are Day 41 and Day 45."
         );
         assert!(
-            day_miss_text(&s, 99, (Some(30), None), &viewer)
+            day_miss_text(&s, 99, (Some(30), None), &viewer, APP)
                 .ends_with("latest archived day is Day 30.")
         );
         assert!(
-            day_miss_text(&s, 1, (None, Some(5)), &viewer)
+            day_miss_text(&s, 1, (None, Some(5)), &viewer, APP)
                 .ends_with("first archived day is Day 5.")
         );
         assert_eq!(
-            day_miss_text(&s, 1, (None, None), &viewer),
-            empty_series_text(&s, &viewer)
+            day_miss_text(&s, 1, (None, None), &viewer, APP),
+            empty_series_text(&s, &viewer, APP)
         );
     }
 
     #[test]
     fn only_the_creator_is_taught_to_archive_into_an_empty_series() {
         let s = series("A", "creator");
-        assert!(empty_series_text(&s, &asker("creator", false)).contains("Archive to Series"));
-        assert!(!empty_series_text(&s, &asker("someone", false)).contains("Archive to Series"));
+        assert_eq!(
+            empty_series_text(&s, &asker("creator", false), APP),
+            "🌱 **A** has nothing archived yet. To archive a post: on a phone, press and hold \
+             the post, tap **Apps** (scroll down to find it), **leaf-dev**, then **Archive to \
+             Series**. On desktop: right-click it, **Apps**, **Archive to Series**."
+        );
+        assert_eq!(
+            empty_series_text(&s, &asker("someone", false), APP),
+            "🌱 **A** has nothing archived yet."
+        );
+        // A day that is missing from an empty series gets the same answer.
+        assert_eq!(
+            day_miss_text(&s, 3, (None, None), &asker("creator", false), APP),
+            empty_series_text(&s, &asker("creator", false), APP)
+        );
     }
 
     #[test]

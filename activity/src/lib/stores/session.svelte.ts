@@ -44,6 +44,14 @@ export function bootStatusText(step: BootProgress, slow: boolean): string {
   return step === 'authorize' ? 'Waiting for your OK in Discord…' : 'Still signing you in…';
 }
 
+/**
+ * The word or two under the leaf while Discord has leaf shrunk to a tile
+ * (Minimisable.svelte) and the boot is still running, or has stopped.
+ */
+export function bootTileText(status: 'loading' | 'error'): string {
+  return status === 'loading' ? 'Opening…' : 'Didn’t open';
+}
+
 type SdkModule = typeof Discord;
 
 let sdkModule: Promise<SdkModule> | null = null;
