@@ -160,20 +160,44 @@ test('a video is asked for by byte range and answered with the part asked for', 
   const viewer = app.getByRole('dialog');
   await expect(viewer).toHaveAccessibleName(`Day ${day}, Daily Sketch`);
 
-  // iOS will not play a source that cannot answer a range request, so the
-  // first thing any player sends is one.
+  // iOS will not play a source that cannot answer a range request. Players
+  // differ in how they start: Chromium and WebKit on macOS open with a
+  // range, WebKit on Linux asks for the whole file. Either way the answer
+  // has to say that ranges are served.
   const response = await firstPart;
-  const range = /^bytes=(\d+)-(\d*)$/.exec(response.request().headers().range ?? '');
-  expect(range, 'the request’s Range header').not.toBeNull();
-  const first = Number(range?.[1]);
-  const last = range?.[2] ? Number(range[2]) : clip.bytes - 1;
-  expect(response.status()).toBe(206);
-  expect(response.headers()).toMatchObject({
-    'content-range': `bytes ${first}-${last}/${clip.bytes}`,
-    'content-length': String(last - first + 1),
+  const asked = response.request().headers().range;
+  if (asked === undefined) {
+    expect(response.status()).toBe(200);
+    expect(response.headers()).toMatchObject({
+      'content-length': String(clip.bytes),
+      'accept-ranges': 'bytes',
+      'content-type': clip.type,
+    });
+  } else {
+    const range = /^bytes=(\d+)-(\d*)$/.exec(asked);
+    expect(range, `the request’s Range header, ${asked}`).not.toBeNull();
+    const first = Number(range?.[1]);
+    const last = range?.[2] ? Number(range[2]) : clip.bytes - 1;
+    expect(response.status()).toBe(206);
+    expect(response.headers()).toMatchObject({
+      'content-range': `bytes ${first}-${last}/${clip.bytes}`,
+      'content-length': String(last - first + 1),
+      'accept-ranges': 'bytes',
+      'content-type': clip.type,
+    });
+  }
+
+  // And a part asked for outright comes back as that part, whatever the
+  // player in this engine chose to do.
+  const part = await page.request.get(response.url(), { headers: { Range: 'bytes=1000-1999' } });
+  expect(part.status()).toBe(206);
+  expect(part.headers()).toMatchObject({
+    'content-range': `bytes 1000-1999/${clip.bytes}`,
+    'content-length': '1000',
     'accept-ranges': 'bytes',
     'content-type': clip.type,
   });
+  expect((await part.body()).byteLength).toBe(1000);
 
   // The parts add up to something the player can read: it knows the clip's
   // size and length, which are in the file and nowhere else.
