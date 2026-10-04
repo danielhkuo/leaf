@@ -15,12 +15,12 @@ import {
 } from '../support/app';
 import { cell } from '../support/screens';
 
-/** The seed's clips, by the engine that is sure to play each (see the server's fixtures). */
+/** The seed's clips (see the server's fixtures). */
 const CLIPS = {
-  // Not every build of Playwright's Chromium decodes H.264; all of them play VP9.
-  chromium: { day: 'webm_day', type: 'video/webm', bytes: 123_460 },
   // What an iPhone plays.
-  webkit: { day: 'mp4_day', type: 'video/mp4', bytes: 155_042 },
+  mp4: { day: 'mp4_day', type: 'video/mp4', bytes: 155_042 },
+  // Not every build of Playwright's browsers decodes H.264; all of them play VP9.
+  webm: { day: 'webm_day', type: 'video/webm', bytes: 123_460 },
 } as const;
 
 /** The gallery on Daily Sketch, as a member who opened leaf in its channel. */
@@ -141,11 +141,14 @@ test('a video is asked for by byte range and answered with the part asked for', 
   leaf,
   guard,
   page,
-  browserName,
 }) => {
-  if (browserName !== 'chromium' && browserName !== 'webkit')
-    throw new Error('no clip for this engine');
-  const clip = CLIPS[browserName];
+  // The engine says which clip it can decode: H.264 where it has it (WebKit
+  // on macOS, as on an iPhone), VP9 elsewhere (Playwright's Chromium, and
+  // WebKit on Linux when its codecs lack H.264).
+  const h264 = await page.evaluate(
+    () => document.createElement('video').canPlayType('video/mp4; codecs="avc1.42E01E"') !== '',
+  );
+  const clip = h264 ? CLIPS.mp4 : CLIPS.webm;
   const day = leaf.seed.long_series[clip.day];
   // A player stops a download it has enough of, and again when the viewer closes.
   guard.allow(/^request failed: GET \S+\/api\/media\/\d+\?\S+ \((net::ERR_ABORTED|cancelled)\)$/);
@@ -154,7 +157,11 @@ test('a video is asked for by byte range and answered with the part asked for', 
   const { activity: app } = await openDailySketch(discord, leaf);
 
   const [file = ''] = (await listed(leaf, day)).files;
-  const firstPart = page.waitForResponse((response) => isOriginal(response, file));
+  // The first answer with a status: WebKit on Linux drops its opening
+  // request and asks again, and the dropped one is reported with status 0.
+  const firstPart = page.waitForResponse(
+    (response) => isOriginal(response, file) && response.status() !== 0,
+  );
   await app.getByLabel('Go to day number').fill(String(day));
   await app.getByRole('button', { name: 'Go', exact: true }).click();
   const viewer = app.getByRole('dialog');
